@@ -164,7 +164,11 @@ static void *map_region(uint64_t va, uint64_t size, const char *what)
 
 int bfm_port_init(void)
 {
-    if (g_bfm_linux_pci_bdf == NULL || vfio_open_device(g_bfm_linux_pci_bdf) != 0) {
+    if (g_bfm_linux_pci_bdf == NULL) {
+        bfm_port_log("port: g_bfm_linux_pci_bdf が NULL(PCI の BDF を入れること)\n");
+        return -1;
+    }
+    if (vfio_open_device(g_bfm_linux_pci_bdf) != 0) {
         bfm_port_fini();
         return -1;
     }
@@ -264,6 +268,15 @@ void bfm_port_bar0_unmap(void)
     s_nseg = 0;
 }
 
+/* UC で張った区間を表に足す(表が一杯なら足さない。その区間は WC に張り替えられなくなるだけ)。 */
+static void seg_add(uint64_t off, uint64_t len)
+{
+    if (s_nseg >= SEG_MAX) return;
+    s_seg[s_nseg].off = off;
+    s_seg[s_nseg].len = len;
+    s_nseg++;
+}
+
 /*=================================================================
  * BAR0 の [off, off+len) を同じ仮想アドレスのまま write-combining に張り替える。
  * そのページを含む mmap の前と後を張り直して、元の mmap をそのページだけに縮め、
@@ -285,10 +298,15 @@ volatile uint8_t *bfm_port_bar0_wc(uint64_t off, uint64_t len)
     const uint64_t s0 = s_seg[k].off, s1 = s_seg[k].off + s_seg[k].len;
     if (off > s0 && bar_map_uc(s_bar0 + s0, s0, off - s0, 1) != (void *)(s_bar0 + s0)) return NULL;
     if (off + len < s1 && bar_map_uc(va + len, off + len, s1 - off - len, 1) != (void *)(va + len)) return NULL;
+    /* ここまでで前後は別の mmap になった。表もそのとおりに分ける
+     * (前後の張り直しに失敗したときは、全部 UC のままなので表は変えない)。 */
     s_seg[k] = s_seg[--s_nseg];
     if (off > s0) { s_seg[s_nseg].off = s0; s_seg[s_nseg].len = off - s0; s_nseg++; }
     if (off + len < s1) { s_seg[s_nseg].off = off + len; s_seg[s_nseg].len = s1 - off - len; s_nseg++; }
-    if (munmap(va, len) != 0) return NULL;
+    if (munmap(va, len) != 0) {
+        seg_add(off, len);                                   /* 外せなかった = UC のまま残っている */
+        return NULL;
+    }
     char path[128];
     snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/resource0_wc", g_bfm_linux_pci_bdf);
     const int fd = open(path, O_RDWR | O_SYNC);
@@ -299,7 +317,7 @@ volatile uint8_t *bfm_port_bar0_wc(uint64_t off, uint64_t len)
     }
     if (p == (void *)va) return va;
     bfm_port_log("port: %s が張れない (errno=%d)。UC に戻す\n", path, errno);
-    (void)bar_map_uc(va, off, len, 1);
+    if (bar_map_uc(va, off, len, 1) == (void *)va) seg_add(off, len);
     return NULL;
 }
 
@@ -307,9 +325,5 @@ void bfm_port_bar0_wc_release(uint64_t off, uint64_t len)
 {
     if (!s_bar0 || off + len > s_bar0_size) return;
     uint8_t *va = s_bar0 + off;
-    if (munmap(va, len) == 0 && bar_map_uc(va, off, len, 1) == (void *)va && s_nseg < SEG_MAX) {
-        s_seg[s_nseg].off = off;
-        s_seg[s_nseg].len = len;
-        s_nseg++;
-    }
+    if (munmap(va, len) == 0 && bar_map_uc(va, off, len, 1) == (void *)va) seg_add(off, len);
 }

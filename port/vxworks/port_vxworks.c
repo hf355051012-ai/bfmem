@@ -38,11 +38,19 @@ void bfm_port_log(const char *fmt, ...)
     va_end(ap);
 }
 
-/* 分解能は 1 tick(時間切れの判定にしか使わない)。 */
+/* 分解能は 1 tick(時間切れの判定にしか使わない)。
+ * tickGet() が 32bit の版では一周して 0 に戻る(1000Hz で約 50 日)ので、下位 32bit が
+ * 前より小さくなったら上位に 1 を足して 64bit に伸ばす(一周の間に 1 回以上呼ばれる前提。
+ * 呼ぶのは bfm_init() と同じタスクだけ)。 */
 uint64_t bfm_port_time_ns(void)
 {
+    static uint32_t s_last;
+    static uint64_t s_high;
+    const uint32_t now = (uint32_t)tickGet();
+    if (now < s_last) s_high += 1ull << 32;
+    s_last = now;
     const uint64_t hz = (uint64_t)sysClkRateGet();
-    return (uint64_t)tickGet() * (1000000000ull / (hz ? hz : 60u));
+    return (s_high + now) * (1000000000ull / (hz ? hz : 60u));
 }
 
 void bfm_port_delay_us(uint32_t us)
@@ -120,20 +128,27 @@ void bfm_port_pci_write32(uint32_t off, uint32_t val)
 #endif
 }
 
+static uint64_t s_bar_size;   /* bfm_port_bar0_wc() の範囲の検査に使う */
+
 volatile uint8_t *bfm_port_bar0_map(uint64_t bar_phys, uint64_t bar_size)
 {
-    (void)bar_size;
+    s_bar_size = bar_size;
     return (volatile uint8_t *)(uintptr_t)bar_phys;     /* 論理 = 物理 */
 }
 
 void bfm_port_bar0_unmap(void)
 {
+    s_bar_size = 0;
 }
 
 volatile uint8_t *bfm_port_bar0_wc(uint64_t off, uint64_t len)
 {
-    (void)len;
     if (g_bfm_bar0_wc_va == 0) return NULL;
+    if (off > s_bar_size || len > s_bar_size - off) {
+        bfm_port_log("port: WC の範囲 0x%llx+0x%llx が BAR0 の外\n",
+                     (unsigned long long)off, (unsigned long long)len);
+        return NULL;
+    }
     return (volatile uint8_t *)(uintptr_t)(g_bfm_bar0_wc_va + off);
 }
 

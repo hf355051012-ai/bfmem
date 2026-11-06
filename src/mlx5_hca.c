@@ -262,9 +262,9 @@ static int create_mkey_pa(bfm_dev_t *d, uint8_t access, uint64_t start, uint64_t
 int mlx5_cq_create(bfm_dev_t *d, uint32_t uarn, volatile uint8_t *buf, uint32_t log_n,
                    volatile uint32_t *dbr, uint32_t *cqn)
 {
+    if (log_n > 10u) return BFM_E_PARAM;           /* 1024 個 x 64 バイト = 16 ページまで(in[] の PAS の数)*/
     const uint32_t nent = 1u << log_n;
     const uint32_t npages = (nent * 64u + BFM_PAGE - 1u) / BFM_PAGE;
-    if (npages > 16u) return BFM_E_PARAM;
     for (uint32_t i = 0; i < nent; i++) buf[i * 64u + 63u] = (uint8_t)(MLX5_CQE_INVALID << 4);
     dbr[0] = 0;
     dbr[1] = 0;
@@ -297,18 +297,25 @@ int mlx5_cq_create(bfm_dev_t *d, uint32_t uarn, volatile uint8_t *buf, uint32_t 
 static int port_set_mtu(bfm_dev_t *d, uint16_t ip_mtu)
 {
     uint8_t r[16] = {0};
-    uint16_t frame = (uint16_t)(ip_mtu + PORT_MTU_OVERHEAD);
+    uint32_t frame = (uint32_t)ip_mtu + PORT_MTU_OVERHEAD;
     r[1] = 1u;                                     /* local_port */
     if (access_reg(d, MLX5_REG_PMTU, 1, r, "ACCESS_REG(PMTU 読み)") != BFM_OK) return BFM_E_HW;
-    const uint16_t max = bfm_rd16be(&r[4]);
-    if (max != 0 && frame > max) {
+    uint32_t max = bfm_rd16be(&r[4]);
+    if (max == 0) max = 0xffffu;
+    if (frame > max) {
         BFM_LOG("bfm: g_bfm_port_mtu=%u がポートの上限(フレーム長 %u)を超えるので切り詰める\n", ip_mtu, max);
         frame = max;
     }
     memset(r, 0, sizeof(r));
     r[1] = 1u;
-    bfm_wr16be(&r[8], frame);                      /* admin_mtu */
+    bfm_wr16be(&r[8], (uint16_t)frame);            /* admin_mtu */
     return access_reg(d, MLX5_REG_PMTU, 0, r, "ACCESS_REG(PMTU 書き)");
+}
+
+/* フレーム長を IP の MTU に直す(オーバーヘッドより小さければ 0)。 */
+static unsigned frame_to_ip_mtu(uint16_t frame)
+{
+    return (frame > PORT_MTU_OVERHEAD) ? (unsigned)(frame - PORT_MTU_OVERHEAD) : 0u;
 }
 
 /* 今のポートの MTU(IP の MTU に直したもの)を表示する。 */
@@ -318,8 +325,8 @@ static void port_log_mtu(bfm_dev_t *d)
     r[1] = 1u;
     if (access_reg(d, MLX5_REG_PMTU, 1, r, "ACCESS_REG(PMTU 読み)") != BFM_OK) return;
     BFM_LOG("bfm: ポートの MTU: 設定 %u / 実際 %u(IP の MTU。上限 %u)\n",
-            bfm_rd16be(&r[8]) - PORT_MTU_OVERHEAD, bfm_rd16be(&r[12]) - PORT_MTU_OVERHEAD,
-            bfm_rd16be(&r[4]) - PORT_MTU_OVERHEAD);
+            frame_to_ip_mtu(bfm_rd16be(&r[8])), frame_to_ip_mtu(bfm_rd16be(&r[12])),
+            frame_to_ip_mtu(bfm_rd16be(&r[4])));
 }
 
 static int port_up(bfm_dev_t *d)
@@ -330,15 +337,21 @@ static int port_up(bfm_dev_t *d)
     r[4] = 0x80u;                                  /* ase */
     if (access_reg(d, MLX5_REG_PAOS, 0, r, "ACCESS_REG(PAOS 書き)") != BFM_OK) return BFM_E_HW;
     const uint64_t t0 = bfm_port_time_ns();
+    int read_ok = 0;
     for (;;) {
         memset(r, 0, sizeof(r));
         r[1] = 1u;
-        if (access_reg(d, MLX5_REG_PAOS, 1, r, "ACCESS_REG(PAOS 読み)") == BFM_OK && (r[3] & 0x0fu) == 1u) {
+        read_ok = (access_reg(d, MLX5_REG_PAOS, 1, r, "ACCESS_REG(PAOS 読み)") == BFM_OK);
+        if (read_ok && (r[3] & 0x0fu) == 1u) {
             d->link_up = 1;
             return BFM_OK;
         }
         if (bfm_port_time_ns() - t0 > (uint64_t)g_bfm_link_wait_ms * 1000000u) break;
         bfm_port_delay_us(10000u);
+    }
+    if (!read_ok) {
+        BFM_LOG("bfm: ポートの状態(PAOS)が読めない\n");
+        return BFM_E_HW;
     }
     BFM_LOG("bfm: 注意: リンクが %u ms で上がらない(このまま進む。上がれば EQ で分かる)\n",
             g_bfm_link_wait_ms);
@@ -477,15 +490,17 @@ int mlx5_hca_init(bfm_dev_t *d)
 void mlx5_hca_teardown(bfm_dev_t *d)
 {
     if (!d->hca_enabled) return;
-    for (uint16_t prof = 0; prof <= 1u; prof++) {
+    int done = 0;
+    for (uint16_t prof = 0; prof <= 1u && !done; prof++) {
         uint8_t in[16] = {0}, out[16];
         bfm_wr16be(&in[0], MLX5_CMD_TEARDOWN_HCA);
         bfm_wr16be(&in[10], prof);
         if (mlx5_cmd(d, in, sizeof(in), out, sizeof(out),
                      prof ? "TEARDOWN_HCA(force)" : "TEARDOWN_HCA(graceful)") == BFM_OK &&
             !(prof == 1u && (out[15] & 1u))) {
-            break;
+            done = 1;
         }
     }
+    if (!done) BFM_LOG("bfm: 注意: TEARDOWN_HCA が graceful / force とも通らなかった(次の立ち上げの FLR で戻す)\n");
     d->hca_enabled = 0;
 }

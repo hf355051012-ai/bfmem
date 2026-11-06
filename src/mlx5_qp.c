@@ -54,14 +54,18 @@ uint16_t mlx5_udp_sport(uint32_t lqpn, uint32_t rqpn)
  * ===============================================================*/
 int mlx5_qp_create(bfm_dev_t *d, bfm_qp_t *qp, uint8_t st, uint8_t cs_req)
 {
+    static uint8_t in[272 + 8 * 32];
+    if (qp->rq_log > 16u || qp->sq_log > 16u) return BFM_E_PARAM;
+    const uint32_t rq_bytes = 16u << qp->rq_log;
+    const uint32_t wq_bytes = rq_bytes + (MLX5_SEND_WQE_BB << qp->sq_log);
+    const uint32_t npages = (wq_bytes + BFM_PAGE - 1u) / BFM_PAGE;
+    if (npages > 32u) return BFM_E_PARAM;                    /* in[] に載る PAS は 32 ページまで */
+
     int rc = mlx5_cq_create(d, qp->uarn, qp->cq, qp->cq_log, qp->cq_dbr, &qp->cqn);
     if (rc != BFM_OK) return rc;
     qp->has_cq = 1;
     qp->cq_cc = 0;
 
-    const uint32_t rq_bytes = 16u << qp->rq_log;
-    const uint32_t wq_bytes = rq_bytes + (MLX5_SEND_WQE_BB << qp->sq_log);
-    const uint32_t npages = wq_bytes / BFM_PAGE;
     qp->sq = qp->wq + rq_bytes;
     memset((void *)(uintptr_t)qp->wq, 0, wq_bytes);
     qp->dbr[0] = 0;
@@ -69,8 +73,6 @@ int mlx5_qp_create(bfm_dev_t *d, bfm_qp_t *qp, uint8_t st, uint8_t cs_req)
     bfm_port_cache_flush(qp->wq, wq_bytes);
     bfm_port_cache_flush(qp->dbr, 8u);
 
-    static uint8_t in[272 + 8 * 32];
-    if (npages > 32u) return BFM_E_PARAM;
     memset(in, 0, sizeof(in));
     bfm_wr16be(&in[0], MLX5_CMD_CREATE_QP);
     uint8_t *qpc = &in[24];
@@ -189,8 +191,8 @@ int mlx5_qp_rtr2rts_rc(bfm_dev_t *d, bfm_qp_t *qp, struct bfm_conn *c)
     if (sra > sra_cap) sra = sra_cap;
     c->max_rd = (uint8_t)(1u << sra);
 
-    for (int attempt = 0; attempt < 2; attempt++) {
-        const uint8_t amode = attempt ? 0u : d->atomic_mode;
+    uint8_t amode = d->atomic_mode;
+    for (;;) {
         uint8_t in[QP_IN_SIZE], out[16];
         qp_in_header(in, MLX5_CMD_RTR2RTS_QP, qp->qpn,
                      OPT_RRE | OPT_RAE | OPT_RWE | OPT_PM_STATE | OPT_RNR_TIMEOUT);
@@ -205,13 +207,14 @@ int mlx5_qp_rtr2rts_rc(bfm_dev_t *d, bfm_qp_t *qp, struct bfm_conn *c)
         qpc[146] = (uint8_t)(0xc0u | (amode ? 0x20u : 0u));  /* rre | rwe | rae */
         const int rc = mlx5_cmd(d, in, sizeof(in), out, sizeof(out), "RTR2RTS_QP");
         if (rc == BFM_OK) {
-            if (attempt) BFM_LOG("bfm: 注意: atomic_mode=%u は断られた。相手からの atomic は受けない\n",
-                                 d->atomic_mode);
+            if (amode != d->atomic_mode)
+                BFM_LOG("bfm: 注意: atomic_mode=%u は断られた。相手からの atomic は受けない\n",
+                        d->atomic_mode);
             return BFM_OK;
         }
         if (amode == 0u) return rc;
+        amode = 0u;                                          /* atomic_mode を付けずにもう一度 */
     }
-    return BFM_E_HW;
 }
 
 /* QP と CQ を壊す(UAR は呼び出し側が返す)。 */

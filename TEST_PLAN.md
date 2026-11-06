@@ -264,3 +264,15 @@ mlx5_core に戻って netdev が出た。Precision の IP・経路・近隣表�
 
 FAA は Linux どうし(受け側 Precision)の 1,761ns と同じところまで縮んだ。掛け側の bfmem は CQ を回り続けるので
 眠らず、掛け側の遅延(段階 3)には効かない。終わった後、OptiPlex は mlx5_core に戻し、hugepage は 0 に戻した。
+
+## 不具合の修正の後の流し直し(2026-11-07)
+
+仕様書を書く途中で見つかった不具合(エラー完了の戻り値、`bfm_cm_init()` の失敗の後始末、`bfm_ops_post_rw()` の範囲の検査、
+`bfm_peer` の `-a 0.0.0.0` と後片付け、など)を直した後、段階 2〜4 と性能の測定を流し直した。**全部合格。**
+- 段階 2: 立ち上げと停止。表示は前と同じ(FW ページ 3,951、atomic_mode 5)。
+- 段階 3: 通常 / `-B` / `-x` で NG 0、hash は `e92cdeb4e6b0c81d`。遅延は前と同じ(write 8B 中央値 1,341ns、read 8B 1,708ns)。
+  `bfm_peer` は `-a` なし(0.0.0.0)で待ち、3 本の接続を続けて受けた。
+- 段階 4: `bfm_peer -c -x` の `[1]`〜`[4]` が OK、hash は両側で `4d058e2c177f96e9`。
+  `bfm_peer -n 0` は断り(戻り値 2)、server が居ないときは UNREACHABLE を表示して止まらずに終わった。
+- 性能(各 10,000 回、MTU 1500): 80 通り全部が流れ、値は BENCH.md と同じ(write / read とも 8KiB 以上で約 2.89 GB/s)。
+- 終わった後、OptiPlex は mlx5_core に戻した。

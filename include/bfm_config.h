@@ -35,8 +35,9 @@ extern uint32_t g_bfm_pci_dev;
 extern uint32_t g_bfm_pci_func;
 
 /* PCIe の ECAM(拡張設定空間)の先頭。VxWorks のポート層はここを直接読み書きする
- * (bus << 20 | dev << 15 | func << 12 | off)。0 なら BSP の設定空間の関数を使う
- * (port/vxworks/port_vxworks.c の BFM_VX_PCI_LIB)。Linux では使わない。 */
+ * (bus << 20 | dev << 15 | func << 12 | off)。0 だと bfm_init() が断る。
+ * BFM_VX_PCI_LIB を定義して port/vxworks/port_vxworks.c を作ると、これは使わず
+ * BSP の pciConfigLib で読み書きする(どちらを使うかはコンパイル時に決まる)。Linux では使わない。 */
 extern uint64_t g_bfm_pcie_ecam_base;
 
 /* BAR0(64bit・メモリ)に割り当てるアドレス。0 なら書き込まず、今入っている値を使う

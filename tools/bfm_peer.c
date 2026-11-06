@@ -131,15 +131,18 @@ typedef struct {
     uint32_t rkey;
 } peer_t;
 
+/* 失敗したら途中まで作ったものは pr に残る(呼び出し側が teardown() で返す)。 */
 static int setup_qp(struct rdma_cm_id *id, peer_t *pr)
 {
     pr->pd = ibv_alloc_pd(id->verbs);
     pr->cq = ibv_create_cq(id->verbs, 256, NULL, NULL, 0);
-    pr->mr = ibv_reg_mr(pr->pd, g_mem, g_mem_len, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE |
-                        IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_ATOMIC);
     pr->lbuf = aligned_alloc(4096, 65536);
-    pr->lmr = ibv_reg_mr(pr->pd, pr->lbuf, 65536, IBV_ACCESS_LOCAL_WRITE);
-    if (!pr->pd || !pr->cq || !pr->mr || !pr->lmr) {
+    if (pr->pd) {
+        pr->mr = ibv_reg_mr(pr->pd, g_mem, g_mem_len, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE |
+                            IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_ATOMIC);
+        if (pr->lbuf) pr->lmr = ibv_reg_mr(pr->pd, pr->lbuf, 65536, IBV_ACCESS_LOCAL_WRITE);
+    }
+    if (!pr->pd || !pr->cq || !pr->lbuf || !pr->mr || !pr->lmr) {
         fprintf(stderr, "[peer] PD / CQ / MR を作れない (errno=%d)\n", errno);
         return -1;
     }
@@ -161,7 +164,7 @@ static int setup_qp(struct rdma_cm_id *id, peer_t *pr)
 
 static void teardown(struct rdma_cm_id *id, peer_t *pr)
 {
-    rdma_destroy_qp(id);
+    if (id->qp) rdma_destroy_qp(id);
     if (pr->lmr) ibv_dereg_mr(pr->lmr);
     if (pr->mr) ibv_dereg_mr(pr->mr);
     if (pr->cq) ibv_destroy_cq(pr->cq);
@@ -194,22 +197,36 @@ static int run_server(const char *bind_ip, uint16_t port)
     struct rdma_cm_id *lid = NULL, *cid = NULL, *drop = NULL;
     struct sockaddr_in sa;
     peer_t pr;
+    int ret = 1, any = 0;
     memset(&pr, 0, sizeof(pr));
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
     sa.sin_port = htons(port);
-    if (inet_pton(AF_INET, bind_ip, &sa.sin_addr) != 1 || find_mac((struct sockaddr *)&sa) != 0) {
-        fprintf(stderr, "[peer] %s を持つ IF が見つからない\n", bind_ip);
+    if (ch == NULL) {
+        fprintf(stderr, "[peer] rdma_create_event_channel (errno=%d)\n", errno);
         return 1;
+    }
+    if (inet_pton(AF_INET, bind_ip, &sa.sin_addr) != 1) {
+        fprintf(stderr, "[peer] %s は IPv4 のアドレスではない\n", bind_ip);
+        goto out;
+    }
+    /* 0.0.0.0 で待つときは、MAC は接続要求が来た IF で調べる */
+    any = (sa.sin_addr.s_addr == htonl(INADDR_ANY));
+    if (!any && find_mac((struct sockaddr *)&sa) != 0) {
+        fprintf(stderr, "[peer] %s を持つ IF が見つからない\n", bind_ip);
+        goto out;
     }
     if (rdma_create_id(ch, &lid, NULL, RDMA_PS_TCP) || rdma_bind_addr(lid, (struct sockaddr *)&sa) ||
         rdma_listen(lid, 4)) {
         fprintf(stderr, "[peer] 待ち受けに失敗 (errno=%d)\n", errno);
-        return 1;
+        goto out;
     }
     fill();
-    printf("[peer] %s:%u で待つ(MAC %02x:%02x:%02x:%02x:%02x:%02x)。kill -QUIT で hash\n", bind_ip, port,
-           g_mac[0], g_mac[1], g_mac[2], g_mac[3], g_mac[4], g_mac[5]);
+    if (any)
+        printf("[peer] 全部の IF の %u で待つ。kill -QUIT で hash\n", port);
+    else
+        printf("[peer] %s:%u で待つ(MAC %02x:%02x:%02x:%02x:%02x:%02x)。kill -QUIT で hash\n", bind_ip, port,
+               g_mac[0], g_mac[1], g_mac[2], g_mac[3], g_mac[4], g_mac[5]);
     fflush(stdout);
     while (!g_stop) {
         struct rdma_cm_event *ev;
@@ -220,7 +237,14 @@ static int run_server(const char *bind_ip, uint16_t port)
         }
         switch (ev->event) {
         case RDMA_CM_EVENT_CONNECT_REQUEST: {
-            if (cid) { rdma_reject(ev->id, NULL, 0); break; }
+            /* 断った要求の id は ack の後で壊す(drop) */
+            if (cid) { rdma_reject(ev->id, NULL, 0); drop = ev->id; break; }
+            if (any && find_mac(rdma_get_local_addr(ev->id)) != 0) {
+                fprintf(stderr, "[peer] 接続要求が来た IF の MAC が分からない\n");
+                rdma_reject(ev->id, NULL, 0);
+                drop = ev->id;
+                break;
+            }
             cid = ev->id;
             peer_t tmp;
             memset(&tmp, 0, sizeof(tmp));
@@ -228,11 +252,16 @@ static int run_server(const char *bind_ip, uint16_t port)
                 printf("[peer] 接続要求: 相手の公開メモリ 0x%llx+%llu rkey 0x%08x\n",
                        (unsigned long long)tmp.raddr, (unsigned long long)tmp.rlen, tmp.rkey);
             fill();
-            if (setup_qp(cid, &pr) != 0) { rdma_reject(cid, NULL, 0); cid = NULL; break; }
+            struct ibv_device_attr da;
+            if (setup_qp(cid, &pr) != 0 || ibv_query_device(cid->verbs, &da) != 0) {
+                rdma_reject(cid, NULL, 0);
+                teardown(cid, &pr);
+                drop = cid;
+                cid = NULL;
+                break;
+            }
             uint8_t priv[PRIV_LEN];
             put_priv(priv, pr.mr);
-            struct ibv_device_attr da;
-            ibv_query_device(cid->verbs, &da);
             struct rdma_conn_param cp;
             memset(&cp, 0, sizeof(cp));
             cp.private_data = priv;
@@ -248,6 +277,7 @@ static int run_server(const char *bind_ip, uint16_t port)
             if (rdma_accept(cid, &cp) != 0) {
                 fprintf(stderr, "[peer] rdma_accept (errno=%d)\n", errno);
                 teardown(cid, &pr);
+                drop = cid;
                 cid = NULL;
             } else {
                 printf("[peer] 受けた: 公開メモリ %p rkey 0x%08x len %zu\n", pr.mr->addr, pr.mr->rkey, g_mem_len);
@@ -258,8 +288,11 @@ static int run_server(const char *bind_ip, uint16_t port)
             printf("[peer] 確立\n");
             break;
         case RDMA_CM_EVENT_DISCONNECTED:
+            if (ev->id != cid) break;                /* 今の接続のものだけ */
             dump("切断");
-            if (cid) { teardown(cid, &pr); drop = cid; cid = NULL; }
+            teardown(cid, &pr);
+            drop = cid;
+            cid = NULL;
             break;
         default:
             printf("[peer] CM のイベント %s\n", rdma_event_str(ev->event));
@@ -271,7 +304,16 @@ static int run_server(const char *bind_ip, uint16_t port)
          * 永久に止まる(最初の版で踏んだ。次の接続要求が溜まるだけで何も起きなくなる)。 */
         if (drop) { rdma_destroy_id(drop); drop = NULL; }
     }
-    return 0;
+    ret = 0;
+out:
+    if (cid) {
+        rdma_disconnect(cid);
+        teardown(cid, &pr);
+        rdma_destroy_id(cid);
+    }
+    if (lid) rdma_destroy_id(lid);
+    rdma_destroy_event_channel(ch);
+    return ret;
 }
 
 /* ---------------------------------------------------------------------
@@ -280,13 +322,25 @@ static int run_server(const char *bind_ip, uint16_t port)
 
 static enum ibv_wc_status g_last_status;
 
+#define POST_WAIT_NS 5000000000ull   /* 完了を待つ上限(5 秒。相手の再送が尽きるより長く)*/
+
 static int post_wait(struct rdma_cm_id *id, peer_t *pr, struct ibv_send_wr *wr)
 {
     struct ibv_send_wr *bad;
-    if (ibv_post_send(id->qp, wr, &bad) != 0) return -1;
+    if (ibv_post_send(id->qp, wr, &bad) != 0) {
+        fprintf(stderr, "[cli] ibv_post_send (errno=%d)\n", errno);
+        return -1;
+    }
     struct ibv_wc wc;
     int n;
+    uint32_t spins = 0;
+    const uint64_t t0 = now_ns();
     while ((n = ibv_poll_cq(pr->cq, 1, &wc)) == 0) {
+        if ((++spins & 0xfffu) == 0 && now_ns() - t0 > POST_WAIT_NS) {
+            fprintf(stderr, "[cli] 完了が %llu 秒来ない\n", POST_WAIT_NS / 1000000000ull);
+            g_last_status = IBV_WC_GENERAL_ERR;
+            return -1;
+        }
     }
     g_last_status = (n < 0) ? IBV_WC_GENERAL_ERR : wc.status;
     if (n < 0 || wc.status != IBV_WC_SUCCESS) {
@@ -318,28 +372,64 @@ static int op(struct rdma_cm_id *id, peer_t *pr, enum ibv_wr_opcode opc, uint64_
     return post_wait(id, pr, &wr);
 }
 
+/* 次の CM のイベントを待ち、want なら ack して 0。違えば表示して ack し -1。
+ * ESTABLISHED のときは ack の前に private data を読む(ack すると読めなくなる)。 */
+static int wait_event(struct rdma_event_channel *ch, enum rdma_cm_event_type want, peer_t *pr)
+{
+    struct rdma_cm_event *ev;
+    if (rdma_get_cm_event(ch, &ev) != 0) {
+        fprintf(stderr, "[cli] rdma_get_cm_event (errno=%d)\n", errno);
+        return -1;
+    }
+    int rc = 0;
+    if (ev->event != want) {
+        fprintf(stderr, "[cli] %s(%s を待っていた)\n", rdma_event_str(ev->event), rdma_event_str(want));
+        rc = -1;
+    } else if (want == RDMA_CM_EVENT_ESTABLISHED &&
+               get_peer_priv(ev->param.conn.private_data, ev->param.conn.private_data_len, pr) != 0) {
+        fprintf(stderr, "[cli] REP の private data に相手の公開メモリの情報が無い\n");
+        rc = -1;
+    }
+    rdma_ack_cm_event(ev);
+    return rc;
+}
+
 static int run_client(const char *dst_ip, uint16_t port, unsigned iters, int oob)
 {
     struct rdma_event_channel *ch = rdma_create_event_channel();
     struct rdma_cm_id *id = NULL;
-    struct rdma_cm_event *ev;
-    struct addrinfo *ai;
+    struct addrinfo *ai = NULL;
     peer_t pr;
+    int ng = 0, connected = 0;
     memset(&pr, 0, sizeof(pr));
     char ports[8];
     snprintf(ports, sizeof(ports), "%u", port);
-    if (getaddrinfo(dst_ip, ports, NULL, &ai) != 0) return 1;
-    if (rdma_create_id(ch, &id, NULL, RDMA_PS_TCP) || rdma_resolve_addr(id, NULL, ai->ai_addr, 2000)) return 1;
-    rdma_get_cm_event(ch, &ev);
-    if (ev->event != RDMA_CM_EVENT_ADDR_RESOLVED) { fprintf(stderr, "[cli] %s\n", rdma_event_str(ev->event)); return 1; }
-    rdma_ack_cm_event(ev);
-    if (rdma_resolve_route(id, 2000)) return 1;
-    rdma_get_cm_event(ch, &ev);
-    if (ev->event != RDMA_CM_EVENT_ROUTE_RESOLVED) { fprintf(stderr, "[cli] %s\n", rdma_event_str(ev->event)); return 1; }
-    rdma_ack_cm_event(ev);
-    if (find_mac(rdma_get_local_addr(id)) != 0) { fprintf(stderr, "[cli] 自分の MAC が分からない\n"); return 1; }
+    if (ch == NULL) {
+        fprintf(stderr, "[cli] rdma_create_event_channel (errno=%d)\n", errno);
+        return 1;
+    }
+    if (getaddrinfo(dst_ip, ports, NULL, &ai) != 0) {
+        fprintf(stderr, "[cli] %s が引けない\n", dst_ip);
+        ng = 1;
+        goto out;
+    }
+    if (rdma_create_id(ch, &id, NULL, RDMA_PS_TCP) || rdma_resolve_addr(id, NULL, ai->ai_addr, 2000) ||
+        wait_event(ch, RDMA_CM_EVENT_ADDR_RESOLVED, &pr) != 0 ||
+        rdma_resolve_route(id, 2000) || wait_event(ch, RDMA_CM_EVENT_ROUTE_RESOLVED, &pr) != 0) {
+        fprintf(stderr, "[cli] %s への経路が引けない (errno=%d)\n", dst_ip, errno);
+        ng = 1;
+        goto out;
+    }
+    if (find_mac(rdma_get_local_addr(id)) != 0) {
+        fprintf(stderr, "[cli] 自分の MAC が分からない\n");
+        ng = 1;
+        goto out;
+    }
     fill();
-    if (setup_qp(id, &pr) != 0) return 1;
+    if (setup_qp(id, &pr) != 0) {
+        ng = 1;
+        goto out;
+    }
     uint8_t priv[PRIV_LEN];
     put_priv(priv, pr.mr);
     struct rdma_conn_param cp;
@@ -350,20 +440,27 @@ static int run_client(const char *dst_ip, uint16_t port, unsigned iters, int oob
     cp.initiator_depth = 16;
     cp.retry_count = 7;
     cp.rnr_retry_count = 7;
-    if (rdma_connect(id, &cp)) return 1;
-    rdma_get_cm_event(ch, &ev);
-    if (ev->event != RDMA_CM_EVENT_ESTABLISHED ||
-        get_peer_priv(ev->param.conn.private_data, ev->param.conn.private_data_len, &pr) != 0) {
-        fprintf(stderr, "[cli] 接続できない: %s\n", rdma_event_str(ev->event));
-        return 1;
+    if (rdma_connect(id, &cp) != 0) {
+        fprintf(stderr, "[cli] rdma_connect (errno=%d)\n", errno);
+        ng = 1;
+        goto out;
     }
-    rdma_ack_cm_event(ev);
+    if (wait_event(ch, RDMA_CM_EVENT_ESTABLISHED, &pr) != 0) {
+        fprintf(stderr, "[cli] 接続できない\n");
+        ng = 1;
+        goto out;
+    }
+    connected = 1;
     printf("[cli] 接続した: 相手の公開メモリ 0x%llx+%llu rkey 0x%08x\n", (unsigned long long)pr.raddr,
            (unsigned long long)pr.rlen, pr.rkey);
+    if (pr.rlen < ATOM_OFF + ATOM_WORDS * 8u) {
+        fprintf(stderr, "[cli] 相手の公開メモリが小さすぎる(%u バイト要る)\n", ATOM_OFF + ATOM_WORDS * 8u);
+        ng = 1;
+        goto out;
+    }
 
     static uint8_t model[DATA_BYTES];
     for (uint32_t i = 0; i < DATA_BYTES; i++) model[i] = (uint8_t)((i * 7u + 3u) & 0xffu);
-    int ng = 0;
     /* read 全体 */
     for (uint32_t off = 0; off < DATA_BYTES && !ng; off += 65536u) {
         if (op(id, &pr, IBV_WR_RDMA_READ, off, 65536u, 0, 0, 0) || memcmp(pr.lbuf, model + off, 65536u)) ng++;
@@ -401,9 +498,9 @@ static int run_client(const char *dst_ip, uint16_t port, unsigned iters, int oob
     }
     {
         struct ibv_device_attr da;
-        ibv_query_device(id->verbs, &da);
+        const int cap = (ibv_query_device(id->verbs, &da) == 0) ? (int)da.atomic_cap : -1;
         printf("[cli] [3] atomic の元の値は %s で返る(atomic_cap=%d)\n",
-               res_be > 0 ? "ビッグエンディアン" : "ホスト順", (int)da.atomic_cap);
+               res_be > 0 ? "ビッグエンディアン" : "ホスト順", cap);
     }
     printf("[cli] [3] FAA x1000 / CAS 0->1000 %s\n", ng ? "NG" : "OK");
     printf("[cli] 模型の hash = %016llx(相手の bfmem_test server が出す値と同じはず)\n",
@@ -411,18 +508,20 @@ static int run_client(const char *dst_ip, uint16_t port, unsigned iters, int oob
     /* 遅延 */
     if (!ng) {
         const char *names[3] = { "write 8B", "read 8B", "FAA" };
-        for (int t = 0; t < 3; t++) {
+        for (int t = 0; t < 3 && !ng && !g_stop; t++) {
             uint64_t sum = 0;
-            for (unsigned i = 0; i < iters; i++) {
+            unsigned m = 0;                          /* 測れた回数 */
+            for (; m < iters && !g_stop; m++) {
                 const uint64_t t0 = now_ns();
                 /* write は atomic 語の区画の後半へ(データ領域の hash を変えないため)。 */
-                int r = (t == 0) ? op(id, &pr, IBV_WR_RDMA_WRITE, ATOM_OFF + 2048u + (i & 31u) * 64u, 8, 0, 0, 1)
-                      : (t == 1) ? op(id, &pr, IBV_WR_RDMA_READ, (i & 63u) * 64u, 8, 0, 0, 0)
+                int r = (t == 0) ? op(id, &pr, IBV_WR_RDMA_WRITE, ATOM_OFF + 2048u + (m & 31u) * 64u, 8, 0, 0, 1)
+                      : (t == 1) ? op(id, &pr, IBV_WR_RDMA_READ, (m & 63u) * 64u, 8, 0, 0, 0)
                                  : op(id, &pr, IBV_WR_ATOMIC_FETCH_AND_ADD, ATOM_OFF + 800u, 8, 1, 0, 0);
-                if (r) { ng++; break; }
+                if (r) { ng++; break; }              /* エラーの後は測らない(QP はもう使えない)*/
                 sum += now_ns() - t0;
             }
-            printf("[cli] 遅延 %-9s 平均 %llu ns(x%u)\n", names[t], (unsigned long long)(sum / iters), iters);
+            if (m > 0)
+                printf("[cli] 遅延 %-9s 平均 %llu ns(x%u)\n", names[t], (unsigned long long)(sum / m), m);
         }
     }
     /* -x: 相手の公開メモリのすぐ外を読み、相手の NIC が断ること(相手の MKey が範囲を持つこと)。
@@ -433,11 +532,17 @@ static int run_client(const char *dst_ip, uint16_t port, unsigned iters, int oob
         printf("[cli] [4] 公開メモリの外を読むと相手が断る(REM_ACCESS_ERR)%s\n", ok ? "OK" : "NG");
         if (!ok) ng++;
     }
-    rdma_disconnect(id);
-    rdma_get_cm_event(ch, &ev);
-    rdma_ack_cm_event(ev);
-    teardown(id, &pr);
-    rdma_destroy_id(id);
+out:
+    if (connected) {
+        rdma_disconnect(id);
+        (void)wait_event(ch, RDMA_CM_EVENT_DISCONNECTED, &pr);
+    }
+    if (id) {
+        teardown(id, &pr);
+        rdma_destroy_id(id);
+    }
+    if (ai) freeaddrinfo(ai);
+    rdma_destroy_event_channel(ch);
     printf("[cli] 結果 %s\n", ng ? "NG" : "OK");
     return ng ? 1 : 0;
 }
@@ -462,8 +567,16 @@ int main(int argc, char **argv)
             return 2;
         }
     }
+    if (iters == 0) {
+        fprintf(stderr, "-n は 1 以上\n");
+        return 2;
+    }
     if (g_mem_len < ATOM_OFF + ATOM_WORDS * 8u) g_mem_len = ATOM_OFF + ATOM_WORDS * 8u;
     g_mem = aligned_alloc(4096, (g_mem_len + 4095u) & ~(size_t)4095u);
+    if (g_mem == NULL) {
+        fprintf(stderr, "公開メモリ %zu バイトを取れない\n", g_mem_len);
+        return 1;
+    }
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = on_sig;           /* SA_RESTART なし: rdma_get_cm_event() を EINTR で抜ける */

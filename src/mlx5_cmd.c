@@ -219,6 +219,8 @@ int mlx5_eq_create(bfm_dev_t *d)
     const uint32_t nent = 1u << BFM_EQ_LOG;
     const uint32_t bytes = nent * EQE_SIZE;
     const uint32_t npages = (bytes + BFM_PAGE - 1u) / BFM_PAGE;
+    static uint8_t in[272 + 8 * 4];
+    if (npages > 4u) return BFM_E_PARAM;              /* in[] に載る PAS は 4 ページまで(BFM_EQ_LOG <= 8)*/
     d->eq_buf = (volatile uint8_t *)bfm_mem_alloc(bytes, BFM_PAGE);
     if (d->eq_buf == NULL) return BFM_E_NOMEM;
     for (uint32_t i = 0; i < nent; i++) d->eq_buf[i * EQE_SIZE + EQE_SIZE - 1u] = 1u;  /* owner の初期値 */
@@ -235,7 +237,6 @@ int mlx5_eq_create(bfm_dev_t *d)
                  (1ull << MLX5_EVT_SRQ_LAST_WQE) | (1ull << MLX5_EVT_SRQ_RQ_LIMIT);
     if (!d->page_request_disable) d->eq_mask |= 1ull << MLX5_EVT_PAGE_REQUEST;
 
-    static uint8_t in[272 + 8 * 4];
     uint8_t out[16];
     memset(in, 0, sizeof(in));
     bfm_wr16be(&in[0], MLX5_CMD_CREATE_EQ);

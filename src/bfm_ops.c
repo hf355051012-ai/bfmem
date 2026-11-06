@@ -112,7 +112,10 @@ static int post(struct bfm_conn *c, const uint64_t *w, uint32_t bbs)
     while ((c->qp.sq_pc + bbs) - c->sq_done > SQ_N) {
         const int r = poll_one(c);
         if (r < 0) return r;
-        if (r == 0 && wait_done(c, c->sq_done + 1u) != BFM_OK) return BFM_E_TIMEOUT;
+        if (r == 0) {
+            const int w_rc = wait_done(c, c->sq_done + 1u);   /* エラー完了も時間切れもそのまま返す */
+            if (w_rc != BFM_OK) return w_rc;
+        }
     }
     const uint32_t pc = c->qp.sq_pc;
     for (uint32_t b = 0; b < bbs; b++) {
@@ -240,8 +243,9 @@ int bfm_ops_post_rw(struct bfm_conn *c, int is_read, uint64_t off, uint32_t stag
     uint64_t w[BFM_WQE_MAX / 8u];
     int rc = check_range(c, off, len);
     if (rc != BFM_OK) return rc;
-    if ((uint64_t)stage_off + len > c->stage_size) return BFM_E_PARAM;
+    /* 埋め込みの write は中継バッファを使わないので、stage_off は見ない */
     if (!is_read && len <= INLINE_MAX) return post(c, w, build_write_inline(c, w, off, src, len, 1));
+    if ((uint64_t)stage_off + len > c->stage_size) return BFM_E_PARAM;
     memset(w, 0, 64);
     build_ctrl(c, w, is_read ? MLX5_OPCODE_RDMA_READ : MLX5_OPCODE_RDMA_WRITE, 3u, 1);
     build_raddr(c, w, off);

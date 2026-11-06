@@ -29,12 +29,13 @@
 #define AREA_BYTES   (ATOM_OFF + ATOM_WORDS * 8u)
 
 static volatile sig_atomic_t g_stop, g_dump;
+static int g_server;                 /* server のときだけ SIGQUIT で hash を出す */
 static uint8_t g_model[DATA_BYTES];
 
 static void on_sig(int s)
 {
-    if (s == SIGQUIT) g_dump = 1;
-    else g_stop = 1;
+    if (s == SIGQUIT && g_server) g_dump = 1;
+    else g_stop = 1;                 /* server 以外では SIGQUIT も止める合図(後片付けをしてから終わる)*/
 }
 
 static uint64_t now_ns(void)
@@ -173,12 +174,15 @@ static void lat(bfm_conn_t *c, const char *name, op_fn fn, uint32_t n)
         if (fn(c, i) != BFM_OK) { g_ng++; return; }
     }
     uint64_t sum = 0;
-    for (uint32_t i = 0; i < n && !g_stop; i++) {
+    uint32_t m = 0;                  /* 測れた回数(止められたら n より少ない)*/
+    for (; m < n && !g_stop; m++) {
         const uint64_t t0 = now_ns();
-        if (fn(c, i) != BFM_OK) { g_ng++; return; }
-        g_lat[i] = (uint32_t)(now_ns() - t0);
-        sum += g_lat[i];
+        if (fn(c, m) != BFM_OK) { g_ng++; return; }
+        g_lat[m] = (uint32_t)(now_ns() - t0);
+        sum += g_lat[m];
     }
+    if (m == 0) return;
+    n = m;
     qsort(g_lat, n, sizeof(g_lat[0]), cmp_u32);
     printf("client: 遅延 %-9s x%u: 中央値 %u ns / 平均 %llu / 最小 %u / p99 %u / p99.9 %u\n", name, n,
            g_lat[n / 2u], (unsigned long long)(sum / n), g_lat[0], g_lat[(uint64_t)n * 99u / 100u],
@@ -345,6 +349,11 @@ static int bench_one(bfm_conn_t *c, int is_read, uint32_t size, uint32_t qd, uin
     struct bfm_conn *ci = (struct bfm_conn *)c;
     static uint64_t ts[BENCH_QD_MAX];
     const uint64_t slots = (bfm_remote_size(c) / size) < 1024u ? bfm_remote_size(c) / size : 1024u;
+    if (slots == 0 || qd == 0 || qd > BENCH_QD_MAX || size > BENCH_SIZE_MAX) {
+        printf("bench: %u バイト x 多重度 %u は流せない(相手の公開メモリ %llu バイト)\n", size, qd,
+               (unsigned long long)bfm_remote_size(c));
+        return -1;
+    }
     uint32_t posted = 0, done = 0;
     uint64_t lat_sum = 0;
     const uint64_t t0 = rdtsc();
@@ -380,6 +389,12 @@ static int run_bench(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t 
     if (c == NULL) return 1;
     tsc_calibrate();
     for (unsigned i = 0; i < sizeof(g_src); i++) g_src[i] = (uint8_t)(0x5a ^ i);
+    {
+        /* 埋め込みでない write は中継バッファから送るので、送る中身を置いておく */
+        struct bfm_conn *ci = (struct bfm_conn *)c;
+        for (uint32_t i = 0; i < ci->stage_size; i++) ci->stage[i] = (uint8_t)(0x5a ^ i);
+        bfm_port_cache_flush(ci->stage, ci->stage_size);
+    }
     printf("bench: 各 %u 回。相手の公開メモリ %llu バイト、BlueFlame %s、inline %u バイトまで、MTU %u\n", n,
            (unsigned long long)bfm_remote_size(c), bfm_bf_active(c) ? "あり" : "なし", bfm_inline_max(),
            128u << ((struct bfm_conn *)c)->path_mtu);
@@ -424,6 +439,7 @@ int main(int argc, char **argv)
     signal(SIGQUIT, on_sig);
 
     const int bench = (strcmp(mode, "bench") == 0);
+    g_server = (strcmp(mode, "server") == 0);
     if (bench) g_bfm_stage_size = BENCH_QD_MAX * BENCH_SIZE_MAX;   /* 多重度ぶんの着地点 / 送り元 */
     if (bfm_init() != BFM_OK) return 1;
     int ret = 0;

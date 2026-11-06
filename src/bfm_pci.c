@@ -83,10 +83,12 @@ static int pci_flr(uint32_t pcie)
         return 0;
     }
     pci_cmd_write((uint16_t)(pci_cmd_read() & ~PCI_CMD_MASTER));
-    for (unsigned i = 0; i < 100u; i++) {
+    unsigned i;
+    for (i = 0; i < 100u; i++) {
         if (!((bfm_port_pci_read32(pcie + PCIE_DEVCTL) >> 16) & PCIE_DEVSTA_TRPND)) break;
         bfm_port_delay_us(1000u);
     }
+    if (i == 100u) BFM_LOG("bfm: 注意: 100ms 待っても Transactions Pending が消えない。このまま FLR をかける\n");
     const uint32_t ctl = bfm_port_pci_read32(pcie + PCIE_DEVCTL) & 0xffffu;
     bfm_port_pci_write32(pcie + PCIE_DEVCTL, ctl | PCIE_DEVCTL_FLR);
     bfm_port_delay_us(100000u);
@@ -118,17 +120,18 @@ static int pci_setup_bar0(uint64_t addr, uint64_t *out_phys, uint64_t *out_size)
                           (bfm_port_pci_read32(PCI_BAR0) & ~0xfu);
     const uint64_t size = ~mask + 1u;
     uint64_t phys = ((uint64_t)hi << 32) | (lo & ~0xfu);
-    if (addr != 0) {
-        if (size == 0 || (addr & (size - 1u)) != 0) {
-            BFM_LOG("bfm: g_bfm_bar0_addr = 0x%llx が BAR0 の大きさ 0x%llx の境界に合っていない\n",
-                    (unsigned long long)addr, (unsigned long long)size);
-            bfm_port_pci_write32(PCI_BAR0, lo);
-            bfm_port_pci_write32(PCI_BAR0 + 4u, hi);
-            pci_cmd_write(cmd);
-            return -1;
-        }
-        phys = addr;
+    const char *err = NULL;
+    if (mask == 0 || (size & (size - 1u)) != 0) err = "BAR0 の大きさが測れない";
+    else if (addr != 0 && (addr & (size - 1u)) != 0) err = "g_bfm_bar0_addr が BAR0 の大きさの境界に合っていない";
+    if (err != NULL) {
+        BFM_LOG("bfm: %s(g_bfm_bar0_addr = 0x%llx、BAR0 の大きさ 0x%llx)\n",
+                err, (unsigned long long)addr, (unsigned long long)size);
+        bfm_port_pci_write32(PCI_BAR0, lo);
+        bfm_port_pci_write32(PCI_BAR0 + 4u, hi);
+        pci_cmd_write(cmd);
+        return -1;
     }
+    if (addr != 0) phys = addr;
     bfm_port_pci_write32(PCI_BAR0, (uint32_t)phys | (lo & 0xfu));
     bfm_port_pci_write32(PCI_BAR0 + 4u, (uint32_t)(phys >> 32));
     pci_cmd_write(cmd);

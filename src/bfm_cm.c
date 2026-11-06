@@ -162,7 +162,11 @@ static int gsi_send(const uint8_t *mad, const uint8_t peer_gid[16], const uint8_
 {
     const uint64_t t0 = bfm_port_time_ns();
     while (s_tx_outstanding >= BFM_GSI_TXBUFS) {
-        if (gsi_pump() < 0 || ms_since(t0) > 1000u) {
+        if (gsi_pump() < 0) {
+            BFM_LOG("bfm: GSI のエラーで送れない\n");
+            return BFM_E_CQE;
+        }
+        if (ms_since(t0) > 1000u) {
             BFM_LOG("bfm: GSI の送信が詰まった\n");
             return BFM_E_TIMEOUT;
         }
@@ -442,7 +446,6 @@ int bfm_cm_init(void)
     if ((rc = mlx5_qp_rst2init(&g_bfm, &s_gsi, 1)) != BFM_OK) return rc;
     if ((rc = mlx5_qp_ud_to_rts(&g_bfm, &s_gsi)) != BFM_OK) return rc;
     for (unsigned i = 0; i < BFM_GSI_PREPOST; i++) gsi_post_recv();
-    s_gsi_ready = 1;
 
     for (unsigned i = 0; i < BFM_MAX_CONN; i++) {
         struct bfm_conn *c = &g_bfm_conn[i];
@@ -457,9 +460,12 @@ int bfm_cm_init(void)
         c->qp.cq_dbr = (volatile uint32_t *)bfm_mem_alloc(64u, 64u);
         c->stage_size = (g_bfm_stage_size + BFM_PAGE - 1u) & ~(BFM_PAGE - 1u);
         c->stage = (volatile uint8_t *)bfm_mem_alloc(c->stage_size, BFM_PAGE);
-        if (!c->qp.wq || !c->qp.dbr || !c->qp.cq || !c->qp.cq_dbr || !c->stage) return BFM_E_NOMEM;
+        if (!c->qp.wq || !c->qp.dbr || !c->qp.cq || !c->qp.cq_dbr || !c->stage) {
+            rc = BFM_E_NOMEM;
+            goto fail;
+        }
         /* UAR(ドアベルと BlueFlame の窓)は枠ごとに 1 つ。WC の窓もここで張っておく。 */
-        if ((rc = mlx5_alloc_uar(&g_bfm, &c->qp.uarn)) != BFM_OK) return rc;
+        if ((rc = mlx5_alloc_uar(&g_bfm, &c->qp.uarn)) != BFM_OK) goto fail;
         c->qp.has_uar = 1;
         c->db = g_bfm.bar0 + (uint64_t)c->qp.uarn * BFM_PAGE + MLX5_BF_OFFSET;
         c->bf = NULL;
@@ -470,7 +476,16 @@ int bfm_cm_init(void)
     }
     if (g_bfm_bf_enable && g_bfm.bf_cap && g_bfm_conn[0].bf == NULL)
         BFM_LOG("bfm: 注意: UAR を write-combining で張れない。BlueFlame を使わずに動かす\n");
+    s_gsi_ready = 1;                                  /* 全部そろってから使えるようにする */
     return BFM_OK;
+fail:
+    /* 張った WC の窓を返す(HCA は呼び出し側の cleanup() が止める) */
+    for (unsigned i = 0; i < BFM_MAX_CONN; i++) {
+        struct bfm_conn *c = &g_bfm_conn[i];
+        if (c->bf) bfm_port_bar0_wc_release((uint64_t)c->qp.uarn * BFM_PAGE, BFM_PAGE);
+        c->bf = NULL;
+    }
+    return rc;
 }
 
 void bfm_cm_fini(void)
@@ -492,6 +507,11 @@ bfm_conn_t *bfm_connect(uint32_t peer_ip, const uint8_t peer_mac[6], uint16_t po
     if (peer_ip == 0) {
         peer_ip = g_bfm_peer_ip;
         peer_mac = g_bfm_peer_mac;
+    }
+    if (peer_mac == NULL) peer_mac = g_bfm_peer_mac;
+    if (peer_ip == 0) {
+        BFM_LOG("bfm: 相手の IP が無い(peer_ip も g_bfm_peer_ip も 0)\n");
+        return NULL;
     }
     if (port == 0) port = g_bfm_cm_port;
     if (timeout_ms == 0) timeout_ms = (REQ_RETRIES + 1u) * REQ_RETRY_MS;
@@ -667,7 +687,8 @@ int bfm_cm_poll(void)
         const uint64_t tid = bfm_rd64be(mad + 8);
         for (unsigned i = 0; i < BFM_MAX_CONN; i++) {
             struct bfm_conn *c = &g_bfm_conn[i];
-            if (c->state == BFM_CS_FREE || c->local_comm_id != target) continue;
+            /* 作っている途中の枠(SETUP)は local_comm_id がまだ前の値なので見ない */
+            if (c->state == BFM_CS_FREE || c->state == BFM_CS_SETUP || c->local_comm_id != target) continue;
             uint8_t rep[MAD_SIZE];
             build_short(rep, tid, CM_ATTR_DREP, c->local_comm_id, c->remote_comm_id);
             (void)gsi_send(rep, c->peer_gid, c->peer_mac);
