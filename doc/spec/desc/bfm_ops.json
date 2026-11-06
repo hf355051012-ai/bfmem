@@ -1,0 +1,566 @@
+{
+  "file": "src/bfm_ops.c",
+  "summary": "データ経路。相手の公開メモリへの write / read / atomic(CAS・FAA)を、1 個の操作 = 1 個の WQE として出す。WQE は手元の作業域で組み、SQ のリング(ホストメモリ)へ写し、doorbell record を進めてから、同じ WQE を UAR の BlueFlame の窓へ MMIO で書く(`post()`)。窓は write-combining なので 64 バイトが 1 個の PCIe の書き込みにまとまり、NIC はドアベルと一緒に WQE を受け取る。窓は 2 面あり交互に使う。小さい write はデータを WQE に埋め込む(inline)。read と atomic は必ず完了通知(CQE)を求め、32 バイトまでの応答は CQE に入るので CPU がそこから写す。完了は `poll_one()` で CQ から拾い、`wait_done()` で待つ。",
+  "functions": [
+    {
+      "func": "conn_usable",
+      "summary": "接続がデータ経路で使えるかを調べる。`c` が NULL でなく、状態が `BFM_CS_UP` であること。",
+      "args": {"c": "調べる接続(NULL 可)"},
+      "ret": "1: 使える。0: 使えない(NULL、または `BFM_CS_UP` でない)。",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"return": "c != NULL && c->state == BFM_CS_UP"}
+      ]
+    },
+    {
+      "func": "map_syndrome",
+      "summary": "エラー完了の CQE の syndrome を、ライブラリの戻り値に直す。",
+      "args": {"synd": "CQE の syndrome(byte 55)"},
+      "ret": "`BFM_E_REMOTE`: 0x12・0x13・0x14(相手が拒否)。`BFM_E_RETRY`: 0x15・0x16(再送が尽きた)。`BFM_E_CQE`: そのほか。",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"switch": "synd", "cases": [
+          {"case": "0x12, 0x13, 0x14", "body": [{"return": "BFM_E_REMOTE"}]},
+          {"case": "0x15, 0x16", "body": [{"return": "BFM_E_RETRY"}]},
+          {"default": true, "body": [{"return": "BFM_E_CQE"}]}
+        ]}
+      ]
+    },
+    {
+      "func": "syndrome_str",
+      "summary": "エラー完了の CQE の syndrome を、表示用の名前(と短い説明)に直す。",
+      "args": {"synd": "CQE の syndrome(byte 55)"},
+      "ret": "syndrome の名前の文字列(静的な文字列)。知らない値は `\"?\"`。",
+      "pre": "特になし。",
+      "notes": "`poll_one()` がエラー完了を表示するときに使う。",
+      "flow": [
+        {"switch": "synd", "cases": [
+          {"case": "0x01", "body": [{"return": "\"LOCAL_LENGTH\""}]},
+          {"case": "0x02", "body": [{"return": "\"LOCAL_QP_OP\""}]},
+          {"case": "0x04", "body": [{"return": "\"LOCAL_PROT\""}]},
+          {"case": "0x05", "body": [{"return": "\"WR_FLUSH(先のエラーで QP が止まっている)\""}]},
+          {"case": "0x10", "body": [{"return": "\"BAD_RESP\""}]},
+          {"case": "0x11", "body": [{"return": "\"LOCAL_ACCESS\""}]},
+          {"case": "0x12", "body": [{"return": "\"REMOTE_INVAL_REQ(同時 read/atomic の超過・相手が受けない操作)\""}]},
+          {"case": "0x13", "body": [{"return": "\"REMOTE_ACCESS(rkey・範囲・権限)\""}]},
+          {"case": "0x14", "body": [{"return": "\"REMOTE_OP\""}]},
+          {"case": "0x15", "body": [{"return": "\"TRANSPORT_RETRY_EXC(相手に届かない)\""}]},
+          {"case": "0x16", "body": [{"return": "\"RNR_RETRY_EXC\""}]},
+          {"default": true, "body": [{"return": "\"?\""}]}
+        ]}
+      ]
+    },
+    {
+      "func": "poll_one",
+      "summary": "CQ から CQE を 1 個読む。CQ の消費位置(`cq_cc`)の CQE の owner ビットと opcode を見て、新しい CQE が無ければ 0 を返す。あれば消費位置を進めて CQ の doorbell record に書く。エラー完了なら syndrome を記録し、接続を `BFM_CS_ERROR` にする。正常な完了なら、CQE の WQE カウンタが指す WQE までを済んだ扱いにし(`sq_done` を進める)、応答データを CQE に抱えていればその CQE を `last_scat` に覚える。",
+      "args": {"c": "完了を拾う接続"},
+      "ret": "1: 正常な完了を 1 個拾った。0: まだ CQE が無い。負: エラー完了(`map_syndrome()` の値。`BFM_E_REMOTE` / `BFM_E_RETRY` / `BFM_E_CQE`)。",
+      "pre": "`c` の QP・CQ が作られ、`bfm_ops_attach()` 済みであること。",
+      "notes": "* CQE は投稿の順に来るので、正常な完了 1 個でその WQE までの全部(通知なしで出したものを含む)を済んだ扱いにする。\n* 済んだ位置は、CQE の WQE カウンタ(16 ビット)を `sq_done` の 32 ビットへ広げ、その WQE の大きさ(`wqe_bbs[]`)を足して求める。\n* エラー完了では `sq_done` を進めない。接続が `BFM_CS_UP` のときだけ表示して `BFM_CS_ERROR` にする(2 回目以降は表示しない)。\n* `last_scat` は CQ のリングの中を指すので、次の CQE を拾うまでに読むこと。",
+      "flow": [
+        {"do": "cqe = CQ のリングの (cq_cc & (CQ_N - 1)) 番目(64 バイト)"},
+        {"call": "bfm_port_cache_inval(cqe, 64) を呼ぶ"},
+        {"do": "op_own = cqe[63]"},
+        {"if": "owner ビットが今の周回と合わない、または opcode == MLX5_CQE_INVALID ?", "then": [{"return": "0"}]},
+        {"do": "bfm_rmb()。opcode = op_own >> 4、cnt = CQE の WQE カウンタ(byte 60、BE)"},
+        {"do": "cq_cc++。cq_dbr[0] = cq_cc の下位 24 ビット(BE)"},
+        {"if": "opcode が MLX5_CQE_REQ_ERR / MLX5_CQE_RESP_ERR / MLX5_CQE_SIG_ERR ?", "then": [
+          {"do": "last_synd = cqe[55]、last_vsynd = cqe[54]"},
+          {"if": "c->state == BFM_CS_UP ?", "then": [
+            {"call": "BFM_LOG で syndrome と syndrome_str() の名前を表示"},
+            {"do": "c->state = BFM_CS_ERROR"}
+          ]},
+          {"call": "map_syndrome(last_synd) を呼ぶ"},
+          {"return": "map_syndrome() の値"}
+        ]},
+        {"do": "pc = cnt を sq_done の 32 ビットへ広げた位置"},
+        {"do": "sq_done = pc + wqe_bbs[pc & (SQ_N - 1)]"},
+        {"if": "op_own & 0x04(応答データを CQE に抱えている)?", "then": [{"do": "last_scat = cqe"}], "else": [{"do": "last_scat = NULL"}]},
+        {"return": "1"}
+      ]
+    },
+    {
+      "func": "wait_done",
+      "summary": "SQ の位置 `target`(WQEBB の位置)まで済む(`sq_done` が `target` に達する)まで、`poll_one()` で完了を拾い続ける。`g_bfm_op_timeout_ms` を過ぎたら接続をエラーにして時間切れを返す。",
+      "args": {"c": "待つ接続", "target": "済むのを待つ SQ の位置(WQEBB 単位。普通は `c->qp.sq_pc`)"},
+      "ret": "`BFM_OK`: `target` まで済んだ。`BFM_E_TIMEOUT`: 時間切れ。そのほか負: エラー完了(`poll_one()` の値)。",
+      "pre": "`target` までの WQE の中に、通知を求めた WQE があること(無ければ完了が来ず時間切れになる)。",
+      "notes": "* 時刻は CQE が無いときの 4096 回に 1 回だけ見る。\n* 時間切れのときは表示して接続を `BFM_CS_ERROR` にする。\n* 位置の比較は 32 ビットの差の符号で行う(周回してもよい)。",
+      "flow": [
+        {"call": "t0 = bfm_port_time_ns() を呼ぶ"},
+        {"do": "spins = 0"},
+        {"while": "(int32_t)(sq_done - target) < 0 ?", "body": [
+          {"call": "r = poll_one(c) を呼ぶ"},
+          {"if": "r < 0 ?", "then": [{"return": "r"}]},
+          {"if": "r == 0 かつ ++spins が 4096 の倍数 かつ 経過時間 > g_bfm_op_timeout_ms ?", "then": [
+            {"do": "BFM_LOG で時間切れを表示"},
+            {"do": "c->state = BFM_CS_ERROR"},
+            {"return": "BFM_E_TIMEOUT"}
+          ]}
+        ]},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "post",
+      "summary": "組み終えた WQE(`w`、`bbs` 個の WQEBB)を SQ のリングへ写し、doorbell record を進めて、ドアベルを鳴らす。SQ に空きが無ければ、完了を拾って空くのを待つ。WQE が BlueFlame の窓に収まれば WQE 本体を窓へ書き、収まらない(または BlueFlame が無い)ときは先頭 8 バイトだけを UC のドアベルへ書く。最後に窓の面を切り替える。",
+      "args": {"c": "出す接続", "w": "組み終えた WQE(8 バイト単位の作業域)", "bbs": "WQE の大きさ(WQEBB = 64 バイトの数)"},
+      "ret": "`BFM_OK`: 出した。そのほか負: 空きを待つ間の `poll_one()` のエラー完了の値、または `wait_done()` の失敗の値(エラー完了なら `poll_one()` の値、時間切れなら `BFM_E_TIMEOUT`)。",
+      "pre": "`w` の制御セグメントの WQE の位置が、今の `c->qp.sq_pc` で組まれていること(`build_ctrl()`)。",
+      "notes": "* 書く順は、リングへ写す → `bfm_dma_wmb()` → doorbell record(`dbr[1]`)→ `bfm_dma_wmb()` → 窓(またはドアベル)→ `bfm_wc_flush()`。\n* 位置ごとの WQE の大きさを `wqe_bbs[]` に覚える(`poll_one()` が済んだ位置を求めるのに使う)。\n* 空きを待つ間の `wait_done()` の失敗は、その戻り値(エラー完了も時間切れも)をそのまま返す。",
+      "flow": [
+        {"while": "(sq_pc + bbs) - sq_done > SQ_N(空きが足りない)?", "body": [
+          {"call": "r = poll_one(c) を呼ぶ"},
+          {"if": "r < 0 ?", "then": [{"return": "r"}]},
+          {"if": "r == 0 ?", "then": [
+            {"call": "w_rc = wait_done(c, sq_done + 1) を呼ぶ"},
+            {"if": "w_rc != BFM_OK ?", "then": [{"return": "w_rc"}]}
+          ]}
+        ]},
+        {"do": "pc = sq_pc。b = 0"},
+        {"while": "b < bbs ?", "body": [
+          {"do": "w の b 番目の WQEBB(8 バイト x 8)をリングの (pc + b) & (SQ_N - 1) 番目へ写す"},
+          {"call": "bfm_port_cache_flush(dst, 64) を呼ぶ"},
+          {"do": "b++"}
+        ]},
+        {"do": "wqe_bbs[pc & (SQ_N - 1)] = bbs。sq_pc = pc + bbs"},
+        {"do": "bfm_dma_wmb()。dbr[1] = sq_pc の下位 16 ビット(BE)"},
+        {"call": "bfm_port_cache_flush(dbr, 8) を呼ぶ"},
+        {"do": "bfm_dma_wmb()"},
+        {"if": "c->bf != NULL かつ bbs x 64 <= g_bfm.bf_buf_size ?", "then": [
+          {"do": "WQE 全体(bbs x 8 個の 8 バイト)を BlueFlame の窓 (bf + bf_off) へ書く"}
+        ], "else": [
+          {"do": "bfm_mmio_wr64_raw(db + bf_off, w[0]) で先頭 8 バイトだけをドアベルへ書く"}
+        ]},
+        {"do": "bfm_wc_flush()"},
+        {"do": "bf_off ^= g_bfm.bf_buf_size(窓の面を切り替える)"},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "put32",
+      "summary": "WQE の作業域の `byte_off` バイト目へ、32 ビットの値をビッグエンディアンで書く。",
+      "args": {"w": "WQE の作業域", "byte_off": "書く位置(バイト)", "v": "書く値(ホスト順)"},
+      "ret": "なし",
+      "pre": "`byte_off + 4` が作業域に収まること。",
+      "notes": "特になし。",
+      "flow": [
+        {"do": "be = bfm_cpu_to_be32(v)"},
+        {"do": "w + byte_off へ be を 4 バイト写す"}
+      ]
+    },
+    {
+      "func": "put64",
+      "summary": "WQE の作業域の `byte_off` バイト目へ、64 ビットの値をビッグエンディアンで書く。",
+      "args": {"w": "WQE の作業域", "byte_off": "書く位置(バイト)", "v": "書く値(ホスト順)"},
+      "ret": "なし",
+      "pre": "`byte_off + 8` が作業域に収まること。",
+      "notes": "特になし。",
+      "flow": [
+        {"do": "be = bfm_cpu_to_be64(v)"},
+        {"do": "w + byte_off へ be を 8 バイト写す"}
+      ]
+    },
+    {
+      "func": "build_ctrl",
+      "summary": "WQE の制御セグメント(先頭 16 バイト)を組む。WQE の位置(今の `sq_pc` の下位 16 ビット)と opcode、QP の番号と DS の数、完了通知を求めるか(`MLX5_WQE_CTRL_CQ_UPDATE`)を書く。",
+      "args": {"c": "出す接続", "w": "WQE の作業域", "opcode": "WQE の opcode(`MLX5_OPCODE_*`)", "ds": "WQE の大きさ(16 バイト単位)", "signaled": "0 以外なら完了通知(CQE)を求める"},
+      "ret": "なし",
+      "pre": "この WQE を、次に `post()` で出すこと(位置を今の `sq_pc` で書くため)。",
+      "notes": "特になし。",
+      "flow": [
+        {"do": "byte 0 = (sq_pc の下位 16 ビット << 8) OR opcode"},
+        {"do": "byte 4 = qpn8 OR ds"},
+        {"if": "signaled ?", "then": [{"do": "byte 8 = MLX5_WQE_CTRL_CQ_UPDATE"}], "else": [{"do": "byte 8 = 0"}]},
+        {"do": "byte 12 = 0"}
+      ]
+    },
+    {
+      "func": "build_raddr",
+      "summary": "WQE の remote address セグメント(byte 16〜31)を組む。相手の公開メモリの先頭 + `off` と、相手の rkey を書く。",
+      "args": {"c": "出す接続(相手の `raddr` / `rkey` を持つ)", "w": "WQE の作業域", "off": "相手の公開メモリの先頭からのオフセット"},
+      "ret": "なし",
+      "pre": "`off` の範囲を `check_range()` で確かめてあること。",
+      "notes": "特になし。",
+      "flow": [
+        {"do": "byte 16 = raddr + off(64 ビット)、byte 24 = rkey、byte 28 = 0"}
+      ]
+    },
+    {
+      "func": "build_dseg",
+      "summary": "WQE のデータセグメント(16 バイト)を `at` バイト目に組む。長さ、手元の lkey(`g_bfm.lkey`)、手元のバッファの DMA アドレスを書く。",
+      "args": {"w": "WQE の作業域", "at": "データセグメントを置く位置(バイト)", "len": "データの長さ(バイト)", "addr": "手元のバッファの DMA アドレス"},
+      "ret": "なし",
+      "pre": "`addr` が DMA 領域の中のアドレス(`bfm_dma_addr()` の値)であること。",
+      "notes": "特になし。",
+      "flow": [
+        {"do": "byte at = len、at + 4 = g_bfm.lkey、at + 8 = addr"}
+      ]
+    },
+    {
+      "func": "build_write_inline",
+      "summary": "データを WQE に埋め込んだ RDMA write の WQE を組む。WQE を 0 で埋め、制御セグメント(`MLX5_OPCODE_RDMA_WRITE`)と remote address セグメントを組み、byte 32 に inline セグメントの頭(`MLX5_INLINE_SEG` OR 長さ)、byte 36 からデータを置く。",
+      "args": {"c": "出す接続", "w": "WQE の作業域", "off": "相手の公開メモリの先頭からのオフセット", "src": "書くデータ", "len": "データの長さ(バイト)", "signaled": "0 以外なら完了通知を求める"},
+      "ret": "WQE の大きさ(WQEBB の数)。",
+      "pre": "`len` が `INLINE_MAX` 以下であること。",
+      "notes": "DS の数は 2 + (4 + len + 15) / 16。0 で埋めるのは WQEBB の単位に切り上げた大きさ。",
+      "flow": [
+        {"do": "ds = 2 + (4 + len + 15) / 16"},
+        {"do": "w を WQEBB の単位に切り上げた大きさだけ 0 で埋める"},
+        {"call": "build_ctrl(c, w, MLX5_OPCODE_RDMA_WRITE, ds, signaled) を呼ぶ"},
+        {"call": "build_raddr(c, w, off) を呼ぶ"},
+        {"call": "put32(w, 32, MLX5_INLINE_SEG OR len) を呼ぶ"},
+        {"do": "w + 36 へ src を len バイト写す"},
+        {"return": "(ds + 3) / 4"}
+      ]
+    },
+    {
+      "func": "check_range",
+      "summary": "操作の前に、接続が使えることと、相手の公開メモリの範囲 [off, off + len) が収まることを確かめる。",
+      "args": {"c": "操作する接続(NULL 可)", "off": "相手の公開メモリの先頭からのオフセット", "len": "長さ(バイト)"},
+      "ret": "`BFM_OK`: 使える。`BFM_E_STATE`: 接続が使えない。`BFM_E_PARAM`: 長さが 0、相手の公開メモリが 0、または範囲外。",
+      "pre": "特になし。",
+      "notes": "`off + len` のあふれが起きない形で比べる。",
+      "flow": [
+        {"call": "conn_usable(c) を呼ぶ"},
+        {"if": "接続が使えない?", "then": [{"return": "BFM_E_STATE"}]},
+        {"if": "len == 0、rlen == 0、off > rlen、または len > rlen - off ?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "bfm_ops_attach",
+      "summary": "接続ができた後に、データ経路の状態を初期化する。QP の番号を 8 ビットずらした値(`qpn8`)を求め、済んだ位置を今の SQ の位置に合わせ、通知なしの数・窓の面・記録した syndrome・`last_scat` を 0 にする。",
+      "args": {"c": "接続ができた接続"},
+      "ret": "`BFM_OK`(常に)。",
+      "pre": "`c` の QP が作られ、`c->qp.qpn` と `c->qp.sq_pc` が正しいこと。",
+      "notes": "接続管理(`bfm_connect()` / `bfm_accept()`)が呼ぶ。",
+      "flow": [
+        {"do": "qpn8 = qp.qpn << 8。sq_done = qp.sq_pc"},
+        {"do": "unsig = 0、bf_off = 0、last_synd = last_vsynd = 0、last_scat = NULL"},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "bfm_ops_detach",
+      "summary": "接続を返すときに、データ経路の状態を片付ける(`last_scat` を NULL にする)。",
+      "args": {"c": "返す接続"},
+      "ret": "なし",
+      "pre": "特になし。",
+      "notes": "接続管理(`conn_release()`)が呼ぶ。",
+      "flow": [
+        {"do": "last_scat = NULL"}
+      ]
+    },
+    {
+      "func": "bfm_conn_mark_error",
+      "summary": "EQ のイベントで QP のエラーを知ったときに、その QP を使っている接続を探し、使えている(`BFM_CS_UP`)ものを表示して `BFM_CS_ERROR` にする。",
+      "args": {"qpn": "エラーになった QP の番号", "why": "表示する理由"},
+      "ret": "なし",
+      "pre": "特になし。",
+      "notes": "`mlx5_eq_poll()` が呼ぶ。`BFM_CS_UP` でない接続と QP を作っていない接続は変えない。",
+      "flow": [
+        {"do": "i = 0"},
+        {"while": "i < BFM_MAX_CONN ?", "body": [
+          {"do": "c = &g_bfm_conn[i]"},
+          {"if": "c->state == BFM_CS_UP かつ qp.has_qp かつ qp.qpn == qpn ?", "then": [
+            {"do": "BFM_LOG で接続の番号と理由を表示"},
+            {"do": "c->state = BFM_CS_ERROR"}
+          ]},
+          {"do": "i++"}
+        ]}
+      ]
+    },
+    {
+      "func": "bfm_ops_post_rw",
+      "summary": "性能の試験用(試験プログラムの bench が使う)。write か read を、完了を待たずに 1 個出す。完了通知は必ず求めるので、完了は `bfm_ops_poll1()` で 1 個ずつ、出した順に拾える。write で `len` が `INLINE_MAX` 以下ならデータを WQE に埋め込み、そうでなければ中継バッファの `stage_off` から送る。read は中継バッファの `stage_off` へ読む。",
+      "args": {"c": "出す接続", "is_read": "0: write。0 以外: read", "off": "相手の公開メモリの先頭からのオフセット", "stage_off": "中継バッファの中の位置(バイト)", "src": "inline の write で埋め込むデータ", "len": "長さ(バイト)"},
+      "ret": "`BFM_OK`: 出した。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗、または(inline でない write と read で)`stage_off + len` が中継バッファを超える。そのほか `post()` の戻り値。",
+      "pre": "SQ に積む数を、試験側が `bfm_ops_poll1()` で拾える数に抑えること。",
+      "notes": "* 中継バッファから送る write では、中身は呼び出し側が置く(この関数は `src` を写さない)。\n* inline の write は中継バッファを使わないので、`stage_off` を見ない(`stage_off + len` の検査は inline でない write と read だけに掛かる)。\n* read の応答が CQE に入った(32 バイトまで)ときは、中継バッファには書かれない。",
+      "flow": [
+        {"call": "rc = check_range(c, off, len) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"if": "!is_read かつ len <= INLINE_MAX ?", "then": [
+          {"call": "build_write_inline(c, w, off, src, len, 1) を呼ぶ"},
+          {"call": "post(c, w, bbs) を呼ぶ"},
+          {"return": "post() の値"}
+        ]},
+        {"if": "stage_off + len > stage_size ?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"do": "w の先頭 64 バイトを 0 で埋める"},
+        {"if": "is_read ?", "then": [{"call": "build_ctrl(c, w, MLX5_OPCODE_RDMA_READ, 3, 1) を呼ぶ"}], "else": [{"call": "build_ctrl(c, w, MLX5_OPCODE_RDMA_WRITE, 3, 1) を呼ぶ"}]},
+        {"call": "build_raddr(c, w, off) を呼ぶ"},
+        {"call": "build_dseg(w, 32, len, bfm_dma_addr(stage + stage_off)) を呼ぶ"},
+        {"call": "post(c, w, 1) を呼ぶ"},
+        {"return": "post() の値"}
+      ]
+    },
+    {
+      "func": "bfm_ops_poll1",
+      "summary": "性能の試験用(試験プログラムの bench が使う)。完了を 1 個拾う(`poll_one()` をそのまま呼ぶ)。",
+      "args": {"c": "完了を拾う接続"},
+      "ret": "1: 拾った。0: まだ無い。負: エラー完了(`poll_one()` の値)。",
+      "pre": "`bfm_ops_post_rw()` で出した操作があること。",
+      "notes": "特になし。",
+      "flow": [
+        {"call": "poll_one(c) を呼ぶ"},
+        {"return": "poll_one() の値"}
+      ]
+    },
+    {
+      "func": "bfm_write",
+      "summary": "相手の公開メモリ + `off` へ `len` バイト書き、相手の NIC が受け取った(完了が返った)ところで戻る。`INLINE_MAX` バイトまではデータを WQE に埋め込んで 1 個の WQE で出す。それより長いものは、中継バッファの大きさずつ中継バッファへ写して RDMA write で送り、1 回ごとに完了を待つ。",
+      "args": {"c": "書く接続", "off": "相手の公開メモリの先頭からのオフセット", "src": "書くデータ", "len": "長さ(バイト)"},
+      "ret": "`BFM_OK`: 書けた。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗。そのほか `post()` / `wait_done()` の戻り値(`BFM_E_TIMEOUT`、エラー完了の値)。",
+      "pre": "`bfm_connect()` / `bfm_accept()` で得た接続であること。同じ接続を複数のタスクから同時に使わないこと。",
+      "notes": "* 長いものを分けて送る途中で失敗すると、それまでの分は相手に書かれている。\n* 中継バッファへ写した後に `bfm_port_cache_flush()` でキャッシュを書き戻す。",
+      "flow": [
+        {"call": "rc = check_range(c, off, len) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"if": "len <= INLINE_MAX ?", "then": [
+          {"call": "bbs = build_write_inline(c, w, off, src, len, 1) を呼ぶ"},
+          {"call": "rc = post(c, w, bbs) を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+          {"call": "wait_done(c, qp.sq_pc) を呼ぶ"},
+          {"return": "wait_done() の値"}
+        ]},
+        {"do": "s = src"},
+        {"while": "len > 0 ?", "body": [
+          {"do": "n = len と stage_size の小さいほう"},
+          {"do": "中継バッファへ s から n バイト写す"},
+          {"call": "bfm_port_cache_flush(stage, n) を呼ぶ"},
+          {"do": "w の先頭 64 バイトを 0 で埋める"},
+          {"call": "build_ctrl(c, w, MLX5_OPCODE_RDMA_WRITE, 3, 1) を呼ぶ"},
+          {"call": "build_raddr(c, w, off) を呼ぶ"},
+          {"call": "build_dseg(w, 32, n, bfm_dma_addr(stage)) を呼ぶ"},
+          {"call": "rc = post(c, w, 1) を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+          {"call": "rc = wait_done(c, qp.sq_pc) を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+          {"do": "s += n、off += n、len -= n"}
+        ]},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "bfm_write_post",
+      "summary": "データを WQE に埋め込んだ write を、完了を待たずに出す。通知なしが `g_bfm_signal_every` 個続いたとき、または SQ に積んだ量が半分を超えたときだけ完了通知を求める。",
+      "args": {"c": "書く接続", "off": "相手の公開メモリの先頭からのオフセット", "src": "書くデータ", "len": "長さ(バイト。`bfm_inline_max()` 以下)"},
+      "ret": "`BFM_OK`: 出した。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗、または `len` が `INLINE_MAX` を超える。そのほか `post()` の戻り値。",
+      "pre": "`bfm_write()` と同じ。",
+      "notes": "* 終わるのを待つには `bfm_flush()` を呼ぶこと。\n* 送る順に相手のメモリへ届く(RC の順序保証)。\n* 通知を挟むのは、通知なしが続きすぎると SQ の空き(`sq_done`)が分からなくなるため。",
+      "flow": [
+        {"call": "rc = check_range(c, off, len) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"if": "len > INLINE_MAX ?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"do": "sig = (++unsig >= g_bfm_signal_every) または (sq_pc - sq_done > SQ_N / 2)"},
+        {"call": "bbs = build_write_inline(c, w, off, src, len, sig) を呼ぶ"},
+        {"if": "sig ?", "then": [{"do": "unsig = 0"}]},
+        {"call": "post(c, w, bbs) を呼ぶ"},
+        {"return": "post() の値"}
+      ]
+    },
+    {
+      "func": "bfm_flush",
+      "summary": "`bfm_write_post()` で出したものが全部終わるまで待つ。最後に出したものが通知なしなら、通知を求める NOP を足して出し、その完了を待つ(完了は投稿の順なので、NOP の完了 = それまでの write が全部相手に受け取られた)。",
+      "args": {"c": "待つ接続"},
+      "ret": "`BFM_OK`: 全部終わった(出したものが無いときも)。`BFM_E_STATE`: 接続が使えない。そのほか `post()` / `wait_done()` の戻り値。",
+      "pre": "`bfm_write()` と同じ。",
+      "notes": "特になし。",
+      "flow": [
+        {"call": "conn_usable(c) を呼ぶ"},
+        {"if": "接続が使えない?", "then": [{"return": "BFM_E_STATE"}]},
+        {"if": "sq_done == qp.sq_pc ?", "then": [{"return": "BFM_OK"}]},
+        {"if": "unsig != 0 ?", "then": [
+          {"do": "w(64 バイト)を 0 で埋める"},
+          {"call": "build_ctrl(c, w, MLX5_OPCODE_NOP, 1, 1) を呼ぶ"},
+          {"call": "rc = post(c, w, 1) を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+          {"do": "unsig = 0"}
+        ]},
+        {"call": "wait_done(c, qp.sq_pc) を呼ぶ"},
+        {"return": "wait_done() の値"}
+      ]
+    },
+    {
+      "func": "bfm_read",
+      "summary": "相手の公開メモリ + `off` から `len` バイト読む。中継バッファの大きさずつ RDMA read を出して完了を待ち、応答が CQE に入っていて 32 バイト以下ならその CQE から、そうでなければ中継バッファから `dst` へ写す。",
+      "args": {"c": "読む接続", "off": "相手の公開メモリの先頭からのオフセット", "dst": "読んだデータを置く先", "len": "長さ(バイト)"},
+      "ret": "`BFM_OK`: 読めた。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗。そのほか `post()` / `wait_done()` の戻り値。",
+      "pre": "`bfm_write()` と同じ。",
+      "notes": "* 途中で失敗すると、`dst` にはそれまでの分だけが入っている。\n* 中継バッファから写す前に `bfm_port_cache_inval()` でキャッシュを捨てる。",
+      "flow": [
+        {"call": "rc = check_range(c, off, len) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"do": "d = dst"},
+        {"while": "len > 0 ?", "body": [
+          {"do": "n = len と stage_size の小さいほう"},
+          {"do": "w(64 バイト)を 0 で埋める"},
+          {"call": "build_ctrl(c, w, MLX5_OPCODE_RDMA_READ, 3, 1) を呼ぶ"},
+          {"call": "build_raddr(c, w, off) を呼ぶ"},
+          {"call": "build_dseg(w, 32, n, bfm_dma_addr(stage)) を呼ぶ"},
+          {"call": "rc = post(c, w, 1) を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+          {"call": "rc = wait_done(c, qp.sq_pc) を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+          {"if": "last_scat != NULL かつ n <= SCAT_MAX(32)?", "then": [
+            {"do": "CQE(last_scat)から d へ n バイト写す"}
+          ], "else": [
+            {"call": "bfm_port_cache_inval(stage, n) を呼ぶ"},
+            {"do": "中継バッファから d へ n バイト写す"}
+          ]},
+          {"do": "d += n、off += n、len -= n"}
+        ]},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "atomic_result",
+      "summary": "atomic の元の値(8 バイト)を数にする。応答が CQE に入っていればそこから読み、ビッグエンディアンとして直す。そうでなければ中継バッファから読み、HCA がホスト順の設定(`g_bfm.atomic_host_order`)ならそのまま、そうでなければビッグエンディアンとして直す。",
+      "args": {"c": "atomic を終えた接続"},
+      "ret": "atomic の元の値(ホスト順)。",
+      "pre": "`c` の直前の完了が、この atomic の完了であること。",
+      "notes": "CQE に入って返った値は、HCA の設定によらずビッグエンディアン(ConnectX-4 Lx で確認)。メモリへ書かれた値は、HCA がホスト順の設定ならホスト順、そうでなければビッグエンディアン。",
+      "flow": [
+        {"if": "last_scat != NULL ?", "then": [
+          {"do": "raw = CQE(last_scat)の先頭 8 バイト"},
+          {"return": "bfm_rd64be(raw)"}
+        ]},
+        {"call": "bfm_port_cache_inval(stage, 8) を呼ぶ"},
+        {"do": "raw = 中継バッファの先頭 8 バイト"},
+        {"if": "g_bfm.atomic_host_order ?", "then": [
+          {"return": "raw をそのまま 64 ビットの値にしたもの"}
+        ]},
+        {"return": "bfm_rd64be(raw)"}
+      ]
+    },
+    {
+      "func": "atomic_op",
+      "summary": "8 バイトの atomic(CAS・FAA)を 1 個出して完了を待ち、元の値を `*old` に返す。WQE は制御セグメント・remote address セグメント・atomic セグメント(byte 32 に `swap_add`、byte 40 に `cmp`)・元の値を受けるデータセグメント(中継バッファ)の 64 バイト。",
+      "args": {"c": "操作する接続", "opcode": "`MLX5_OPCODE_ATOMIC_CS` か `MLX5_OPCODE_ATOMIC_FA`", "off": "相手の公開メモリの先頭からのオフセット", "swap_add": "CAS なら置き換える値、FAA なら足す値", "cmp": "CAS なら比べる値(FAA では 0)", "old": "元の値を入れる先(NULL なら返さない)"},
+      "ret": "`BFM_OK`: 終わった。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗、または相手のアドレス(`raddr + off`)が 8 の倍数でない。そのほか `post()` / `wait_done()` の戻り値。",
+      "pre": "`bfm_write()` と同じ。",
+      "notes": "失敗したときは `*old` を書かない。",
+      "flow": [
+        {"call": "rc = check_range(c, off, 8) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"if": "(raddr + off) & 7 != 0 ?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"do": "w(64 バイト)を 0 で埋める"},
+        {"call": "build_ctrl(c, w, opcode, 4, 1) を呼ぶ"},
+        {"call": "build_raddr(c, w, off) を呼ぶ"},
+        {"call": "put64(w, 32, swap_add)、put64(w, 40, cmp) を呼ぶ"},
+        {"call": "build_dseg(w, 48, 8, bfm_dma_addr(stage)) を呼ぶ"},
+        {"call": "rc = post(c, w, 1) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"call": "rc = wait_done(c, qp.sq_pc) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"if": "old != NULL ?", "then": [{"call": "*old = atomic_result(c) を呼ぶ"}]},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "bfm_cas",
+      "summary": "相手の公開メモリ + `off` の 8 バイトに compare-and-swap を行う。値が `expect` なら `desired` に置き換え、元の値を `*old` に返す。",
+      "args": {"c": "操作する接続", "off": "相手の公開メモリの先頭からのオフセット(8 の倍数)", "expect": "比べる値", "desired": "置き換える値", "old": "元の値を入れる先(NULL なら返さない)"},
+      "ret": "`atomic_op()` の戻り値。",
+      "pre": "`bfm_write()` と同じ。",
+      "notes": "`*old == expect` なら置き換わった。",
+      "flow": [
+        {"call": "atomic_op(c, MLX5_OPCODE_ATOMIC_CS, off, desired, expect, old) を呼ぶ"},
+        {"return": "atomic_op() の値"}
+      ]
+    },
+    {
+      "func": "bfm_faa",
+      "summary": "相手の公開メモリ + `off` の 8 バイトに fetch-and-add を行い、足す前の値を `*old` に返す。",
+      "args": {"c": "操作する接続", "off": "相手の公開メモリの先頭からのオフセット(8 の倍数)", "add": "足す値", "old": "足す前の値を入れる先(NULL なら返さない)"},
+      "ret": "`atomic_op()` の戻り値。",
+      "pre": "`bfm_write()` と同じ。",
+      "notes": "特になし。",
+      "flow": [
+        {"call": "atomic_op(c, MLX5_OPCODE_ATOMIC_FA, off, add, 0, old) を呼ぶ"},
+        {"return": "atomic_op() の値"}
+      ]
+    },
+    {
+      "func": "bfm_inline_max",
+      "summary": "WQE に埋め込める write の最大バイト数(`INLINE_MAX` = `BFM_WQE_MAX` - 32 - 4)を返す。",
+      "args": {},
+      "ret": "`INLINE_MAX`(`BFM_WQE_MAX` が 256 なら 220)。",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"return": "INLINE_MAX"}
+      ]
+    },
+    {
+      "func": "bfm_bf_active",
+      "summary": "接続が BlueFlame で WQE を送っている(WC の窓が取れた)かを返す。",
+      "args": {"c": "調べる接続(NULL 可)"},
+      "ret": "1: BlueFlame を使っている。0: 使っていない、または `c` が NULL。",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"return": "c != NULL && c->bf != NULL"}
+      ]
+    },
+    {
+      "func": "bfm_is_up",
+      "summary": "接続が使えるかを返す(`conn_usable()`)。",
+      "args": {"c": "調べる接続(NULL 可)"},
+      "ret": "1: 使える。0: エラーか相手から切断された、または `c` が NULL。",
+      "pre": "特になし。",
+      "notes": "0 になった接続は `bfm_disconnect()` で返すこと。",
+      "flow": [
+        {"call": "conn_usable(c) を呼ぶ"},
+        {"return": "conn_usable() の値"}
+      ]
+    },
+    {
+      "func": "bfm_remote_size",
+      "summary": "相手の公開メモリの大きさ(`off` の上限)を返す。",
+      "args": {"c": "調べる接続(NULL 可)"},
+      "ret": "相手の公開メモリの大きさ(バイト)。`c` が NULL なら 0。",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"if": "c != NULL ?", "then": [{"return": "c->rlen"}], "else": [{"return": "0"}]}
+      ]
+    },
+    {
+      "func": "bfm_last_syndrome",
+      "summary": "直前のエラー完了の syndrome を返す。",
+      "args": {"c": "調べる接続(NULL 可)"},
+      "ret": "直前のエラー完了の syndrome(0 = なし)。`c` が NULL なら 0。",
+      "pre": "特になし。",
+      "notes": "値は `bfm_ops_attach()` で 0 に戻る。",
+      "flow": [
+        {"if": "c != NULL ?", "then": [{"return": "c->last_synd"}], "else": [{"return": "0"}]}
+      ]
+    },
+    {
+      "func": "bfm_strerror",
+      "summary": "ライブラリの戻り値を、表示用の説明の文字列に直す。",
+      "args": {"rc": "ライブラリの戻り値(`BFM_OK` / `BFM_E_*`)"},
+      "ret": "説明の文字列(静的な文字列)。知らない値は `\"?\"`。",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"switch": "rc", "cases": [
+          {"case": "BFM_OK", "body": [{"return": "\"成功\""}]},
+          {"case": "BFM_E_PARAM", "body": [{"return": "\"引数が不正\""}]},
+          {"case": "BFM_E_STATE", "body": [{"return": "\"接続が使えない\""}]},
+          {"case": "BFM_E_TIMEOUT", "body": [{"return": "\"時間切れ\""}]},
+          {"case": "BFM_E_HW", "body": [{"return": "\"FW のコマンドが失敗\""}]},
+          {"case": "BFM_E_NOMEM", "body": [{"return": "\"資源が足りない\""}]},
+          {"case": "BFM_E_REMOTE", "body": [{"return": "\"相手が拒否(rkey・範囲・権限)\""}]},
+          {"case": "BFM_E_RETRY", "body": [{"return": "\"再送が尽きた(相手に届かない)\""}]},
+          {"case": "BFM_E_CQE", "body": [{"return": "\"エラー完了\""}]},
+          {"default": true, "body": [{"return": "\"?\""}]}
+        ]}
+      ]
+    }
+  ]
+}

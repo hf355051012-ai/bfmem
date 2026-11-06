@@ -1,0 +1,121 @@
+{
+  "file": "src/bfm_core.c",
+  "summary": "ライブラリの入口。設定の検査、移植層・PCIe・HCA・接続管理の順の立ち上げ(`bfm_init()`)、その逆順の停止(`bfm_shutdown()`)、非同期の処理(`bfm_poll()`)を持つ。立ち上げ済みかどうかを静的変数 `s_inited` で持つ。",
+  "functions": [
+    {
+      "func": "check_config",
+      "summary": "立ち上げの前に設定の変数を検査する。\n\n* DMA 領域と公開メモリの先頭・大きさが 4KiB の境界・倍数で、大きさが 0 でないこと\n* DMA 領域と公開メモリが重ならないこと\n* `g_bfm_local_ip` が 0 でないこと\n\nあわせて `g_bfm_stage_size` を 4KiB 以上に、`g_bfm_signal_every` を 1 以上に直す。",
+      "args": {},
+      "ret": "`BFM_OK`: 使える設定。`BFM_E_PARAM`: 使えない設定(理由を表示する)。",
+      "pre": "特になし。",
+      "notes": "`g_bfm_stage_size` と `g_bfm_signal_every` は、範囲外ならこの関数が書き換える(呼び出し側が入れた値が変わる)。",
+      "flow": [
+        {"if": "DMA 領域・公開メモリの先頭と大きさが 4KiB の境界・倍数でない、または大きさが 0 ?", "then": [
+          {"do": "BFM_LOG で理由を表示"},
+          {"return": "BFM_E_PARAM"}
+        ]},
+        {"if": "DMA 領域と公開メモリが重なる?", "then": [
+          {"do": "BFM_LOG で理由を表示"},
+          {"return": "BFM_E_PARAM"}
+        ]},
+        {"if": "g_bfm_local_ip == 0 ?", "then": [
+          {"do": "BFM_LOG で理由を表示"},
+          {"return": "BFM_E_PARAM"}
+        ]},
+        {"if": "g_bfm_stage_size < 4KiB ?", "then": [{"do": "g_bfm_stage_size = 4KiB"}]},
+        {"if": "g_bfm_signal_every == 0 ?", "then": [{"do": "g_bfm_signal_every = 1"}]},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "cleanup",
+      "summary": "立ち上げの途中で失敗したときと停止のときの後片付け。FW が動いていれば止め(`TEARDOWN_HCA`)、BAR0 を張っていれば Bus Master を落として BAR0 を外し、`port_ok` が 0 でなければ移植層を閉じる。",
+      "args": {"port_ok": "0 以外なら `bfm_port_fini()` で移植層を閉じる"},
+      "ret": "なし",
+      "pre": "`g_bfm` の `hca_enabled` / `bar0` が、そのときの状態を正しく表していること。",
+      "notes": "Bus Master を落としてから BAR0 を外すので、この後 NIC はメモリへ DMA しない。`hca_enabled` が 1 のときは FW を止めてから Bus Master を落とす。",
+      "flow": [
+        {"if": "g_bfm.hca_enabled ?", "then": [{"call": "mlx5_hca_teardown(&g_bfm) を呼ぶ"}]},
+        {"if": "g_bfm.bar0 != NULL ?", "then": [
+          {"call": "bfm_pci_bus_master(0) を呼ぶ"},
+          {"call": "bfm_port_bar0_unmap() を呼ぶ"},
+          {"do": "g_bfm.bar0 = NULL"}
+        ]},
+        {"if": "port_ok ?", "then": [{"call": "bfm_port_fini() を呼ぶ"}]}
+      ]
+    },
+    {
+      "func": "bfm_init",
+      "summary": "ライブラリを立ち上げる。設定の検査 → 移植層の初期化(DMA 領域と公開メモリを使えるようにする)→ DMA 領域の切り出しの初期化 → PCIe の設定 → BAR0 を張る → HCA の立ち上げ(`mlx5_hca_init()`)→ 接続管理の準備(GSI と接続の枠。`bfm_cm_init()`)の順に行い、使った DMA 領域などを表示する。",
+      "args": {},
+      "ret": "`BFM_OK`: 立ち上がった(既に立ち上がっていたときも)。`BFM_E_PARAM`: 設定が不正。`BFM_E_HW`: 移植層・PCIe・BAR0 の失敗。そのほか `mlx5_hca_init()` / `bfm_cm_init()` の戻り値(`BFM_E_HW` / `BFM_E_NOMEM` / `BFM_E_TIMEOUT` など)。",
+      "pre": "`include/bfm_config.h` の変数を設定し終えていること。1 つのタスクから呼ぶこと。",
+      "notes": "* 2 回目以降の呼び出しは何もせず `BFM_OK` を返す。\n* 途中で失敗したら `cleanup(1)` で取ったものを返してから戻る(移植層の初期化そのものの失敗は除く)。\n* `g_bfm` と `g_bfm_conn` を 0 で初期化する。",
+      "flow": [
+        {"if": "s_inited ?", "then": [{"return": "BFM_OK"}]},
+        {"call": "rc = check_config() を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"do": "g_bfm と g_bfm_conn を 0 で埋める"},
+        {"call": "bfm_port_init() を呼ぶ"},
+        {"if": "bfm_port_init() != 0 ?", "then": [
+          {"do": "BFM_LOG で失敗を表示"},
+          {"return": "BFM_E_HW"}
+        ]},
+        {"call": "bfm_mem_reset() を呼ぶ"},
+        {"call": "bfm_pci_setup(&g_bfm) を呼ぶ"},
+        {"if": "bfm_pci_setup() != 0 ?", "then": [
+          {"call": "cleanup(1) を呼ぶ"},
+          {"return": "BFM_E_HW"}
+        ]},
+        {"call": "g_bfm.bar0 = bfm_port_bar0_map(bar0_phys, bar0_size) を呼ぶ"},
+        {"if": "g_bfm.bar0 == NULL ?", "then": [
+          {"do": "BFM_LOG で失敗を表示"},
+          {"call": "cleanup(1) を呼ぶ"},
+          {"return": "BFM_E_HW"}
+        ]},
+        {"call": "rc = mlx5_hca_init(&g_bfm) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [
+          {"call": "cleanup(1) を呼ぶ"},
+          {"return": "rc"}
+        ]},
+        {"call": "rc = bfm_cm_init() を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [
+          {"call": "cleanup(1) を呼ぶ"},
+          {"return": "rc"}
+        ]},
+        {"call": "bfm_mem_used() / bfm_inline_max() で使った量などを BFM_LOG で表示"},
+        {"do": "s_inited = 1"},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "bfm_shutdown",
+      "summary": "ライブラリを止める。全部の接続を畳み(`bfm_cm_fini()`)、FW を止め、Bus Master を落とし、BAR0 と移植層を閉じる(`cleanup(1)`)。",
+      "args": {},
+      "ret": "なし",
+      "pre": "`bfm_init()` と同じタスクから呼ぶこと。",
+      "notes": "立ち上がっていなければ何もしない。接続が残っていれば `bfm_cm_fini()` が相手へ DREQ を送ってから畳む。",
+      "flow": [
+        {"if": "!s_inited ?", "then": [{"return": ""}]},
+        {"call": "bfm_cm_fini() を呼ぶ"},
+        {"call": "cleanup(1) を呼ぶ"},
+        {"do": "s_inited = 0"},
+        {"do": "BFM_LOG で「止めた」を表示"}
+      ]
+    },
+    {
+      "func": "bfm_poll",
+      "summary": "非同期の処理を 1 回行う。EQ のイベント(FW のページ要求・リンクの変化・QP のエラー)を読み(`mlx5_eq_poll()`)、GSI に来た CM のメッセージ(相手からの DREQ・REQ の再送)を処理する(`bfm_cm_poll()`)。",
+      "args": {},
+      "ret": "処理したイベントとメッセージの数の合計。立ち上がっていなければ 0。",
+      "pre": "`bfm_init()` と同じタスクから呼ぶこと(データ経路の関数とも同時に呼ばないこと)。",
+      "notes": "データ経路の関数はこれを呼ばない。相手からの切断や FW のページ要求に答えるため、アプリケーションがときどき呼ぶこと。",
+      "flow": [
+        {"if": "!s_inited ?", "then": [{"return": "0"}]},
+        {"call": "mlx5_eq_poll(&g_bfm) を呼ぶ"},
+        {"call": "bfm_cm_poll() を呼ぶ"},
+        {"return": "2 つの戻り値の和"}
+      ]
+    }
+  ]
+}

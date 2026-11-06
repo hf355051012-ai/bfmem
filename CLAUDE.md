@@ -33,6 +33,22 @@ wsl.exe -d Ubuntu-22.04 -- bash -c "cd /mnt/c/Users/fukud/Documents/bfmem && mak
 
 WSL には librdmacm の開発用ヘッダが無いので `tools/bfm_peer.c` は手元でビルドできない(相手の機械でビルドする)。
 
+## 関数仕様書(`doc/spec/`)
+
+`doc/spec/bfmem_spec.adoc`(AsciiDoc、1 ファイル)と図(`doc/spec/images/*.drawio.svg`、draw.io で編集できる SVG)は
+`doc/spec/gen.py` が作る。WSL に asciidoctor(`sudo apt install asciidoctor`)があれば、図を埋め込んだ
+`doc/spec/bfmem_spec.html` も一緒に作る(警告が出たら失敗にする)。**ソースの関数を足す・消す・引数を変える・制御の流れを変えたら、`doc/spec/desc/*.json` を直して作り直すこと。**
+
+```bash
+wsl.exe -d Ubuntu-22.04 -- bash -c "cd /mnt/c/Users/fukud/Documents/bfmem && python3 doc/spec/gen.py --check && python3 doc/spec/gen.py"
+```
+
+- 宣言・引数の型・呼び出しの関係図はソースから自動で取り出す(`--check` が、記述とソースの関数・引数の名前の食い違いを見つける)。
+  処理内容・引数の意味・戻り値・前提条件・注意事項・フローは `desc/*.json` に手で書く(書き方は `desc/README.md`)。
+- **フローの検査はできない**(書いた流れがソースと合っているかは、人が突き合わせる)。直したらその関数のフローも見直すこと。
+- switch の case の終わりの `break` はフローに書かない(書くと外側のループを抜ける意味になる)。
+- 関数ポインタ経由の呼び出しは解析で拾えないので、記述の `indirect` / `entry_note` で書く。
+
 ## 実機の試験
 
 手順・結果は `TEST_PLAN.md`(OptiPlex の ConnectX-4 Lx を vfio-pci にして bfmem、Precision はカーネルの mlx5 で `bfm_peer`)。

@@ -1,0 +1,60 @@
+{
+  "file": "src/bfm_mem.c",
+  "summary": "DMA 領域(`g_bfm_dma_base` / `g_bfm_dma_size`)からの静的な切り出し。切り出した量を静的変数 `s_next`(領域の先頭からのバイト数)で持つ。切り出したものを個別に返すことはせず、`bfm_init()` のたびに `bfm_mem_reset()` で先頭から切り直す。接続ごとの資源は `bfm_init()` のときに `BFM_MAX_CONN` 本ぶんを先に切り出しておく。",
+  "functions": [
+    {
+      "func": "bfm_mem_reset",
+      "summary": "切り出しを先頭からやり直す(`s_next` を 0 にする)。",
+      "args": {},
+      "ret": "なし",
+      "pre": "それまでに切り出した領域を、もう誰も使っていないこと(NIC も含む)。",
+      "notes": "領域の中身は消さない(0 で埋めるのは `bfm_mem_alloc()` が切り出すとき)。`bfm_init()` が移植層の初期化の直後に呼ぶ。",
+      "flow": [
+        {"do": "s_next = 0"}
+      ]
+    },
+    {
+      "func": "bfm_mem_alloc",
+      "summary": "DMA 領域の続きから、`size` バイトを `align` の境界に合わせて切り出し、0 で埋め、キャッシュを吐き出して(`bfm_port_cache_flush()`)先頭を返す。",
+      "args": {
+        "size": "切り出す大きさ(バイト)",
+        "align": "先頭を合わせる境界(バイト)。2 のべき乗であること。0 は 1 とみなす"
+      },
+      "ret": "切り出した領域の先頭(CPU のポインタ。そのまま DMA のアドレスにもなる)。`align` が 2 のべき乗でない、または足りなければ `NULL`。",
+      "pre": "`bfm_mem_reset()` を呼んであること。`g_bfm_dma_base` / `g_bfm_dma_size` が設定され、移植層の初期化(`bfm_port_init()`)で CPU から触れるようになっていること。",
+      "notes": "* `align` が 2 のべき乗でなければ、表示して `NULL` を返す。\n* 足りないときは、使った量・要求した大きさ・足りない量・`g_bfm_dma_size` を表示して `NULL` を返す(`s_next` は変えない)。\n* 足りるかどうかは、`at + size` を作らずに残りの大きさ(`end - at`)と比べる(足し算の桁あふれを避ける)。境界合わせで `at` が領域の外(`at < base` または `at > end`)になったときも足りないとみなし、足りない量は `size` と表示する。\n* 境界合わせで空いた隙間は使わずに捨てる。\n* 返すための関数は無い。",
+      "flow": [
+        {"if": "align == 0 ?", "then": [
+          {"do": "align = 1"}
+        ]},
+        {"if": "align が 2 のべき乗でない((align & (align - 1)) != 0)?", "then": [
+          {"do": "BFM_LOG で「align が 2 の冪ではない」を表示"},
+          {"return": "NULL"}
+        ]},
+        {"do": "base = g_bfm_dma_base、end = base + g_bfm_dma_size"},
+        {"do": "at = (base + s_next + align - 1) を align の境界へ切り下げた値"},
+        {"if": "at < base または at > end または size > end - at ?", "then": [
+          {"do": "need = at が領域の外(at < base または at > end)なら size、そうでなければ size - (end - at)"},
+          {"do": "BFM_LOG で使用済みの量・切り出す大きさ・足りない量(need)・g_bfm_dma_size を表示"},
+          {"return": "NULL"}
+        ]},
+        {"do": "s_next = at + size - g_bfm_dma_base"},
+        {"do": "p = at をポインタにしたもの"},
+        {"do": "memset(p, 0, size) で 0 で埋める"},
+        {"call": "bfm_port_cache_flush(p, size) を呼ぶ"},
+        {"return": "p"}
+      ]
+    },
+    {
+      "func": "bfm_mem_used",
+      "summary": "DMA 領域の先頭から、これまでに切り出した量(境界合わせの隙間を含む)を返す。",
+      "args": {},
+      "ret": "使った量(バイト。`s_next`)。",
+      "pre": "特になし。",
+      "notes": "`bfm_init()` が立ち上げの終わりに、使った量を表示するのに使う。",
+      "flow": [
+        {"return": "s_next"}
+      ]
+    }
+  ]
+}

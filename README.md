@@ -30,6 +30,7 @@ WQE を UAR の BlueFlame の窓へ MMIO で書き込んで送る。相手の CP
 | `port/vxworks/port_vxworks.c` | 移植層: VxWorks(**未検証**)|
 | `test/bfm_test.c` | 試験プログラム(server / client / info)|
 | `tools/bfm_peer.c` | 試験の相手(Linux のカーネルの mlx5 + librdmacm)|
+| `doc/spec/bfmem_spec.adoc` | **関数仕様書**(全ソースの全関数。表・フロー図・関係図。図は `doc/spec/images/*.drawio.svg`)。`doc/spec/gen.py` で作る。HTML 版は `doc/spec/bfmem_spec.html`(図を埋め込んだ 1 ファイル。asciidoctor があれば gen.py が一緒に作る) |
 
 ## API
 

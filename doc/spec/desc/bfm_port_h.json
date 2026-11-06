@@ -1,0 +1,214 @@
+{
+  "file": "include/bfm_port.h",
+  "summary": "移植層の宣言と、CPU の種類で決まる道具。プラットフォームごとに `port/<名前>/` で実装する関数(`bfm_port_*`。`port/linux_vfio/` = x86-64 Linux + VFIO、`port/vxworks/` = VxWorks)を宣言し、バリアのマクロ(`bfm_dma_wmb()` / `bfm_wc_flush()` / `bfm_mb()` / `bfm_rmb()`)と、バイト順・バイト列の読み書き・MMIO・DMA のアドレスの `static inline` の関数をここで定義する。ConnectX の構造(コマンド・WQE・CQE)はすべてビッグエンディアン。DMA に使うアドレス(NIC に渡すアドレス)は CPU のポインタの値そのもの(VxWorks は論理 = 物理、Linux はポート層が仮想アドレス = IOVA になるよう張る)。\n\n`bfm_cpu_to_be32()` / `bfm_cpu_to_be64()` は、ビッグエンディアンの CPU 向けとそれ以外向けの 2 つの定義がある(`__BYTE_ORDER__` でどちらか一方だけがコンパイルされる)。2 つの節は同じ記述を使う。",
+  "functions": [
+    {
+      "func": "bfm_bswap16",
+      "summary": "16bit の値のバイト順を入れ替える。",
+      "args": {"v": "入れ替える値"},
+      "ret": "上位と下位のバイトを入れ替えた値。",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"do": "(v >> 8) OR (v << 8) を 16bit にする"},
+        {"return": "入れ替えた値"}
+      ]
+    },
+    {
+      "func": "bfm_bswap32",
+      "summary": "32bit の値のバイト順を入れ替える(`__builtin_bswap32()`)。",
+      "args": {"v": "入れ替える値"},
+      "ret": "バイト順を逆にした値。",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"do": "__builtin_bswap32(v)"},
+        {"return": "入れ替えた値"}
+      ]
+    },
+    {
+      "func": "bfm_bswap64",
+      "summary": "64bit の値のバイト順を入れ替える(`__builtin_bswap64()`)。",
+      "args": {"v": "入れ替える値"},
+      "ret": "バイト順を逆にした値。",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"do": "__builtin_bswap64(v)"},
+        {"return": "入れ替えた値"}
+      ]
+    },
+    {
+      "func": "bfm_cpu_to_be32",
+      "summary": "32bit の値を CPU のバイト順からビッグエンディアンに直す。ビッグエンディアンの CPU ではそのまま返し、それ以外では `bfm_bswap32()` で入れ替える。",
+      "args": {"v": "CPU のバイト順の値"},
+      "ret": "ビッグエンディアンにした値。",
+      "pre": "特になし。",
+      "notes": "* どちらの定義になるかはコンパイルのときに `__BYTE_ORDER__` で決まる(実行中の分岐ではない)。\n* 逆向き(`bfm_be32_to_cpu()`)も同じ変換なので、マクロでこの関数にしてある。\n* MMIO の読み書き(`bfm_mmio_rd32be()` / `bfm_mmio_wr32be()`)が使う。",
+      "flow": [
+        {"if": "ビッグエンディアンの CPU 向けの定義(`__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__`)?", "then": [
+          {"return": "v"}
+        ], "else": [
+          {"call": "bfm_bswap32(v) を呼ぶ"},
+          {"return": "bfm_bswap32(v) の戻り値"}
+        ]}
+      ]
+    },
+    {
+      "func": "bfm_cpu_to_be64",
+      "summary": "64bit の値を CPU のバイト順からビッグエンディアンに直す。ビッグエンディアンの CPU ではそのまま返し、それ以外では `bfm_bswap64()` で入れ替える。",
+      "args": {"v": "CPU のバイト順の値"},
+      "ret": "ビッグエンディアンにした値。",
+      "pre": "特になし。",
+      "notes": "* どちらの定義になるかはコンパイルのときに `__BYTE_ORDER__` で決まる(実行中の分岐ではない)。\n* 逆向き(`bfm_be64_to_cpu()`)も同じ変換なので、マクロでこの関数にしてある。",
+      "flow": [
+        {"if": "ビッグエンディアンの CPU 向けの定義(`__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__`)?", "then": [
+          {"return": "v"}
+        ], "else": [
+          {"call": "bfm_bswap64(v) を呼ぶ"},
+          {"return": "bfm_bswap64(v) の戻り値"}
+        ]}
+      ]
+    },
+    {
+      "func": "bfm_rd16be",
+      "summary": "`p` から 2 バイトをビッグエンディアンの 16bit の値として読む。",
+      "args": {"p": "読む位置(揃っていなくてよい)"},
+      "ret": "読んだ値(CPU のバイト順)。",
+      "pre": "`p` から 2 バイトが読めること。",
+      "notes": "1 バイトずつ `volatile` で読むので、CPU のバイト順にも位置の揃いにもよらない。",
+      "flow": [
+        {"do": "(b[0] << 8) OR b[1]"},
+        {"return": "読んだ値"}
+      ]
+    },
+    {
+      "func": "bfm_rd24be",
+      "summary": "`p` から 3 バイトをビッグエンディアンの 24bit の値として読む(QPN などの 24bit の欄)。",
+      "args": {"p": "読む位置(揃っていなくてよい)"},
+      "ret": "読んだ値(下位 24bit。CPU のバイト順)。",
+      "pre": "`p` から 3 バイトが読めること。",
+      "notes": "1 バイトずつ `volatile` で読む。",
+      "flow": [
+        {"do": "(b[0] << 16) OR (b[1] << 8) OR b[2]"},
+        {"return": "読んだ値"}
+      ]
+    },
+    {
+      "func": "bfm_rd32be",
+      "summary": "`p` から 4 バイトをビッグエンディアンの 32bit の値として読む。",
+      "args": {"p": "読む位置(揃っていなくてよい)"},
+      "ret": "読んだ値(CPU のバイト順)。",
+      "pre": "`p` から 4 バイトが読めること。",
+      "notes": "1 バイトずつ `volatile` で読む(1 回の 32bit の読みにはならない)。",
+      "flow": [
+        {"do": "(b[0] << 24) OR (b[1] << 16) OR (b[2] << 8) OR b[3]"},
+        {"return": "読んだ値"}
+      ]
+    },
+    {
+      "func": "bfm_rd64be",
+      "summary": "`p` から 8 バイトをビッグエンディアンの 64bit の値として読む。前の 4 バイトを上位、後の 4 バイトを下位にする。",
+      "args": {"p": "読む位置(揃っていなくてよい)"},
+      "ret": "読んだ値(CPU のバイト順)。",
+      "pre": "`p` から 8 バイトが読めること。",
+      "notes": "`bfm_rd32be()` を 2 回呼ぶ(1 回の 64bit の読みにはならない)。",
+      "flow": [
+        {"call": "bfm_rd32be(p) と bfm_rd32be(p + 4) を呼ぶ"},
+        {"return": "(前の値 << 32) OR 後の値"}
+      ]
+    },
+    {
+      "func": "bfm_wr16be",
+      "summary": "`v` をビッグエンディアンの 2 バイトとして `p` に書く。",
+      "args": {"p": "書く位置(揃っていなくてよい)", "v": "書く値(CPU のバイト順)"},
+      "ret": "なし",
+      "pre": "`p` から 2 バイトが書けること。",
+      "notes": "1 バイトずつ `volatile` で書く。",
+      "flow": [
+        {"do": "b[0] = v >> 8、b[1] = v の下位 8bit"}
+      ]
+    },
+    {
+      "func": "bfm_wr24be",
+      "summary": "`v` の下位 24bit をビッグエンディアンの 3 バイトとして `p` に書く。",
+      "args": {"p": "書く位置(揃っていなくてよい)", "v": "書く値(下位 24bit を使う。CPU のバイト順)"},
+      "ret": "なし",
+      "pre": "`p` から 3 バイトが書けること。",
+      "notes": "1 バイトずつ `volatile` で書く。`v` の上位 8bit は捨てる。",
+      "flow": [
+        {"do": "b[0] = v >> 16、b[1] = v >> 8、b[2] = v の下位 8bit"}
+      ]
+    },
+    {
+      "func": "bfm_wr32be",
+      "summary": "`v` をビッグエンディアンの 4 バイトとして `p` に書く。",
+      "args": {"p": "書く位置(揃っていなくてよい)", "v": "書く値(CPU のバイト順)"},
+      "ret": "なし",
+      "pre": "`p` から 4 バイトが書けること。",
+      "notes": "1 バイトずつ `volatile` で書く(1 回の 32bit の書き込みにはならない)。",
+      "flow": [
+        {"do": "b[0] = v >> 24、b[1] = v >> 16、b[2] = v >> 8、b[3] = v の下位 8bit"}
+      ]
+    },
+    {
+      "func": "bfm_wr64be",
+      "summary": "`v` をビッグエンディアンの 8 バイトとして `p` に書く。上位 32bit を前の 4 バイトに、下位 32bit を後の 4 バイトに書く。",
+      "args": {"p": "書く位置(揃っていなくてよい)", "v": "書く値(CPU のバイト順)"},
+      "ret": "なし",
+      "pre": "`p` から 8 バイトが書けること。",
+      "notes": "`bfm_wr32be()` を 2 回呼ぶ(1 回の 64bit の書き込みにはならない)。",
+      "flow": [
+        {"call": "bfm_wr32be(p, v の上位 32bit) を呼ぶ"},
+        {"call": "bfm_wr32be(p + 4, v の下位 32bit) を呼ぶ"}
+      ]
+    },
+    {
+      "func": "bfm_mmio_rd32be",
+      "summary": "MMIO(BAR0 など)の `base + off` から 32bit を 1 回で読み、ビッグエンディアンから CPU のバイト順に直して返す。",
+      "args": {"base": "MMIO の窓の先頭", "off": "先頭からのオフセット(バイト)"},
+      "ret": "読んだ値(CPU のバイト順)。",
+      "pre": "`base + off` が 4 バイトの境界に揃っていて、張った窓の中にあること。",
+      "notes": "`volatile` の 32bit の読みを 1 回だけ出す。",
+      "flow": [
+        {"do": "*(volatile uint32_t *)(base + off) を読む"},
+        {"call": "bfm_be32_to_cpu()(= bfm_cpu_to_be32())で直す"},
+        {"return": "直した値"}
+      ]
+    },
+    {
+      "func": "bfm_mmio_wr32be",
+      "summary": "`v` をビッグエンディアンに直し、MMIO(BAR0 など)の `base + off` へ 32bit を 1 回で書く。",
+      "args": {"base": "MMIO の窓の先頭", "off": "先頭からのオフセット(バイト)", "v": "書く値(CPU のバイト順)"},
+      "ret": "なし",
+      "pre": "`base + off` が 4 バイトの境界に揃っていて、張った窓の中にあること。",
+      "notes": "`volatile` の 32bit の書き込みを 1 回だけ出す。前のメモリの書き込みとの順序はバリア(`bfm_dma_wmb()` など)で呼び出し側が守る。",
+      "flow": [
+        {"call": "bfm_cpu_to_be32(v) で直す"},
+        {"do": "*(volatile uint32_t *)(base + off) = 直した値"}
+      ]
+    },
+    {
+      "func": "bfm_mmio_wr64_raw",
+      "summary": "8 バイトのドアベルを、64bit の書き込み 1 回で `dst` に出す。`v` はバイト順を直さずにそのまま書く。",
+      "args": {"dst": "書く先(UAR のドアベルなど)", "v": "メモリ上の並びのままの値(WQE の先頭 8 バイトをそのまま)"},
+      "ret": "なし",
+      "pre": "`dst` が 8 バイトの境界に揃っていること。",
+      "notes": "32bit 2 回に分けると PCIe 上で分かれうるので 1 回で書く。32bit の CPU ではコンパイラが分けて書くが、UAR は接続ごとに別なので混ざらない。",
+      "flow": [
+        {"do": "*(volatile uint64_t *)dst = v"}
+      ]
+    },
+    {
+      "func": "bfm_dma_addr",
+      "summary": "CPU のポインタを、NIC に渡す DMA のアドレスにする(ポインタの値そのもの)。",
+      "args": {"p": "DMA 領域・公開メモリの中を指すポインタ"},
+      "ret": "DMA のアドレス(`p` の値を 64bit にしたもの)。",
+      "pre": "`p` が、移植層が CPU と NIC の両方から同じアドレスで触れるようにした領域(DMA 領域・公開メモリ)の中を指していること。",
+      "notes": "VxWorks は論理 = 物理、Linux はポート層が仮想アドレス = IOVA になるよう張るので、変換はしない。",
+      "flow": [
+        {"return": "(uint64_t)(uintptr_t)p"}
+      ]
+    }
+  ]
+}

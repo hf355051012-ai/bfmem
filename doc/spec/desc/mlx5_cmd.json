@@ -1,0 +1,289 @@
+{
+  "file": "src/mlx5_cmd.c",
+  "summary": "mlx5 のコマンドキュー、FW へのページの受け渡し(MANAGE_PAGES)、EQ(非同期イベント)を持つ。コマンドキューは entry 0 だけを使い、コマンドを 1 つずつ同期で出す(排他は持たない)。16 バイトを超える入力・出力はメールボックスの鎖(最大 `BFM_MBOX_BLOCKS` ブロック)で渡す。デバイスの状態 `g_bfm` の実体もここに置く。",
+  "functions": [
+    {
+      "func": "mbox_in",
+      "summary": "入力のメールボックスの `i` 番目のブロックの先頭を返す(`d->mbox_in + i * BFM_MBOX_STRIDE`)。",
+      "args": {"d": "デバイスの状態", "i": "ブロックの番号"},
+      "ret": "ブロックの先頭のアドレス。",
+      "pre": "`mlx5_cmd_init()` でメールボックスの領域を取ってあること。`i` が `BFM_MBOX_BLOCKS` より小さいこと。",
+      "notes": "範囲は検査しない。",
+      "flow": [
+        {"return": "d->mbox_in + i * BFM_MBOX_STRIDE"}
+      ]
+    },
+    {
+      "func": "mbox_out",
+      "summary": "出力のメールボックスの `i` 番目のブロックの先頭を返す(`d->mbox_out + i * BFM_MBOX_STRIDE`)。",
+      "args": {"d": "デバイスの状態", "i": "ブロックの番号"},
+      "ret": "ブロックの先頭のアドレス。",
+      "pre": "`mlx5_cmd_init()` でメールボックスの領域を取ってあること。`i` が `BFM_MBOX_BLOCKS` より小さいこと。",
+      "notes": "範囲は検査しない。",
+      "flow": [
+        {"return": "d->mbox_out + i * BFM_MBOX_STRIDE"}
+      ]
+    },
+    {
+      "func": "mlx5_cmd_init",
+      "summary": "コマンドキューを FW に登録する。DMA 領域からコマンドキュー(1 ページ)と入力・出力のメールボックス(各 `BFM_MBOX_BLOCKS` ブロック)を取り、Initialization Segment の `CMDQ_ADDR_L_SZ` の log_stride が 6(entry が 64 バイト)であることを確かめてから、コマンドキューの物理アドレスを `CMDQ_ADDR_H` / `CMDQ_ADDR_L_SZ` へ書く。書いた後 10ms 待つ。",
+      "args": {"d": "デバイスの状態(`cmdq` / `mbox_in` / `mbox_out` を埋める)"},
+      "ret": "`BFM_OK`: 登録した。`BFM_E_NOMEM`: DMA 領域が足りない。`BFM_E_HW`: entry の大きさが 64 バイトでない。",
+      "pre": "BAR0 を張ってあること(`d->bar0`)。`bfm_mem_reset()` で DMA 領域の切り出しを初期化してあること。",
+      "notes": "途中で失敗しても、取った DMA 領域は返さない。",
+      "flow": [
+        {"call": "bfm_mem_alloc() でコマンドキュー・入力と出力のメールボックスを取る"},
+        {"if": "どれかが NULL ?", "then": [{"return": "BFM_E_NOMEM"}]},
+        {"do": "CMDQ_ADDR_L_SZ を読み、下位 4 ビットを log_stride とする"},
+        {"if": "log_stride != 6 ?", "then": [
+          {"do": "BFM_LOG で理由を表示"},
+          {"return": "BFM_E_HW"}
+        ]},
+        {"do": "コマンドキューの物理アドレスの上位を CMDQ_ADDR_H、下位を CMDQ_ADDR_L_SZ へ書く"},
+        {"do": "bfm_mb() で書きの順を保証する"},
+        {"do": "bfm_port_delay_us(10000) で 10ms 待つ"},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "mlx5_cmd",
+      "summary": "コマンドを 1 つ出して完了を待つ。\n\n* entry 0 を 0 で埋め、入力の先頭 16 バイトを entry に入れる。16 バイトを超える分は 512 バイトずつ入力のメールボックスの鎖に入れる(ブロック番号と次のブロックの物理アドレスを書く)。\n* 出力が 16 バイトを超えるときは、出力のメールボックスの鎖を用意する。\n* 種類(PCI)と持ち主(FW)を書いてドアベル(`CMD_DBELL` に 1)を鳴らし、持ち主が戻るまで最大 10 秒待つ。\n* delivery status を確かめ、出力を entry とメールボックスから `out` へ写し、出力の status(`out[0]`)が 0 であることを確かめる。",
+      "args": {
+        "d": "デバイスの状態",
+        "in": "コマンドの入力(先頭 2 バイトが opcode)",
+        "inlen": "入力の長さ(バイト。8 以上 16 + 512 x `BFM_MBOX_BLOCKS` 以下)",
+        "out": "出力を書く場所",
+        "outlen": "出力の長さ(バイト。8 以上 16 + 512 x `BFM_MBOX_BLOCKS` 以下)",
+        "what": "失敗のときの表示に付けるコマンドの名前"
+      },
+      "ret": "`BFM_OK`: 成功。`BFM_E_PARAM`: 長さが範囲外。`BFM_E_TIMEOUT`: FW が 10 秒答えない。`BFM_E_HW`: delivery status が 0 でない、または出力の status が 0 でない(status と syndrome を表示する)。",
+      "pre": "`mlx5_cmd_init()` が成功していること。1 つのタスクから呼ぶこと(排他を持たない)。",
+      "notes": "* entry 0 とメールボックスを共有するので、同時に 2 つは出せない。\n* 完了は割り込みでなく、持ち主のビットを読み続けて待つ。\n* 失敗のとき `out` の中身は途中まで(または未設定)のことがある。",
+      "flow": [
+        {"if": "inlen・outlen が 16 + 512 x BFM_MBOX_BLOCKS を超える、または 8 より小さい?", "then": [
+          {"do": "BFM_LOG で理由を表示"},
+          {"return": "BFM_E_PARAM"}
+        ]},
+        {"do": "entry 0 の 64 バイトを 0 で埋め、入力の先頭 16 バイト(inlen まで)を entry の CMD_IN へ写す"},
+        {"do": "in_blocks = inlen > 16 なら (inlen - 16) を 512 で割って切り上げた数、そうでなければ 0"},
+        {"while": "b < in_blocks ?", "body": [
+          {"call": "m = mbox_in(d, b) を呼ぶ"},
+          {"do": "ブロックを 0 で埋め、入力の 16 + b x 512 バイト目から最大 512 バイトを写す"},
+          {"do": "ブロック番号 b を書く"},
+          {"if": "b + 1 < in_blocks ?", "then": [
+            {"call": "mbox_in(d, b + 1) の物理アドレスを MBOX_NEXT へ書く"}
+          ]},
+          {"do": "bfm_port_cache_flush() でブロックを書き戻す"},
+          {"do": "b++"}
+        ]},
+        {"if": "in_blocks != 0 ?", "then": [
+          {"call": "mbox_in(d, 0) の物理アドレスを CMD_IN_PTR へ書く"}
+        ]},
+        {"do": "inlen を CMD_INLEN へ書く"},
+        {"do": "out_blocks = outlen > 16 なら (outlen - 16) を 512 で割って切り上げた数、そうでなければ 0"},
+        {"while": "b < out_blocks ?", "body": [
+          {"call": "m = mbox_out(d, b) を呼ぶ"},
+          {"do": "ブロックを 0 で埋め、ブロック番号 b を書く"},
+          {"if": "b + 1 < out_blocks ?", "then": [
+            {"call": "mbox_out(d, b + 1) の物理アドレスを MBOX_NEXT へ書く"}
+          ]},
+          {"do": "bfm_port_cache_flush() でブロックを書き戻す"},
+          {"do": "b++"}
+        ]},
+        {"if": "out_blocks != 0 ?", "then": [
+          {"call": "mbox_out(d, 0) の物理アドレスを CMD_OUT_PTR へ書く"}
+        ]},
+        {"do": "outlen を CMD_OUTLEN へ、CMD_XPORT_PCI を CMD_TYPE へ、1(持ち主 = FW)を CMD_STATUS_OWN へ書く"},
+        {"do": "entry を書き戻し、bfm_mb() の後 CMD_DBELL に 1(entry 0)を書く"},
+        {"do": "opcode = in[0..1]、t0 = bfm_port_time_ns()"},
+        {"loop": "FW が entry を返すまで待つ", "body": [
+          {"do": "bfm_port_cache_inval() で entry を読み直す"},
+          {"if": "CMD_STATUS_OWN の bit 0 が 0 ?", "then": [{"break": true}]},
+          {"if": "経過が 10000ms を超えた?", "then": [
+            {"do": "BFM_LOG で時間切れを表示"},
+            {"return": "BFM_E_TIMEOUT"}
+          ]}
+        ]},
+        {"do": "bfm_rmb()。delivery = CMD_STATUS_OWN >> 1"},
+        {"if": "delivery != 0 ?", "then": [
+          {"do": "BFM_LOG で delivery status を表示"},
+          {"return": "BFM_E_HW"}
+        ]},
+        {"do": "entry の CMD_OUT から先頭 16 バイト(outlen まで)を out へ写す"},
+        {"while": "b < out_blocks ?", "body": [
+          {"call": "m = mbox_out(d, b) を呼ぶ"},
+          {"do": "bfm_port_cache_inval() でブロックを読み直し、out の 16 + b x 512 バイト目へ最大 512 バイトを写す"},
+          {"do": "b++"}
+        ]},
+        {"if": "out[0] != 0 ?", "then": [
+          {"do": "BFM_LOG で status と syndrome(out[4..7])を表示"},
+          {"return": "BFM_E_HW"}
+        ]},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "mlx5_destroy_obj",
+      "summary": "入力が 16 バイトで byte 9〜11 にオブジェクトの番号を置く形の解放のコマンド(`DESTROY_QP` / `DESTROY_CQ` など)を出す。",
+      "args": {
+        "d": "デバイスの状態",
+        "opcode": "コマンドの opcode",
+        "id": "解放するオブジェクトの番号(24 ビット)",
+        "what": "失敗のときの表示に付けるコマンドの名前"
+      },
+      "ret": "`mlx5_cmd()` の戻り値。",
+      "pre": "`mlx5_cmd_init()` が成功していること。",
+      "notes": "特になし。",
+      "flow": [
+        {"do": "in[16] を 0 で埋め、opcode を in[0..1]、id を in[9..11] に書く"},
+        {"call": "mlx5_cmd(d, in, 16, out, 16, what) を呼ぶ"},
+        {"return": "mlx5_cmd() の戻り値"}
+      ]
+    },
+    {
+      "func": "mlx5_give_pages",
+      "summary": "`MANAGE_PAGES`(op_mod = GIVE)で FW に `npages` ページを渡す。ページは DMA 領域の中の FW 用の区画(`d->fw_pages`、`g_bfm_fw_pages_max` ページ)から `d->fw_pages_used` の続きを順に出す。1 回のコマンドで最大 512 ページ(入力 4112 バイト)を渡し、足りなければ繰り返す。",
+      "args": {
+        "d": "デバイスの状態",
+        "func": "FW が示した function の番号",
+        "npages": "渡すページの数(0 以下なら何もしない)"
+      },
+      "ret": "`BFM_OK`: 渡した(`npages` が 0 以下のときも)。`BFM_E_NOMEM`: 区画の残りが足りない(増やすべき値を表示する)。そのほか `mlx5_cmd()` の戻り値。",
+      "pre": "`d->fw_pages` を取ってあること。",
+      "notes": "* 渡したページを返してもらうことはしない(`fw_pages_used` は増えるだけ)。\n* 入力の領域は静的変数なので、再入できない。\n* 途中のコマンドが失敗したときは、それまでに渡した分だけ `fw_pages_used` が増えている。",
+      "flow": [
+        {"if": "npages <= 0 ?", "then": [{"return": "BFM_OK"}]},
+        {"if": "npages > g_bfm_fw_pages_max - d->fw_pages_used ?", "then": [
+          {"do": "BFM_LOG で残りと増やすべき値を表示"},
+          {"return": "BFM_E_NOMEM"}
+        ]},
+        {"do": "left = npages"},
+        {"while": "left > 0 ?", "body": [
+          {"do": "n = left と 512 の小さいほう"},
+          {"do": "入力の先頭 16 バイトを 0 で埋め、opcode = MANAGE_PAGES、op_mod = 1(GIVE)、function = func、ページ数 = n を書く"},
+          {"do": "FW 用の区画の fw_pages_used 番目から n ページの物理アドレスを入力の 16 バイト目以降に並べる"},
+          {"call": "rc = mlx5_cmd(d, in, 16 + n x 8, out, 16, \"MANAGE_PAGES(GIVE)\") を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+          {"do": "d->fw_pages_used += n、left -= n"}
+        ]},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "mlx5_cant_give",
+      "summary": "`MANAGE_PAGES`(op_mod = CANT_GIVE)を出し、FW にページを渡せないと伝える。伝えないと FW は要求を出し直し続ける。",
+      "args": {
+        "d": "デバイスの状態",
+        "func": "FW が示した function の番号"
+      },
+      "ret": "なし",
+      "pre": "`mlx5_cmd_init()` が成功していること。",
+      "notes": "コマンドの失敗は無視する。",
+      "flow": [
+        {"do": "in[16] を 0 で埋め、opcode = MANAGE_PAGES、function = func を書く(op_mod は 0 = CANT_GIVE)"},
+        {"call": "mlx5_cmd(d, in, 16, out, 16, \"MANAGE_PAGES(CANT_GIVE)\") を呼び、戻り値は捨てる"}
+      ]
+    },
+    {
+      "func": "mlx5_eq_create",
+      "summary": "EQ を 1 本作る(`2^BFM_EQ_LOG` 個 x 64 バイト)。\n\n* DMA 領域から EQ の領域を取り、全 EQE の owner を 1 にして書き戻す。\n* EQ のドアベル用の UAR を取る(`mlx5_alloc_uar()`)。\n* 購読するイベント(Linux の `MLX5_ASYNC_EVENT_MASK` と同じ組。`page_request_disable` が 0 ならページ要求も)を `d->eq_mask` に入れる。\n* `CREATE_EQ` を出し、返った EQ の番号を `d->eqn` に入れ、`d->eq_cc` を 0 にする。\n\n割り込みは使わない(arm しない)。中身は `mlx5_eq_poll()` で読む。",
+      "args": {"d": "デバイスの状態(`eq_buf` / `eq_uarn` / `eq_mask` / `eqn` / `eq_cc` を埋める)"},
+      "ret": "`BFM_OK`: 作った。`BFM_E_PARAM`: EQ の領域が 4 ページを超える(`BFM_EQ_LOG` が 8 を超える)。`BFM_E_NOMEM`: DMA 領域が足りない。そのほか `mlx5_alloc_uar()` / `mlx5_cmd()` の戻り値。",
+      "pre": "`mlx5_cmd_init()` が成功し、HCA が動いていること。",
+      "notes": "* 入力の領域は静的変数で、EQ の領域は 4 ページまでしか載らない(`BFM_EQ_LOG` が 7 で 2 ページ)。4 ページを超えるときは、DMA 領域を取る前に `BFM_E_PARAM` で戻る。\n* 失敗しても、取った DMA 領域と UAR は返さない。",
+      "flow": [
+        {"do": "nent = 2^BFM_EQ_LOG、bytes = nent x 64、npages = bytes を 4KiB で割って切り上げた数"},
+        {"if": "npages > 4 ?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"call": "d->eq_buf = bfm_mem_alloc(bytes, 4KiB) を呼ぶ"},
+        {"if": "d->eq_buf == NULL ?", "then": [{"return": "BFM_E_NOMEM"}]},
+        {"do": "全 EQE の最後のバイト(owner)を 1 にし、bfm_port_cache_flush() で書き戻す"},
+        {"call": "rc = mlx5_alloc_uar(d, &d->eq_uarn) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"do": "d->eq_mask に PATH_MIG・COMM_EST・SQ_DRAINED・CQ_ERROR・WQ_CATAS_ERROR・PATH_MIG_FAILED・WQ_INVAL_REQ・WQ_ACCESS_ERROR・PORT_CHANGE・SRQ_CATAS_ERROR・SRQ_LAST_WQE・SRQ_RQ_LIMIT のビットを入れる"},
+        {"if": "!d->page_request_disable ?", "then": [
+          {"do": "d->eq_mask に PAGE_REQUEST のビットを足す"}
+        ]},
+        {"do": "入力を 0 で埋め、opcode = CREATE_EQ、EQC の log_eq_size = BFM_EQ_LOG、uar_page = eq_uarn、log_page_size = 0(4KiB)、event_bitmask = eq_mask を書く"},
+        {"do": "EQ の各ページの物理アドレスを入力の 272 バイト目以降に並べる"},
+        {"call": "rc = mlx5_cmd(d, in, 272 + npages x 8, out, 16, \"CREATE_EQ\") を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"do": "d->eqn = out[11]、d->eq_cc = 0"},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "mlx5_eq_update_ci",
+      "summary": "EQ の消費位置を FW へ知らせる。UAR ページの中の EQ のドアベル(arm しない。オフセット 0x48)に、`eq_cc` の下位 24 ビットと EQ の番号(上位 8 ビット)を書く。",
+      "args": {"d": "デバイスの状態"},
+      "ret": "なし",
+      "pre": "`mlx5_eq_create()` が成功していること。",
+      "notes": "arm しないので、割り込みは上がらない。",
+      "flow": [
+        {"do": "BAR0 の eq_uarn x 4KiB + 0x48 に (eq_cc & 0xffffff) OR (eqn << 24) を書く"}
+      ]
+    },
+    {
+      "func": "mlx5_eq_poll",
+      "summary": "EQ に溜まったイベントを最大 `2^BFM_EQ_LOG` 個読む。\n\n* ページ要求: function とページ数を覚えておき、読み終わった後に最後の 1 つにだけ答える(正なら `mlx5_give_pages()`、渡せなければ `mlx5_cant_give()`。負(返却の申し出)なら預けたままにする)。\n* ポートの変化: `d->link_up` を更新して表示する。\n* CQ のエラー: 表示する。\n* QP のエラー(WQ_CATAS_ERROR・WQ_INVAL_REQ・WQ_ACCESS_ERROR・PATH_MIG_FAILED): 種類が QP なら `bfm_conn_mark_error()` で接続をエラーにし、表示する。\n* そのほか(COMM_EST など): 何もしない。\n\n16 個ごとと読み終わりに、消費位置を FW へ知らせる。",
+      "args": {"d": "デバイスの状態"},
+      "ret": "読んだイベントの数。EQ を作っていなければ 0。",
+      "pre": "1 つのタスクから呼ぶこと(コマンドキューを使う)。",
+      "notes": "* FW は答えが来るまで同じページ要求を出し直すので、全部に答えると与えすぎる。そのため 1 回の読み取りの最後の要求にだけ答える。\n* ページを渡すのに失敗しても戻り値には現れない。",
+      "flow": [
+        {"if": "d->eq_buf == NULL ?", "then": [{"return": "0"}]},
+        {"do": "nent = 2^BFM_EQ_LOG、n = 0、page_n = 0、page_func = 0、page_req = 0"},
+        {"while": "n < nent ?", "body": [
+          {"do": "e = eq_cc の位置の EQE。bfm_port_cache_inval() で読み直す"},
+          {"do": "want = (eq_cc & nent) ? 1 : 0"},
+          {"if": "EQE の owner のビット != want ?", "then": [{"break": true}]},
+          {"do": "bfm_rmb()。type = e[1]、sub = e[3]、data = e + 32"},
+          {"switch": "type", "cases": [
+            {"case": "MLX5_EVT_PAGE_REQUEST", "body": [
+              {"do": "page_func = data[2..3]、page_n = data[4..7]、page_req = 1"}
+            ]},
+            {"case": "MLX5_EVT_PORT_CHANGE", "body": [
+              {"if": "sub == 1 または sub == 4 ?", "then": [
+                {"do": "d->link_up = (sub == 4)"}
+              ]},
+              {"do": "BFM_LOG でリンクの状態を表示"}
+            ]},
+            {"case": "MLX5_EVT_CQ_ERROR", "body": [
+              {"do": "BFM_LOG で cqn と syndrome を表示"}
+            ]},
+            {"case": "MLX5_EVT_WQ_CATAS_ERROR / WQ_INVAL_REQ / WQ_ACCESS_ERROR / PATH_MIG_FAILED", "body": [
+              {"if": "data[20] == 0(種類が QP)?", "then": [
+                {"call": "bfm_conn_mark_error(data[25..27] の qpn, \"QP のエラーのイベント\") を呼ぶ"}
+              ]},
+              {"do": "BFM_LOG で type と qpn を表示"}
+            ]},
+            {"default": true, "body": [
+              {"do": "何もしない(COMM_EST などは正常な動きでも出る)"}
+            ]}
+          ]},
+          {"do": "d->eq_cc++、n++"},
+          {"if": "n が 16 の倍数?", "then": [
+            {"call": "mlx5_eq_update_ci(d) を呼ぶ"}
+          ]}
+        ]},
+        {"if": "n != 0 ?", "then": [
+          {"call": "mlx5_eq_update_ci(d) を呼ぶ"}
+        ]},
+        {"if": "page_req ?", "then": [
+          {"if": "page_n > 0 ?", "then": [
+            {"call": "mlx5_give_pages(d, page_func, page_n) を呼ぶ"},
+            {"if": "BFM_OK だった?", "then": [
+              {"do": "BFM_DBG で答えたことを表示"}
+            ], "else": [
+              {"call": "mlx5_cant_give(d, page_func) を呼ぶ"}
+            ]}
+          ], "else": [
+            {"if": "page_n < 0 ?", "then": [
+              {"do": "BFM_DBG で預けたままにすることを表示"}
+            ]}
+          ]}
+        ]},
+        {"return": "n"}
+      ]
+    }
+  ]
+}

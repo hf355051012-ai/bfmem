@@ -1,0 +1,702 @@
+{
+  "file": "test/bfm_test.c",
+  "summary": "試験プログラム `bfmem_test`(Linux + VFIO)。動きはコマンドの引数で選ぶ。\n\n* `server`: 受け側。公開メモリを決まった模様で埋めて接続を待ち、Ctrl-\\(SIGQUIT)か切断のときにデータ領域の hash を表示する。\n* `client <IP> <MAC>`: 掛け側。相手の公開メモリへ read / write / write_post / atomic を一通り出して手元の模型と突き合わせ、遅延と速さを測る。\n* `bench <IP> <MAC>`: write / read を 4B〜256KiB、多重度 1・4・8・16 で流し、IOPS・MB/s・平均遅延を表示する。\n* `info`: 立ち上げて HCA の能力を表示するだけ。\n\n公開メモリの取り決め(server と `tools/bfm_peer.c` で同じ)は、先頭 64KiB がデータ領域(`(i * 7 + 3) & 0xff` で埋める)、その後ろ 4KiB が 8 バイトの atomic 語 512 個(0 で埋める)。",
+  "functions": [
+    {
+      "func": "on_sig",
+      "summary": "シグナルの受け口。server のとき(`g_server` が 0 以外)の SIGQUIT なら `g_dump` を、それ以外なら `g_stop` を 1 にする。",
+      "args": {"s": "受けたシグナルの番号"},
+      "ret": "なし",
+      "pre": "特になし。",
+      "notes": "* 旗を立てるだけで、表示や停止は `run_server()` などのループが旗を見て行う。\n* server 以外(client / bench / info)では SIGQUIT も止める合図として扱う(後片付けをしてから終わる)。\n* `g_server` は `main()` が `bfm_init()` の前に決める。",
+      "entry_note": "OS からシグナル(SIGINT / SIGTERM / SIGQUIT)で呼ばれる(main() が signal() で登録)",
+      "flow": [
+        {"if": "s == SIGQUIT && g_server ?", "then": [{"do": "g_dump = 1"}], "else": [{"do": "g_stop = 1"}]}
+      ]
+    },
+    {
+      "func": "now_ns",
+      "summary": "`CLOCK_MONOTONIC` の今の時刻をナノ秒で返す。",
+      "args": {},
+      "ret": "今の時刻(ナノ秒)。",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"do": "clock_gettime(CLOCK_MONOTONIC, &ts)"},
+        {"return": "ts.tv_sec * 10^9 + ts.tv_nsec"}
+      ]
+    },
+    {
+      "func": "pattern",
+      "summary": "データ領域の i バイトめの初期値 `(i * 7 + 3) & 0xff` を返す。",
+      "args": {"i": "データ領域の中の位置(バイト)"},
+      "ret": "その位置の初期値(1 バイト)。",
+      "pre": "特になし。",
+      "notes": "server と `tools/bfm_peer.c` の埋め方と同じ式であること。",
+      "flow": [
+        {"return": "(i * 7 + 3) & 0xff"}
+      ]
+    },
+    {
+      "func": "fnv1a",
+      "summary": "p から n バイトの FNV-1a 64 の hash を計算する。",
+      "args": {"p": "hash を取る領域の先頭", "n": "バイト数"},
+      "ret": "FNV-1a 64 の hash。",
+      "pre": "p から n バイトが読めること。",
+      "notes": "server(`dump_area()`)と client(模型)で同じ値になることを見るために使う。",
+      "flow": [
+        {"do": "h = 0xcbf29ce484222325、i = 0"},
+        {"while": "i < n ?", "body": [
+          {"do": "h ^= p[i]"},
+          {"do": "h *= 0x100000001b3"},
+          {"do": "i++"}
+        ]},
+        {"return": "h"}
+      ]
+    },
+    {
+      "func": "parse_ip",
+      "summary": "`a.b.c.d` 形式の IPv4 アドレスの文字列を、`a` を最上位の 8 ビットとする 32 ビットの値に直す。",
+      "args": {"s": "IPv4 アドレスの文字列", "out": "直した値の書き込み先"},
+      "ret": "0: 直せた。-1: 4 つの数が読めない、または 255 を超える数がある。",
+      "pre": "特になし。",
+      "notes": "失敗したときは `*out` を書き換えない。",
+      "flow": [
+        {"do": "sscanf(s, \"%u.%u.%u.%u\") で a, b, c, d を読む"},
+        {"if": "4 つ読めない、または a・b・c・d のどれかが 255 を超える?", "then": [{"return": "-1"}]},
+        {"do": "*out = (a << 24) OR (b << 16) OR (c << 8) OR d"},
+        {"return": "0"}
+      ]
+    },
+    {
+      "func": "parse_mac",
+      "summary": "`xx:xx:xx:xx:xx:xx` 形式の MAC アドレスの文字列を 6 バイトに直す。",
+      "args": {"s": "MAC アドレスの文字列", "mac": "直した 6 バイトの書き込み先"},
+      "ret": "0: 直せた。-1: 6 つの数が読めない。",
+      "pre": "特になし。",
+      "notes": "各数が 255 を超えるかは見ない(下位 8 ビットを使う)。",
+      "flow": [
+        {"do": "sscanf(s, \"%x:%x:%x:%x:%x:%x\") で v[0]〜v[5] を読む"},
+        {"if": "6 つ読めない?", "then": [{"return": "-1"}]},
+        {"do": "i = 0"},
+        {"while": "i < 6 ?", "body": [
+          {"do": "mac[i] = (uint8_t)v[i]"},
+          {"do": "i++"}
+        ]},
+        {"return": "0"}
+      ]
+    },
+    {
+      "func": "usage",
+      "summary": "使い方(オプションと、server / client / bench / info の書き方)を表示する。",
+      "args": {},
+      "ret": "なし",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"do": "使い方を printf で表示"}
+      ]
+    },
+    {
+      "func": "fill_area",
+      "summary": "自分の公開メモリ(`g_bfm_mr_base`)のデータ領域 64KiB を `pattern()` の値で埋め、その後ろの atomic 語 512 個(4KiB)を 0 で埋める。",
+      "args": {},
+      "ret": "なし",
+      "pre": "`bfm_init()` が済んでいて、公開メモリが `AREA_BYTES`(68KiB)以上あること(`run_server()` が確かめる)。",
+      "notes": "接続を待つたびに呼ぶので、前の接続で書かれた中身は消える。",
+      "flow": [
+        {"do": "m = g_bfm_mr_base、i = 0"},
+        {"while": "i < DATA_BYTES ?", "body": [
+          {"call": "m[i] = pattern(i) を呼ぶ"},
+          {"do": "i++"}
+        ]},
+        {"do": "i = 0"},
+        {"while": "i < ATOM_WORDS * 8 ?", "body": [
+          {"do": "m[ATOM_OFF + i] = 0"},
+          {"do": "i++"}
+        ]}
+      ]
+    },
+    {
+      "func": "dump_area",
+      "summary": "自分の公開メモリのデータ領域 64KiB の hash と、atomic 語 0〜2 の中身(8 バイトの並びとリトルエンディアンとしての値)を表示する。",
+      "args": {"why": "表示の理由(「要求」「切断」)"},
+      "ret": "なし",
+      "pre": "`bfm_init()` が済んでいること。",
+      "notes": "client が最後に表示する模型の hash と同じ値になるはず。",
+      "flow": [
+        {"call": "fnv1a(m, DATA_BYTES) を呼び、why と hash を表示"},
+        {"do": "w = 0"},
+        {"while": "w < 3 ?", "body": [
+          {"do": "p = m + ATOM_OFF + w * 8、le = 0、i = 7"},
+          {"while": "i >= 0 ?", "body": [
+            {"do": "le = (le << 8) OR p[i]"},
+            {"do": "i--"}
+          ]},
+          {"do": "語 w の 8 バイトと le を表示"},
+          {"do": "w++"}
+        ]}
+      ]
+    },
+    {
+      "func": "run_server",
+      "summary": "受け側の本体。公開メモリを埋めて接続を待ち、接続の間は `bfm_poll()` を 1ms ごとに呼び続ける。切断されたら hash を表示して接続を返し、また埋めて待つ。`g_stop` が立つまで繰り返す。`g_dump` が立てば hash を表示する。",
+      "args": {"port": "待つ接続の番号"},
+      "ret": "0: `g_stop` で終わった。1: 公開メモリが `AREA_BYTES` より小さい。",
+      "pre": "`bfm_init()` が済んでいること。",
+      "notes": "* 接続の待ちは 500ms ごとに区切り、その間に `g_stop` / `g_dump` を見る。\n* 接続の間に `g_stop` が立つと、hash を表示して接続を返してから終わる。",
+      "flow": [
+        {"if": "g_bfm_mr_size < AREA_BYTES ?", "then": [
+          {"do": "「公開メモリが小さすぎる」を表示"},
+          {"return": "1"}
+        ]},
+        {"while": "!g_stop ?", "body": [
+          {"call": "fill_area() を呼ぶ"},
+          {"do": "待つことを表示、c = NULL"},
+          {"while": "!g_stop && c == NULL ?", "body": [
+            {"call": "c = bfm_accept(port, 500) を呼ぶ"},
+            {"if": "g_dump ?", "then": [
+              {"do": "g_dump = 0"},
+              {"call": "dump_area(\"要求\") を呼ぶ"}
+            ]}
+          ]},
+          {"if": "c == NULL ?", "then": [{"break": true}]},
+          {"while": "!g_stop && bfm_is_up(c) ?", "body": [
+            {"call": "bfm_poll() を呼ぶ"},
+            {"if": "g_dump ?", "then": [
+              {"do": "g_dump = 0"},
+              {"call": "dump_area(\"要求\") を呼ぶ"}
+            ]},
+            {"do": "usleep(1000)"}
+          ]},
+          {"call": "dump_area(\"切断\") を呼ぶ"},
+          {"call": "bfm_disconnect(c) を呼ぶ"}
+        ]},
+        {"return": "0"}
+      ]
+    },
+    {
+      "func": "check",
+      "summary": "検査の名前と結果(OK / NG)を表示し、NG なら `g_ng` を 1 増やす。",
+      "args": {"what": "検査の名前", "ok": "0 以外なら合格"},
+      "ret": "なし",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"if": "ok ?", "then": [{"do": "what と「OK」を表示"}], "else": [{"do": "what と「NG」を表示"}]},
+        {"if": "!ok ?", "then": [{"do": "g_ng++"}]}
+      ]
+    },
+    {
+      "func": "cmp_u32",
+      "summary": "`qsort()` の比較関数。2 つの `uint32_t` を比べる。",
+      "args": {"a": "比べる値 1 つめへのポインタ", "b": "比べる値 2 つめへのポインタ"},
+      "ret": "`*a > *b` なら 1、`*a < *b` なら -1、等しければ 0。",
+      "pre": "a と b が `uint32_t` を指していること。",
+      "notes": "特になし。",
+      "entry_note": "`lat()` が `qsort()` の比較関数として渡し、`qsort()` から呼ばれる",
+      "flow": [
+        {"do": "x = *a、y = *b"},
+        {"return": "(x > y) - (x < y)"}
+      ]
+    },
+    {
+      "func": "op_write8",
+      "summary": "相手のデータ領域の `(i & 63) * 64` へ `g_src` の先頭 8 バイトを `bfm_write()` で書く(遅延の測定用)。",
+      "args": {"c": "接続", "i": "何回めか(書く位置を決める)"},
+      "ret": "`bfm_write()` の戻り値。",
+      "pre": "c が使える接続であること。",
+      "notes": "書く位置は 64 か所を 64 バイトおきに回る。",
+      "flow": [
+        {"call": "bfm_write(c, (i & 63) * 64, g_src, 8) を呼ぶ"},
+        {"return": "bfm_write() の戻り値"}
+      ]
+    },
+    {
+      "func": "op_write64",
+      "summary": "相手のデータ領域の `(i & 63) * 64` へ `g_src` の先頭 64 バイトを `bfm_write()` で書く(遅延の測定用)。",
+      "args": {"c": "接続", "i": "何回めか(書く位置を決める)"},
+      "ret": "`bfm_write()` の戻り値。",
+      "pre": "c が使える接続であること。",
+      "notes": "書く位置は 64 か所を 64 バイトおきに回る。",
+      "flow": [
+        {"call": "bfm_write(c, (i & 63) * 64, g_src, 64) を呼ぶ"},
+        {"return": "bfm_write() の戻り値"}
+      ]
+    },
+    {
+      "func": "op_read8",
+      "summary": "相手のデータ領域の `(i & 63) * 64` から 8 バイトを `bfm_read()` で手元の一時領域へ読む(遅延の測定用)。",
+      "args": {"c": "接続", "i": "何回めか(読む位置を決める)"},
+      "ret": "`bfm_read()` の戻り値。",
+      "pre": "c が使える接続であること。",
+      "notes": "読んだ中身は捨てる。",
+      "flow": [
+        {"call": "bfm_read(c, (i & 63) * 64, d, 8) を呼ぶ"},
+        {"return": "bfm_read() の戻り値"}
+      ]
+    },
+    {
+      "func": "op_read64",
+      "summary": "相手のデータ領域の `(i & 63) * 64` から 64 バイトを `bfm_read()` で手元の一時領域へ読む(遅延の測定用)。",
+      "args": {"c": "接続", "i": "何回めか(読む位置を決める)"},
+      "ret": "`bfm_read()` の戻り値。",
+      "pre": "c が使える接続であること。",
+      "notes": "読んだ中身は捨てる。",
+      "flow": [
+        {"call": "bfm_read(c, (i & 63) * 64, d, 64) を呼ぶ"},
+        {"return": "bfm_read() の戻り値"}
+      ]
+    },
+    {
+      "func": "op_faa",
+      "summary": "相手の atomic 語 100〜163 のうち `100 + (i & 63)` 番めへ `bfm_faa()` で 1 を足す(遅延の測定用)。",
+      "args": {"c": "接続", "i": "何回めか(語を決める)"},
+      "ret": "`bfm_faa()` の戻り値。",
+      "pre": "c が使える接続であること。",
+      "notes": "元の値は捨てる。検査 [4] で使う語 0・1 には触らない。",
+      "flow": [
+        {"call": "bfm_faa(c, ATOM_OFF + 8 * 100 + (i & 63) * 8, 1, &o) を呼ぶ"},
+        {"return": "bfm_faa() の戻り値"}
+      ]
+    },
+    {
+      "func": "op_cas",
+      "summary": "相手の atomic 語 200〜263 のうち `200 + (i & 63)` 番めへ `bfm_cas()` で比較値 1・置き換え値 2 の CAS を出す(遅延の測定用)。",
+      "args": {"c": "接続", "i": "何回めか(語を決める)"},
+      "ret": "`bfm_cas()` の戻り値。",
+      "pre": "c が使える接続であること。",
+      "notes": "語は 0 で埋まっているので CAS は外れる(値は変わらない)。元の値は捨てる。",
+      "flow": [
+        {"call": "bfm_cas(c, ATOM_OFF + 8 * 200 + (i & 63) * 8, 1, 2, &o) を呼ぶ"},
+        {"return": "bfm_cas() の戻り値"}
+      ]
+    },
+    {
+      "func": "lat",
+      "summary": "操作 fn を 1 個ずつ完了まで待つ形で n 回流し、1 回ごとの遅延の中央値・平均・最小・p99・p99.9 を表示する。先に `n / 10 + 100` 回を暖機として流す。",
+      "args": {"c": "接続", "name": "表示する操作の名前", "fn": "流す操作(`op_write8` など)", "n": "測る回数"},
+      "ret": "なし",
+      "pre": "c が使える接続であること。",
+      "notes": "* n は `g_lat` の要素数(200000)に切り詰める。\n* 操作が 1 回でも失敗したら `g_ng` を 1 増やし、表示せずに戻る。\n* 測る間に `g_stop` が立つとループを抜け、測れた回数 m ぶんで並べ替えて表示する(1 回も測れなければ表示せずに戻る)。暖機の間は `g_stop` を見ない。",
+      "indirect": ["op_write8", "op_write64", "op_read8", "op_read64", "op_faa", "op_cas"],
+      "flow": [
+        {"if": "n > g_lat の要素数 ?", "then": [{"do": "n = g_lat の要素数"}]},
+        {"do": "i = 0"},
+        {"while": "i < n / 10 + 100 ?", "body": [
+          {"call": "fn(c, i) を呼ぶ"},
+          {"if": "fn() != BFM_OK ?", "then": [
+            {"do": "g_ng++"},
+            {"return": ""}
+          ]},
+          {"do": "i++"}
+        ]},
+        {"do": "sum = 0、m = 0"},
+        {"while": "m < n && !g_stop ?", "body": [
+          {"call": "t0 = now_ns() を呼ぶ"},
+          {"call": "fn(c, m) を呼ぶ"},
+          {"if": "fn() != BFM_OK ?", "then": [
+            {"do": "g_ng++"},
+            {"return": ""}
+          ]},
+          {"call": "g_lat[m] = now_ns() - t0 を呼ぶ"},
+          {"do": "sum += g_lat[m]"},
+          {"do": "m++"}
+        ]},
+        {"if": "m == 0 ?", "then": [{"return": ""}]},
+        {"do": "n = m"},
+        {"do": "qsort(g_lat, n, 4, cmp_u32) で並べ替える"},
+        {"do": "中央値・平均・最小・p99・p99.9 を表示"}
+      ]
+    },
+    {
+      "func": "run_client",
+      "summary": "掛け側の本体。相手へ接続し、手元に公開メモリのデータ領域の模型を持って、次の検査をして結果を表示する。\n\n* [1] いろいろな長さ・半端な位置の read と 64KiB まとめての read\n* [2] inline に収まる長さと収まらない長さの write と読み戻し\n* [3] `bfm_write_post()` を 5000 回と `bfm_flush()` の後の読み戻し\n* [4] FAA と CAS の元の値の並び、相手のメモリの語の並び(エンディアン)\n* [5] データ領域全体の読み戻し\n* [6] 遅延(`lat()`)と `bfm_write_post()` の速さ、その後の読み戻し(ここまで NG が無いときだけ)\n* [7] 公開メモリの外の read を相手が断ること(oob のときだけ)\n\n最後に模型の hash を表示して接続を返す。",
+      "args": {"ip": "相手の IPv4 アドレス", "mac": "相手の MAC アドレス", "port": "接続の番号", "iters": "[6] の遅延の測定の回数", "oob": "0 以外なら [7] を行う"},
+      "ret": "0: すべて OK。1: 接続できない、相手の公開メモリが小さい、または NG があった。",
+      "pre": "`bfm_init()` が済んでいること。相手が server か `tools/bfm_peer.c` で、公開メモリを取り決めどおりに埋めていること。",
+      "notes": "* [7] は接続の構造体の `rlen` を一時的に書き換えて手元の範囲検査をすり抜ける。相手が断ると接続はエラーになる。\n* [4] で相手の atomic 語 0・1 を書き換える。[6] の測定はデータ領域の 64 か所と atomic 語 100〜163・200〜263 に触る。\n* 検査が NG でも次の検査へ進む([6] だけは飛ばす)。",
+      "flow": [
+        {"call": "c = bfm_connect(ip, mac, port, 0) を呼ぶ"},
+        {"if": "c == NULL ?", "then": [{"return": "1"}]},
+        {"if": "bfm_bf_active(c) ?", "then": [{"do": "BlueFlame の表示を「あり」にする"}], "else": [{"do": "BlueFlame の表示を「なし」にする"}]},
+        {"call": "bfm_remote_size(c) と bfm_inline_max() を呼び、相手の公開メモリの大きさ・BlueFlame・inline の上限を表示"},
+        {"if": "bfm_remote_size(c) < AREA_BYTES ?", "then": [
+          {"do": "「相手の公開メモリが小さすぎる」を表示"},
+          {"call": "bfm_disconnect(c) を呼ぶ"},
+          {"return": "1"}
+        ]},
+        {"do": "i = 0"},
+        {"while": "i < DATA_BYTES ?", "body": [
+          {"call": "g_model[i] = pattern(i) を呼ぶ"},
+          {"do": "i++"}
+        ]},
+        {"do": "[1] ok = 1、len = 1"},
+        {"while": "len <= 300 && ok ?", "body": [
+          {"do": "off = (len * 977) % (DATA_BYTES - len)"},
+          {"do": "buf の先頭 len + 8 バイトを 0xee で埋める"},
+          {"call": "rc = bfm_read(c, off, buf, len) を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [
+            {"call": "bfm_strerror(rc) を呼び、エラーを表示"},
+            {"do": "ok = 0"},
+            {"break": true}
+          ]},
+          {"if": "buf が g_model[off] からの len バイトと違う、または buf[len] != 0xee ?", "then": [{"do": "ok = 0"}]},
+          {"if": "len < 40 ?", "then": [{"do": "len += 1"}], "else": [{"do": "len += 37"}]}
+        ]},
+        {"call": "rc = bfm_read(c, 0, buf, DATA_BYTES) を呼ぶ"},
+        {"call": "check(\"[1] ...\", ok && rc == BFM_OK && buf と g_model が一致) を呼ぶ"},
+        {"do": "[2] ok = 1、seed = 12345、k = 0"},
+        {"while": "k < 400 && ok && !g_stop ?", "body": [
+          {"do": "seed = seed * 1103515245 + 12345"},
+          {"if": "k < 300 ?", "then": [
+            {"call": "len = 1 + (k % bfm_inline_max()) を呼ぶ"}
+          ], "else": [
+            {"do": "len = 221 + (seed % 8000)"}
+          ]},
+          {"do": "off = (seed >> 8) % (DATA_BYTES - len)"},
+          {"do": "j = 0"},
+          {"while": "j < len ?", "body": [
+            {"do": "buf[j] = (uint8_t)(seed >> (j & 15)) ^ (uint8_t)j"},
+            {"do": "j++"}
+          ]},
+          {"call": "bfm_write(c, off, buf, len) を呼ぶ"},
+          {"if": "bfm_write() != BFM_OK ?", "then": [
+            {"do": "ok = 0"},
+            {"break": true}
+          ]},
+          {"do": "buf の len バイトを g_model[off] へ写す"},
+          {"call": "bfm_read(c, off, buf, len) を呼ぶ"},
+          {"if": "bfm_read() != BFM_OK、または buf が g_model[off] からの len バイトと違う?", "then": [{"do": "ok = 0"}]},
+          {"do": "k++"}
+        ]},
+        {"call": "check(\"[2] ...\", ok) を呼ぶ"},
+        {"do": "[3] ok = 1、k = 0"},
+        {"while": "k < 5000 && ok ?", "body": [
+          {"do": "len = 1 + (k % 32)、off = (k * 131) % (DATA_BYTES - len)"},
+          {"do": "j = 0"},
+          {"while": "j < len ?", "body": [
+            {"do": "buf[j] = (uint8_t)(k + j * 3)"},
+            {"do": "j++"}
+          ]},
+          {"call": "bfm_write_post(c, off, buf, len) を呼ぶ"},
+          {"if": "bfm_write_post() != BFM_OK ?", "then": [{"do": "ok = 0"}]},
+          {"do": "buf の len バイトを g_model[off] へ写す"},
+          {"do": "k++"}
+        ]},
+        {"call": "bfm_flush(c) を呼ぶ"},
+        {"if": "bfm_flush() != BFM_OK ?", "then": [{"do": "ok = 0"}]},
+        {"call": "bfm_read(c, 0, buf, DATA_BYTES) を呼ぶ"},
+        {"if": "bfm_read() != BFM_OK、または buf と g_model が違う?", "then": [{"do": "ok = 0"}]},
+        {"call": "check(\"[3] ...\", ok) を呼ぶ"},
+        {"do": "[4] ok = 1、old = 0、i = 0"},
+        {"while": "i < 1000 && ok ?", "body": [
+          {"call": "bfm_faa(c, ATOM_OFF, 1, &old) を呼ぶ"},
+          {"if": "bfm_faa() != BFM_OK、または old != i ?", "then": [{"do": "ok = 0"}]},
+          {"do": "i++"}
+        ]},
+        {"if": "ok ?", "then": [
+          {"call": "bfm_faa(c, ATOM_OFF, 0x100000000, &old) を呼ぶ"},
+          {"if": "bfm_faa() != BFM_OK、または old != 1000 ?", "then": [{"do": "ok = 0"}]}
+        ]},
+        {"if": "ok ?", "then": [
+          {"call": "bfm_faa(c, ATOM_OFF, 0, &old) を呼ぶ"},
+          {"if": "bfm_faa() != BFM_OK、または old != 0x100000000 + 1000 ?", "then": [{"do": "ok = 0"}]}
+        ]},
+        {"call": "check(\"[4] FAA ...\", ok) を呼ぶ"},
+        {"do": "ok = 1、i = 0"},
+        {"while": "i < 1000 && ok ?", "body": [
+          {"call": "bfm_cas(c, ATOM_OFF + 8, i, i + 1, &old) を呼ぶ"},
+          {"if": "bfm_cas() != BFM_OK、または old != i ?", "then": [{"do": "ok = 0"}]},
+          {"do": "i++"}
+        ]},
+        {"if": "ok ?", "then": [
+          {"call": "bfm_cas(c, ATOM_OFF + 8, 7, 99, &old) を呼ぶ"},
+          {"if": "bfm_cas() != BFM_OK、または old != 1000 ?", "then": [{"do": "ok = 0"}]}
+        ]},
+        {"if": "ok ?", "then": [
+          {"call": "bfm_cas(c, ATOM_OFF + 8, 1000, 1000, &old) を呼ぶ"},
+          {"if": "bfm_cas() != BFM_OK、または old != 1000 ?", "then": [{"do": "ok = 0"}]}
+        ]},
+        {"call": "check(\"[4] CAS ...\", ok) を呼ぶ"},
+        {"call": "bfm_read(c, ATOM_OFF + 8, raw, 8) を呼ぶ"},
+        {"if": "bfm_read() == BFM_OK ?", "then": [
+          {"do": "le = (raw[0] == 0xe8 && raw[1] == 0x03)、be = (raw[7] == 0xe8 && raw[6] == 0x03)"},
+          {"if": "le ?", "then": [
+            {"do": "並びの表示を「リトルエンディアン(ホスト順)」にする"}
+          ], "else": [
+            {"if": "be ?", "then": [
+              {"do": "並びの表示を「ビッグエンディアン」にする"}
+            ], "else": [
+              {"do": "並びの表示を「?」にする"}
+            ]}
+          ]},
+          {"do": "raw の 8 バイトと並びを表示"},
+          {"if": "!le && !be ?", "then": [{"do": "g_ng++"}]}
+        ]},
+        {"if": "g_bfm.atomic_host_order ?", "then": [
+          {"do": "「atomic の元の値をホスト順で返す設定」を表示"}
+        ], "else": [
+          {"do": "「atomic の元の値をビッグエンディアンで返す設定」を表示"}
+        ]},
+        {"call": "[5] rc = bfm_read(c, 0, buf, DATA_BYTES) を呼ぶ"},
+        {"call": "check(\"[5] ...\", rc == BFM_OK && buf と g_model が一致) を呼ぶ"},
+        {"if": "[6] !g_stop && g_ng == 0 ?", "then": [
+          {"do": "i = 0"},
+          {"while": "i < 256(g_src の大きさ)?", "body": [
+            {"do": "g_src[i] = 0x5a ^ i"},
+            {"do": "i++"}
+          ]},
+          {"call": "lat(c, \"write 8B\", op_write8, iters) を呼ぶ"},
+          {"call": "lat(c, \"write 64B\", op_write64, iters) を呼ぶ"},
+          {"call": "lat(c, \"read 8B\", op_read8, iters) を呼ぶ"},
+          {"call": "lat(c, \"read 64B\", op_read64, iters) を呼ぶ"},
+          {"call": "lat(c, \"FAA\", op_faa, iters) を呼ぶ"},
+          {"call": "lat(c, \"CAS\", op_cas, iters) を呼ぶ"},
+          {"do": "n = 200000"},
+          {"call": "t0 = now_ns() を呼ぶ"},
+          {"do": "i = 0"},
+          {"while": "i < n ?", "body": [
+            {"call": "bfm_write_post(c, (i & 63) * 64, g_src, 8) を呼ぶ"},
+            {"if": "bfm_write_post() != BFM_OK ?", "then": [
+              {"do": "g_ng++"},
+              {"break": true}
+            ]},
+            {"do": "i++"}
+          ]},
+          {"call": "bfm_flush(c) を呼ぶ"},
+          {"if": "bfm_flush() != BFM_OK ?", "then": [{"do": "g_ng++"}]},
+          {"call": "dt = now_ns() - t0 を呼ぶ"},
+          {"do": "write_post の速さ(Mops)を表示"},
+          {"do": "k = 0"},
+          {"while": "k < 64 ?", "body": [
+            {"do": "g_src の先頭 64 バイトを g_model[k * 64] へ写す"},
+            {"do": "k++"}
+          ]},
+          {"call": "rc = bfm_read(c, 0, buf, DATA_BYTES) を呼ぶ"},
+          {"call": "check(\"[6] ...\", rc == BFM_OK && buf と g_model が一致) を呼ぶ"}
+        ]},
+        {"call": "fnv1a(g_model, DATA_BYTES) を呼び、模型の hash を表示"},
+        {"if": "[7] oob && !g_stop ?", "then": [
+          {"do": "real = ci->rlen"},
+          {"do": "ci->rlen = real + 4096(手元の範囲検査だけをすり抜ける)"},
+          {"call": "rc = bfm_read(c, real, d, 8) を呼ぶ"},
+          {"do": "ci->rlen = real"},
+          {"call": "check(\"[7] ...\", rc == BFM_E_REMOTE) を呼ぶ"}
+        ]},
+        {"if": "g_ng ?", "then": [{"do": "結果「NG」と g_ng を表示"}], "else": [{"do": "結果「OK」と g_ng を表示"}]},
+        {"call": "bfm_disconnect(c) を呼ぶ"},
+        {"if": "g_ng ?", "then": [{"return": "1"}], "else": [{"return": "0"}]}
+      ]
+    },
+    {
+      "func": "rdtsc",
+      "summary": "`rdtsc` 命令で CPU のタイムスタンプカウンタを読む。",
+      "args": {},
+      "ret": "タイムスタンプカウンタの値(64 ビット)。",
+      "pre": "x86 の CPU で動かすこと。",
+      "notes": "ナノ秒への換算は `tsc_calibrate()` で求めた `g_tsc_per_ns` で行う。",
+      "flow": [
+        {"do": "rdtsc 命令で lo と hi を読む"},
+        {"return": "(hi << 32) OR lo"}
+      ]
+    },
+    {
+      "func": "tsc_calibrate",
+      "summary": "200ms 眠る前後の `now_ns()` と `rdtsc()` の差から、1 ナノ秒あたりのカウンタの数 `g_tsc_per_ns` を求める。",
+      "args": {},
+      "ret": "なし",
+      "pre": "特になし。",
+      "notes": "200ms かかる。",
+      "flow": [
+        {"call": "n0 = now_ns()、c0 = rdtsc() を呼ぶ"},
+        {"do": "usleep(200000)"},
+        {"call": "g_tsc_per_ns = (rdtsc() - c0) / (now_ns() - n0) を呼ぶ"}
+      ]
+    },
+    {
+      "func": "bench_one",
+      "summary": "write(is_read = 0)か read(is_read = 1)を size バイトで n 回、常に qd 個を出しておく形で流し、IOPS・MB/s・平均遅延を 1 行表示する。1 回ごとに完了通知を求め(完了は出した順に来る)、出してから完了を拾うまでを遅延とする。相手のアドレスは size ずつずらし、相手の公開メモリの中の最大 1024 か所を回る。",
+      "args": {"c": "接続", "is_read": "0 なら write、1 なら read", "size": "1 回のバイト数(`BENCH_SIZE_MAX` 以下)", "qd": "同時に出しておく数(多重度、1 以上 `BENCH_QD_MAX` 以下)", "n": "流す回数"},
+      "ret": "0: 流し終えた。-1: 流せない組(下記)、出せない、エラー完了、または `g_stop` が立った。",
+      "pre": "`tsc_calibrate()` が済んでいること。中継バッファが `qd * size` バイト以上あること(`main()` が bench のとき `g_bfm_stage_size` を `BENCH_QD_MAX * BENCH_SIZE_MAX` にする)。",
+      "notes": "* 内部の関数 `bfm_ops_post_rw()` / `bfm_ops_poll1()` を直接使う。\n* k 番めの操作は中継バッファの `k * size` を使う(k は出した数を qd で割った余り)。\n* 相手の公開メモリが size より小さい(slots が 0)、qd が 0 か `BENCH_QD_MAX` より大きい、size が `BENCH_SIZE_MAX` より大きいときは、流せないと表示して -1 を返す。",
+      "flow": [
+        {"do": "ci = (struct bfm_conn *)c"},
+        {"call": "bfm_remote_size(c) を呼ぶ"},
+        {"if": "bfm_remote_size(c) / size < 1024 ?", "then": [
+          {"do": "slots = bfm_remote_size(c) / size"}
+        ], "else": [
+          {"do": "slots = 1024"}
+        ]},
+        {"if": "slots == 0 または qd == 0 または qd > BENCH_QD_MAX または size > BENCH_SIZE_MAX ?", "then": [
+          {"call": "bfm_remote_size(c) を呼び、「流せない」と size・qd・相手の公開メモリの大きさを表示"},
+          {"return": "-1"}
+        ]},
+        {"do": "posted = 0、done = 0、lat_sum = 0"},
+        {"call": "t0 = rdtsc() を呼ぶ"},
+        {"while": "done < n ?", "body": [
+          {"while": "posted - done < qd && posted < n ?", "body": [
+            {"do": "k = posted % qd"},
+            {"call": "ts[k] = rdtsc() を呼ぶ"},
+            {"call": "rc = bfm_ops_post_rw(ci, is_read, (posted % slots) * size, k * size, g_src, size) を呼ぶ"},
+            {"if": "rc != BFM_OK ?", "then": [
+              {"call": "bfm_strerror(rc) を呼び、「出せない」を表示"},
+              {"return": "-1"}
+            ]},
+            {"do": "posted++"}
+          ]},
+          {"call": "r = bfm_ops_poll1(ci) を呼ぶ"},
+          {"if": "r < 0 ?", "then": [
+            {"call": "bfm_strerror(r) を呼び、「エラー完了」を表示"},
+            {"return": "-1"}
+          ]},
+          {"if": "r > 0 ?", "then": [
+            {"call": "lat_sum += rdtsc() - ts[done % qd] を呼ぶ"},
+            {"do": "done++"}
+          ]},
+          {"if": "g_stop ?", "then": [{"return": "-1"}]}
+        ]},
+        {"call": "sec = (rdtsc() - t0) / g_tsc_per_ns / 10^9 を呼ぶ"},
+        {"do": "iops = n / sec"},
+        {"if": "is_read ?", "then": [{"do": "操作の表示を「read」にする"}], "else": [{"do": "操作の表示を「write」にする"}]},
+        {"do": "操作・size・qd・IOPS・MB/s・平均遅延(us)を表示"},
+        {"do": "fflush(stdout)"},
+        {"return": "0"}
+      ]
+    },
+    {
+      "func": "run_bench",
+      "summary": "bench の本体。相手へ接続し、write と read のそれぞれについて、大きさ 4・8・32・64・128・256・512・8192・65536・262144 バイトと多重度 1・4・8・16 の組を `bench_one()` で n 回ずつ流す。",
+      "args": {"ip": "相手の IPv4 アドレス", "mac": "相手の MAC アドレス", "port": "接続の番号", "n": "1 つの組で流す回数"},
+      "ret": "0: すべて流し終えた。1: 接続できない、または `bench_one()` が失敗した。",
+      "pre": "`bfm_init()` が済んでいて、`g_bfm_stage_size` が `BENCH_QD_MAX * BENCH_SIZE_MAX` であること(`main()` が設定する)。",
+      "notes": "* `bench_one()` が 1 回でも失敗したら残りの組を流さずに接続を返す。\n* 埋め込み(inline)でない write は中継バッファから送るので、流す前に中継バッファ全体を `0x5a ^ i` で埋めてキャッシュを書き戻しておく(内部の構造体の `stage` / `stage_size` を直接使う)。",
+      "flow": [
+        {"call": "c = bfm_connect(ip, mac, port, 0) を呼ぶ"},
+        {"if": "c == NULL ?", "then": [{"return": "1"}]},
+        {"call": "tsc_calibrate() を呼ぶ"},
+        {"do": "i = 0"},
+        {"while": "i < 256(g_src の大きさ)?", "body": [
+          {"do": "g_src[i] = 0x5a ^ i"},
+          {"do": "i++"}
+        ]},
+        {"do": "ci = (struct bfm_conn *)c、i = 0"},
+        {"while": "i < ci->stage_size ?", "body": [
+          {"do": "ci->stage[i] = 0x5a ^ i"},
+          {"do": "i++"}
+        ]},
+        {"call": "bfm_port_cache_flush(ci->stage, ci->stage_size) を呼ぶ"},
+        {"if": "bfm_bf_active(c) ?", "then": [{"do": "BlueFlame の表示を「あり」にする"}], "else": [{"do": "BlueFlame の表示を「なし」にする"}]},
+        {"call": "bfm_remote_size(c) と bfm_inline_max() を呼び、回数・相手の公開メモリの大きさ・BlueFlame・inline の上限・MTU を表示"},
+        {"do": "表の見出しを表示"},
+        {"do": "ng = 0、is_read = 0"},
+        {"while": "is_read < 2 && !ng ?", "body": [
+          {"do": "s = 0"},
+          {"while": "s < sizes の数(10)&& !ng ?", "body": [
+            {"do": "q = 0"},
+            {"while": "q < qds の数(4)&& !ng ?", "body": [
+              {"call": "bench_one(c, is_read, sizes[s], qds[q], n) を呼ぶ"},
+              {"if": "bench_one() != 0 ?", "then": [{"do": "ng = 1"}]},
+              {"do": "q++"}
+            ]},
+            {"do": "s++"}
+          ]},
+          {"do": "is_read++"}
+        ]},
+        {"call": "bfm_disconnect(c) を呼ぶ"},
+        {"return": "ng"}
+      ]
+    },
+    {
+      "func": "main",
+      "summary": "オプションを読んで設定の変数を決め、シグナルの受け口を登録し、ライブラリを立ち上げて、引数の動き(server / client / bench / info)を行い、ライブラリを止める。\n\n* `-d BDF`: `g_bfm_linux_pci_bdf`\n* `-i IP`: `g_bfm_local_ip`\n* `-p ポート`: 接続の番号(既定は `g_bfm_cm_port`)\n* `-m 経路MTU`: `g_bfm_path_mtu`\n* `-M ポートのMTU`: `g_bfm_port_mtu`\n* `-n 回数`: client の遅延の測定の回数(既定 20000)、bench の回数(既定 100000)\n* `-B` / `-S` / `-C`: `g_bfm_bf_enable` / `g_bfm_scatter_cqe` / `g_bfm_cpu_awake` を 0 にする\n* `-x`: client の検査 [7] を行う\n* `-v`: `g_bfm_verbose` を 1 にする",
+      "args": {"argc": "引数の数", "argv": "引数"},
+      "ret": "0: 成功。1: 立ち上げの失敗、または server / client / bench が失敗を返した。2: 引数が正しくない。",
+      "pre": "特になし。",
+      "notes": "* `bfm_init()` の前に `g_server` を決める(server のときだけ SIGQUIT で hash を出し、それ以外では SIGQUIT も止める合図になる。`on_sig()`)。\n* bench のときは `bfm_init()` の前に `g_bfm_stage_size` を `BENCH_QD_MAX * BENCH_SIZE_MAX`(4MiB)にする。\n* client / bench で相手の IP と MAC が足りないときは、info の判定へ進み、使い方を表示して 2 を返す。\n* `-h` と知らないオプションは使い方を表示して 2 を返す。",
+      "entry_note": "プログラムの開始点(OS から呼ばれる)",
+      "flow": [
+        {"do": "port = 0、iters = 0、oob = 0"},
+        {"while": "(opt = getopt(argc, argv, \"d:i:p:m:M:n:BSCxvh\")) != -1 ?", "body": [
+          {"switch": "opt", "cases": [
+            {"case": "'d'", "body": [{"do": "g_bfm_linux_pci_bdf = optarg"}]},
+            {"case": "'i'", "body": [
+              {"call": "parse_ip(optarg, &g_bfm_local_ip) を呼ぶ"},
+              {"if": "parse_ip() != 0 ?", "then": [
+                {"call": "usage() を呼ぶ"},
+                {"return": "2"}
+              ]}
+            ]},
+            {"case": "'p'", "body": [{"do": "port = atoi(optarg)"}]},
+            {"case": "'m'", "body": [{"do": "g_bfm_path_mtu = atoi(optarg)"}]},
+            {"case": "'M'", "body": [{"do": "g_bfm_port_mtu = atoi(optarg)"}]},
+            {"case": "'n'", "body": [{"do": "iters = atoi(optarg)"}]},
+            {"case": "'B'", "body": [{"do": "g_bfm_bf_enable = 0"}]},
+            {"case": "'S'", "body": [{"do": "g_bfm_scatter_cqe = 0"}]},
+            {"case": "'C'", "body": [{"do": "g_bfm_cpu_awake = 0"}]},
+            {"case": "'x'", "body": [{"do": "oob = 1"}]},
+            {"case": "'v'", "body": [{"do": "g_bfm_verbose = 1"}]},
+            {"default": true, "body": [
+              {"call": "usage() を呼ぶ"},
+              {"return": "2"}
+            ]}
+          ]}
+        ]},
+        {"if": "optind >= argc ?", "then": [
+          {"call": "usage() を呼ぶ"},
+          {"return": "2"}
+        ]},
+        {"do": "mode = argv[optind]"},
+        {"if": "port == 0 ?", "then": [{"do": "port = g_bfm_cm_port"}]},
+        {"do": "signal() で SIGINT・SIGTERM・SIGQUIT の受け口を on_sig にする"},
+        {"do": "bench = (mode が \"bench\")"},
+        {"do": "g_server = (mode が \"server\")"},
+        {"if": "bench ?", "then": [{"do": "g_bfm_stage_size = BENCH_QD_MAX * BENCH_SIZE_MAX"}]},
+        {"call": "bfm_init() を呼ぶ"},
+        {"if": "bfm_init() != BFM_OK ?", "then": [{"return": "1"}]},
+        {"do": "ret = 0"},
+        {"if": "mode が \"server\" ?", "then": [
+          {"call": "ret = run_server(port) を呼ぶ"}
+        ], "else": [
+          {"if": "(mode が \"client\" または bench) && optind + 2 < argc ?", "then": [
+            {"call": "parse_ip(argv[optind + 1], &ip) を呼ぶ"},
+            {"if": "parse_ip() != 0 ?", "then": [
+              {"call": "usage() を呼ぶ"},
+              {"do": "ret = 2"}
+            ], "else": [
+              {"call": "parse_mac(argv[optind + 2], mac) を呼ぶ"},
+              {"if": "parse_mac() != 0 ?", "then": [
+                {"call": "usage() を呼ぶ"},
+                {"do": "ret = 2"}
+              ], "else": [
+                {"if": "bench ?", "then": [
+                  {"if": "iters != 0 ?", "then": [
+                    {"call": "ret = run_bench(ip, mac, port, iters) を呼ぶ"}
+                  ], "else": [
+                    {"call": "ret = run_bench(ip, mac, port, 100000) を呼ぶ"}
+                  ]}
+                ], "else": [
+                  {"if": "iters != 0 ?", "then": [
+                    {"call": "ret = run_client(ip, mac, port, iters, oob) を呼ぶ"}
+                  ], "else": [
+                    {"call": "ret = run_client(ip, mac, port, 20000, oob) を呼ぶ"}
+                  ]}
+                ]}
+              ]}
+            ]}
+          ], "else": [
+            {"if": "mode が \"info\" ?", "then": [
+              {"do": "g_bfm の名前・BlueFlame・atomic・QP の能力・FW ページの数を表示"}
+            ], "else": [
+              {"call": "usage() を呼ぶ"},
+              {"do": "ret = 2"}
+            ]}
+          ]}
+        ]},
+        {"call": "bfm_shutdown() を呼ぶ"},
+        {"return": "ret"}
+      ]
+    }
+  ]
+}

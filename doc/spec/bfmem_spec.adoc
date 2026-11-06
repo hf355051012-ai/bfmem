@@ -1,0 +1,5677 @@
+= bfmem 関数仕様書
+:toc: left
+:toclevels: 3
+:sectnums:
+:sectnumlevels: 3
+:data-uri:
+:imagesdir: images
+:table-caption: 表
+:figure-caption: 図
+:toc-title: 目次
+
+bfmem(ConnectX の BlueFlame でノード間のメモリへ write / read / atomic を出すライブラリ)の、
+すべてのソースファイルの全関数の仕様。ソースファイルごとに章を、関数ごとに節を分ける。
+
+== この文書の読み方
+
+* 各関数の節には、*表*(関数名・処理内容・引数・戻り値・前提条件・注意事項)、*フロー図*、*関係図* を置く。
+* *フロー図* はソースの制御の流れ(if・ループ・break・continue・goto・return)をそのまま写したもの。
+** 角の丸い箱 = 開始・終了・戻る(戻り値)、四角 = 処理、両側に線のある箱 = このソースの関数の呼び出し、
+   ひし形 = 判断(下へ「はい」、右へ「いいえ」)、六角形 = 終わりの条件を持たない繰り返し、緑の楕円 = goto の行き先。
+** ループのひし形から下が繰り返す本体。本体の終わりからは左側の線でひし形へ戻る。
+* *関係図* は、左がこの関数を呼ぶ関数、右がこの関数が呼ぶ関数。ソースを解析して作った。
+** 白 = このソースの関数(下の小さい字は定義しているファイル)、灰色 = 外部の関数(C の標準ライブラリ・OS・コンパイラ組み込み)とバリアのマクロ、
+   破線 = 関数ポインタ経由・OS から呼ばれるもの。
+** `BFM_LOG()` / `BFM_DBG()` は `bfm_port_log()` の呼び出しとして数える。
+** 移植層(`bfm_port_*`)は Linux 版と VxWorks 版の 2 つの実装がある。ライブラリの関数の関係図には両方を出す(下の小さい字のファイル名で見分ける)。
+* 図はすべて draw.io の「編集できる SVG」(`images/*.drawio.svg`)。そのまま表示でき、draw.io で開くと編集できる。
+* この文書と図は `doc/spec/gen.py` で、ソースと `doc/spec/desc/*.json` から作る。ソースを直したら作り直すこと。
+
+== `include/bfm_port.h`
+
+移植層の宣言と、CPU の種類で決まる道具。プラットフォームごとに `port/<名前>/` で実装する関数(`bfm_port_*`。`port/linux_vfio/` = x86-64 Linux + VFIO、`port/vxworks/` = VxWorks)を宣言し、バリアのマクロ(`bfm_dma_wmb()` / `bfm_wc_flush()` / `bfm_mb()` / `bfm_rmb()`)と、バイト順・バイト列の読み書き・MMIO・DMA のアドレスの `static inline` の関数をここで定義する。ConnectX の構造(コマンド・WQE・CQE)はすべてビッグエンディアン。DMA に使うアドレス(NIC に渡すアドレス)は CPU のポインタの値そのもの(VxWorks は論理 = 物理、Linux はポート層が仮想アドレス = IOVA になるよう張る)。
+
+`bfm_cpu_to_be32()` / `bfm_cpu_to_be64()` は、ビッグエンディアンの CPU 向けとそれ以外向けの 2 つの定義がある(`__BYTE_ORDER__` でどちらか一方だけがコンパイルされる)。2 つの節は同じ記述を使う。
+
+[[include_bfm_port__bfm_bswap16]]
+=== `bfm_bswap16()`
+[cols="1,5",options="autowidth"]
+.bfm_bswap16()
+|===
+|関数名 |`bfm_bswap16`(`include/bfm_port.h` 93 行目)
+|宣言 |`static inline uint16_t bfm_bswap16(uint16_t v)`
+|処理内容 a|16bit の値のバイト順を入れ替える。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint16_t` !`v` !入れ替える値
+!===
+|戻り値 a|上位と下位のバイトを入れ替えた値。
+|前提条件 a|特になし。
+|注意事項 a|特になし。
+|===
+
+.bfm_bswap16() のフロー図
+image::flow_include_bfm_port__bfm_bswap16.drawio.svg[bfm_bswap16() のフロー図]
+
+.bfm_bswap16() の関係図
+image::call_include_bfm_port__bfm_bswap16.drawio.svg[bfm_bswap16() の関係図]
+
+[[include_bfm_port__bfm_bswap32]]
+=== `bfm_bswap32()`
+[cols="1,5",options="autowidth"]
+.bfm_bswap32()
+|===
+|関数名 |`bfm_bswap32`(`include/bfm_port.h` 94 行目)
+|宣言 |`static inline uint32_t bfm_bswap32(uint32_t v)`
+|処理内容 a|32bit の値のバイト順を入れ替える(`__builtin_bswap32()`)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`v` !入れ替える値
+!===
+|戻り値 a|バイト順を逆にした値。
+|前提条件 a|特になし。
+|注意事項 a|特になし。
+|===
+
+.bfm_bswap32() のフロー図
+image::flow_include_bfm_port__bfm_bswap32.drawio.svg[bfm_bswap32() のフロー図]
+
+.bfm_bswap32() の関係図
+image::call_include_bfm_port__bfm_bswap32.drawio.svg[bfm_bswap32() の関係図]
+
+[[include_bfm_port__bfm_bswap64]]
+=== `bfm_bswap64()`
+[cols="1,5",options="autowidth"]
+.bfm_bswap64()
+|===
+|関数名 |`bfm_bswap64`(`include/bfm_port.h` 95 行目)
+|宣言 |`static inline uint64_t bfm_bswap64(uint64_t v)`
+|処理内容 a|64bit の値のバイト順を入れ替える(`__builtin_bswap64()`)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint64_t` !`v` !入れ替える値
+!===
+|戻り値 a|バイト順を逆にした値。
+|前提条件 a|特になし。
+|注意事項 a|特になし。
+|===
+
+.bfm_bswap64() のフロー図
+image::flow_include_bfm_port__bfm_bswap64.drawio.svg[bfm_bswap64() のフロー図]
+
+.bfm_bswap64() の関係図
+image::call_include_bfm_port__bfm_bswap64.drawio.svg[bfm_bswap64() の関係図]
+
+[[include_bfm_port__bfm_cpu_to_be32_L99]]
+=== `bfm_cpu_to_be32()`(99 行目の定義)
+[cols="1,5",options="autowidth"]
+.bfm_cpu_to_be32()
+|===
+|関数名 |`bfm_cpu_to_be32`(`include/bfm_port.h` 99 行目)
+|宣言 |`static inline uint32_t bfm_cpu_to_be32(uint32_t v)`
+|処理内容 a|32bit の値を CPU のバイト順からビッグエンディアンに直す。ビッグエンディアンの CPU ではそのまま返し、それ以外では `bfm_bswap32()` で入れ替える。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`v` !CPU のバイト順の値
+!===
+|戻り値 a|ビッグエンディアンにした値。
+|前提条件 a|特になし。
+|注意事項 a|* どちらの定義になるかはコンパイルのときに `__BYTE_ORDER__` で決まる(実行中の分岐ではない)。
+* 逆向き(`bfm_be32_to_cpu()`)も同じ変換なので、マクロでこの関数にしてある。
+* MMIO の読み書き(`bfm_mmio_rd32be()` / `bfm_mmio_wr32be()`)が使う。
+|===
+
+.bfm_cpu_to_be32() のフロー図
+image::flow_include_bfm_port__bfm_cpu_to_be32_L99.drawio.svg[bfm_cpu_to_be32() のフロー図]
+
+.bfm_cpu_to_be32() の関係図
+image::call_include_bfm_port__bfm_cpu_to_be32_L99.drawio.svg[bfm_cpu_to_be32() の関係図]
+
+[[include_bfm_port__bfm_cpu_to_be64_L100]]
+=== `bfm_cpu_to_be64()`(100 行目の定義)
+[cols="1,5",options="autowidth"]
+.bfm_cpu_to_be64()
+|===
+|関数名 |`bfm_cpu_to_be64`(`include/bfm_port.h` 100 行目)
+|宣言 |`static inline uint64_t bfm_cpu_to_be64(uint64_t v)`
+|処理内容 a|64bit の値を CPU のバイト順からビッグエンディアンに直す。ビッグエンディアンの CPU ではそのまま返し、それ以外では `bfm_bswap64()` で入れ替える。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint64_t` !`v` !CPU のバイト順の値
+!===
+|戻り値 a|ビッグエンディアンにした値。
+|前提条件 a|特になし。
+|注意事項 a|* どちらの定義になるかはコンパイルのときに `__BYTE_ORDER__` で決まる(実行中の分岐ではない)。
+* 逆向き(`bfm_be64_to_cpu()`)も同じ変換なので、マクロでこの関数にしてある。
+|===
+
+.bfm_cpu_to_be64() のフロー図
+image::flow_include_bfm_port__bfm_cpu_to_be64_L100.drawio.svg[bfm_cpu_to_be64() のフロー図]
+
+.bfm_cpu_to_be64() の関係図
+image::call_include_bfm_port__bfm_cpu_to_be64_L100.drawio.svg[bfm_cpu_to_be64() の関係図]
+
+[[include_bfm_port__bfm_cpu_to_be32_L103]]
+=== `bfm_cpu_to_be32()`(103 行目の定義)
+[cols="1,5",options="autowidth"]
+.bfm_cpu_to_be32()
+|===
+|関数名 |`bfm_cpu_to_be32`(`include/bfm_port.h` 103 行目)
+|宣言 |`static inline uint32_t bfm_cpu_to_be32(uint32_t v)`
+|処理内容 a|32bit の値を CPU のバイト順からビッグエンディアンに直す。ビッグエンディアンの CPU ではそのまま返し、それ以外では `bfm_bswap32()` で入れ替える。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`v` !CPU のバイト順の値
+!===
+|戻り値 a|ビッグエンディアンにした値。
+|前提条件 a|特になし。
+|注意事項 a|* どちらの定義になるかはコンパイルのときに `__BYTE_ORDER__` で決まる(実行中の分岐ではない)。
+* 逆向き(`bfm_be32_to_cpu()`)も同じ変換なので、マクロでこの関数にしてある。
+* MMIO の読み書き(`bfm_mmio_rd32be()` / `bfm_mmio_wr32be()`)が使う。
+|===
+
+.bfm_cpu_to_be32() のフロー図
+image::flow_include_bfm_port__bfm_cpu_to_be32_L103.drawio.svg[bfm_cpu_to_be32() のフロー図]
+
+.bfm_cpu_to_be32() の関係図
+image::call_include_bfm_port__bfm_cpu_to_be32_L103.drawio.svg[bfm_cpu_to_be32() の関係図]
+
+[[include_bfm_port__bfm_cpu_to_be64_L104]]
+=== `bfm_cpu_to_be64()`(104 行目の定義)
+[cols="1,5",options="autowidth"]
+.bfm_cpu_to_be64()
+|===
+|関数名 |`bfm_cpu_to_be64`(`include/bfm_port.h` 104 行目)
+|宣言 |`static inline uint64_t bfm_cpu_to_be64(uint64_t v)`
+|処理内容 a|64bit の値を CPU のバイト順からビッグエンディアンに直す。ビッグエンディアンの CPU ではそのまま返し、それ以外では `bfm_bswap64()` で入れ替える。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint64_t` !`v` !CPU のバイト順の値
+!===
+|戻り値 a|ビッグエンディアンにした値。
+|前提条件 a|特になし。
+|注意事項 a|* どちらの定義になるかはコンパイルのときに `__BYTE_ORDER__` で決まる(実行中の分岐ではない)。
+* 逆向き(`bfm_be64_to_cpu()`)も同じ変換なので、マクロでこの関数にしてある。
+|===
+
+.bfm_cpu_to_be64() のフロー図
+image::flow_include_bfm_port__bfm_cpu_to_be64_L104.drawio.svg[bfm_cpu_to_be64() のフロー図]
+
+.bfm_cpu_to_be64() の関係図
+image::call_include_bfm_port__bfm_cpu_to_be64_L104.drawio.svg[bfm_cpu_to_be64() の関係図]
+
+[[include_bfm_port__bfm_rd16be]]
+=== `bfm_rd16be()`
+[cols="1,5",options="autowidth"]
+.bfm_rd16be()
+|===
+|関数名 |`bfm_rd16be`(`include/bfm_port.h` 110 行目)
+|宣言 |`static inline uint16_t bfm_rd16be(const volatile void *p)`
+|処理内容 a|`p` から 2 バイトをビッグエンディアンの 16bit の値として読む。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const volatile void *` !`p` !読む位置(揃っていなくてよい)
+!===
+|戻り値 a|読んだ値(CPU のバイト順)。
+|前提条件 a|`p` から 2 バイトが読めること。
+|注意事項 a|1 バイトずつ `volatile` で読むので、CPU のバイト順にも位置の揃いにもよらない。
+|===
+
+.bfm_rd16be() のフロー図
+image::flow_include_bfm_port__bfm_rd16be.drawio.svg[bfm_rd16be() のフロー図]
+
+.bfm_rd16be() の関係図
+image::call_include_bfm_port__bfm_rd16be.drawio.svg[bfm_rd16be() の関係図]
+
+[[include_bfm_port__bfm_rd24be]]
+=== `bfm_rd24be()`
+[cols="1,5",options="autowidth"]
+.bfm_rd24be()
+|===
+|関数名 |`bfm_rd24be`(`include/bfm_port.h` 114 行目)
+|宣言 |`static inline uint32_t bfm_rd24be(const volatile void *p)`
+|処理内容 a|`p` から 3 バイトをビッグエンディアンの 24bit の値として読む(QPN などの 24bit の欄)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const volatile void *` !`p` !読む位置(揃っていなくてよい)
+!===
+|戻り値 a|読んだ値(下位 24bit。CPU のバイト順)。
+|前提条件 a|`p` から 3 バイトが読めること。
+|注意事項 a|1 バイトずつ `volatile` で読む。
+|===
+
+.bfm_rd24be() のフロー図
+image::flow_include_bfm_port__bfm_rd24be.drawio.svg[bfm_rd24be() のフロー図]
+
+.bfm_rd24be() の関係図
+image::call_include_bfm_port__bfm_rd24be.drawio.svg[bfm_rd24be() の関係図]
+
+[[include_bfm_port__bfm_rd32be]]
+=== `bfm_rd32be()`
+[cols="1,5",options="autowidth"]
+.bfm_rd32be()
+|===
+|関数名 |`bfm_rd32be`(`include/bfm_port.h` 118 行目)
+|宣言 |`static inline uint32_t bfm_rd32be(const volatile void *p)`
+|処理内容 a|`p` から 4 バイトをビッグエンディアンの 32bit の値として読む。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const volatile void *` !`p` !読む位置(揃っていなくてよい)
+!===
+|戻り値 a|読んだ値(CPU のバイト順)。
+|前提条件 a|`p` から 4 バイトが読めること。
+|注意事項 a|1 バイトずつ `volatile` で読む(1 回の 32bit の読みにはならない)。
+|===
+
+.bfm_rd32be() のフロー図
+image::flow_include_bfm_port__bfm_rd32be.drawio.svg[bfm_rd32be() のフロー図]
+
+.bfm_rd32be() の関係図
+image::call_include_bfm_port__bfm_rd32be.drawio.svg[bfm_rd32be() の関係図]
+
+[[include_bfm_port__bfm_rd64be]]
+=== `bfm_rd64be()`
+[cols="1,5",options="autowidth"]
+.bfm_rd64be()
+|===
+|関数名 |`bfm_rd64be`(`include/bfm_port.h` 122 行目)
+|宣言 |`static inline uint64_t bfm_rd64be(const volatile void *p)`
+|処理内容 a|`p` から 8 バイトをビッグエンディアンの 64bit の値として読む。前の 4 バイトを上位、後の 4 バイトを下位にする。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const volatile void *` !`p` !読む位置(揃っていなくてよい)
+!===
+|戻り値 a|読んだ値(CPU のバイト順)。
+|前提条件 a|`p` から 8 バイトが読めること。
+|注意事項 a|`bfm_rd32be()` を 2 回呼ぶ(1 回の 64bit の読みにはならない)。
+|===
+
+.bfm_rd64be() のフロー図
+image::flow_include_bfm_port__bfm_rd64be.drawio.svg[bfm_rd64be() のフロー図]
+
+.bfm_rd64be() の関係図
+image::call_include_bfm_port__bfm_rd64be.drawio.svg[bfm_rd64be() の関係図]
+
+[[include_bfm_port__bfm_wr16be]]
+=== `bfm_wr16be()`
+[cols="1,5",options="autowidth"]
+.bfm_wr16be()
+|===
+|関数名 |`bfm_wr16be`(`include/bfm_port.h` 126 行目)
+|宣言 |`static inline void bfm_wr16be(volatile void *p, uint16_t v)`
+|処理内容 a|`v` をビッグエンディアンの 2 バイトとして `p` に書く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`volatile void *` !`p` !書く位置(揃っていなくてよい)
+!`uint16_t` !`v` !書く値(CPU のバイト順)
+!===
+|戻り値 a|なし
+|前提条件 a|`p` から 2 バイトが書けること。
+|注意事項 a|1 バイトずつ `volatile` で書く。
+|===
+
+.bfm_wr16be() のフロー図
+image::flow_include_bfm_port__bfm_wr16be.drawio.svg[bfm_wr16be() のフロー図]
+
+.bfm_wr16be() の関係図
+image::call_include_bfm_port__bfm_wr16be.drawio.svg[bfm_wr16be() の関係図]
+
+[[include_bfm_port__bfm_wr24be]]
+=== `bfm_wr24be()`
+[cols="1,5",options="autowidth"]
+.bfm_wr24be()
+|===
+|関数名 |`bfm_wr24be`(`include/bfm_port.h` 131 行目)
+|宣言 |`static inline void bfm_wr24be(volatile void *p, uint32_t v)`
+|処理内容 a|`v` の下位 24bit をビッグエンディアンの 3 バイトとして `p` に書く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`volatile void *` !`p` !書く位置(揃っていなくてよい)
+!`uint32_t` !`v` !書く値(下位 24bit を使う。CPU のバイト順)
+!===
+|戻り値 a|なし
+|前提条件 a|`p` から 3 バイトが書けること。
+|注意事項 a|1 バイトずつ `volatile` で書く。`v` の上位 8bit は捨てる。
+|===
+
+.bfm_wr24be() のフロー図
+image::flow_include_bfm_port__bfm_wr24be.drawio.svg[bfm_wr24be() のフロー図]
+
+.bfm_wr24be() の関係図
+image::call_include_bfm_port__bfm_wr24be.drawio.svg[bfm_wr24be() の関係図]
+
+[[include_bfm_port__bfm_wr32be]]
+=== `bfm_wr32be()`
+[cols="1,5",options="autowidth"]
+.bfm_wr32be()
+|===
+|関数名 |`bfm_wr32be`(`include/bfm_port.h` 137 行目)
+|宣言 |`static inline void bfm_wr32be(volatile void *p, uint32_t v)`
+|処理内容 a|`v` をビッグエンディアンの 4 バイトとして `p` に書く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`volatile void *` !`p` !書く位置(揃っていなくてよい)
+!`uint32_t` !`v` !書く値(CPU のバイト順)
+!===
+|戻り値 a|なし
+|前提条件 a|`p` から 4 バイトが書けること。
+|注意事項 a|1 バイトずつ `volatile` で書く(1 回の 32bit の書き込みにはならない)。
+|===
+
+.bfm_wr32be() のフロー図
+image::flow_include_bfm_port__bfm_wr32be.drawio.svg[bfm_wr32be() のフロー図]
+
+.bfm_wr32be() の関係図
+image::call_include_bfm_port__bfm_wr32be.drawio.svg[bfm_wr32be() の関係図]
+
+[[include_bfm_port__bfm_wr64be]]
+=== `bfm_wr64be()`
+[cols="1,5",options="autowidth"]
+.bfm_wr64be()
+|===
+|関数名 |`bfm_wr64be`(`include/bfm_port.h` 144 行目)
+|宣言 |`static inline void bfm_wr64be(volatile void *p, uint64_t v)`
+|処理内容 a|`v` をビッグエンディアンの 8 バイトとして `p` に書く。上位 32bit を前の 4 バイトに、下位 32bit を後の 4 バイトに書く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`volatile void *` !`p` !書く位置(揃っていなくてよい)
+!`uint64_t` !`v` !書く値(CPU のバイト順)
+!===
+|戻り値 a|なし
+|前提条件 a|`p` から 8 バイトが書けること。
+|注意事項 a|`bfm_wr32be()` を 2 回呼ぶ(1 回の 64bit の書き込みにはならない)。
+|===
+
+.bfm_wr64be() のフロー図
+image::flow_include_bfm_port__bfm_wr64be.drawio.svg[bfm_wr64be() のフロー図]
+
+.bfm_wr64be() の関係図
+image::call_include_bfm_port__bfm_wr64be.drawio.svg[bfm_wr64be() の関係図]
+
+[[include_bfm_port__bfm_mmio_rd32be]]
+=== `bfm_mmio_rd32be()`
+[cols="1,5",options="autowidth"]
+.bfm_mmio_rd32be()
+|===
+|関数名 |`bfm_mmio_rd32be`(`include/bfm_port.h` 151 行目)
+|宣言 |`static inline uint32_t bfm_mmio_rd32be(const volatile uint8_t *base, uint64_t off)`
+|処理内容 a|MMIO(BAR0 など)の `base + off` から 32bit を 1 回で読み、ビッグエンディアンから CPU のバイト順に直して返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const volatile uint8_t *` !`base` !MMIO の窓の先頭
+!`uint64_t` !`off` !先頭からのオフセット(バイト)
+!===
+|戻り値 a|読んだ値(CPU のバイト順)。
+|前提条件 a|`base + off` が 4 バイトの境界に揃っていて、張った窓の中にあること。
+|注意事項 a|`volatile` の 32bit の読みを 1 回だけ出す。
+|===
+
+.bfm_mmio_rd32be() のフロー図
+image::flow_include_bfm_port__bfm_mmio_rd32be.drawio.svg[bfm_mmio_rd32be() のフロー図]
+
+.bfm_mmio_rd32be() の関係図
+image::call_include_bfm_port__bfm_mmio_rd32be.drawio.svg[bfm_mmio_rd32be() の関係図]
+
+[[include_bfm_port__bfm_mmio_wr32be]]
+=== `bfm_mmio_wr32be()`
+[cols="1,5",options="autowidth"]
+.bfm_mmio_wr32be()
+|===
+|関数名 |`bfm_mmio_wr32be`(`include/bfm_port.h` 154 行目)
+|宣言 |`static inline void bfm_mmio_wr32be(volatile uint8_t *base, uint64_t off, uint32_t v)`
+|処理内容 a|`v` をビッグエンディアンに直し、MMIO(BAR0 など)の `base + off` へ 32bit を 1 回で書く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`volatile uint8_t *` !`base` !MMIO の窓の先頭
+!`uint64_t` !`off` !先頭からのオフセット(バイト)
+!`uint32_t` !`v` !書く値(CPU のバイト順)
+!===
+|戻り値 a|なし
+|前提条件 a|`base + off` が 4 バイトの境界に揃っていて、張った窓の中にあること。
+|注意事項 a|`volatile` の 32bit の書き込みを 1 回だけ出す。前のメモリの書き込みとの順序はバリア(`bfm_dma_wmb()` など)で呼び出し側が守る。
+|===
+
+.bfm_mmio_wr32be() のフロー図
+image::flow_include_bfm_port__bfm_mmio_wr32be.drawio.svg[bfm_mmio_wr32be() のフロー図]
+
+.bfm_mmio_wr32be() の関係図
+image::call_include_bfm_port__bfm_mmio_wr32be.drawio.svg[bfm_mmio_wr32be() の関係図]
+
+[[include_bfm_port__bfm_mmio_wr64_raw]]
+=== `bfm_mmio_wr64_raw()`
+[cols="1,5",options="autowidth"]
+.bfm_mmio_wr64_raw()
+|===
+|関数名 |`bfm_mmio_wr64_raw`(`include/bfm_port.h` 160 行目)
+|宣言 |`static inline void bfm_mmio_wr64_raw(volatile void *dst, uint64_t v)`
+|処理内容 a|8 バイトのドアベルを、64bit の書き込み 1 回で `dst` に出す。`v` はバイト順を直さずにそのまま書く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`volatile void *` !`dst` !書く先(UAR のドアベルなど)
+!`uint64_t` !`v` !メモリ上の並びのままの値(WQE の先頭 8 バイトをそのまま)
+!===
+|戻り値 a|なし
+|前提条件 a|`dst` が 8 バイトの境界に揃っていること。
+|注意事項 a|32bit 2 回に分けると PCIe 上で分かれうるので 1 回で書く。32bit の CPU ではコンパイラが分けて書くが、UAR は接続ごとに別なので混ざらない。
+|===
+
+.bfm_mmio_wr64_raw() のフロー図
+image::flow_include_bfm_port__bfm_mmio_wr64_raw.drawio.svg[bfm_mmio_wr64_raw() のフロー図]
+
+.bfm_mmio_wr64_raw() の関係図
+image::call_include_bfm_port__bfm_mmio_wr64_raw.drawio.svg[bfm_mmio_wr64_raw() の関係図]
+
+[[include_bfm_port__bfm_dma_addr]]
+=== `bfm_dma_addr()`
+[cols="1,5",options="autowidth"]
+.bfm_dma_addr()
+|===
+|関数名 |`bfm_dma_addr`(`include/bfm_port.h` 165 行目)
+|宣言 |`static inline uint64_t bfm_dma_addr(const volatile void *p)`
+|処理内容 a|CPU のポインタを、NIC に渡す DMA のアドレスにする(ポインタの値そのもの)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const volatile void *` !`p` !DMA 領域・公開メモリの中を指すポインタ
+!===
+|戻り値 a|DMA のアドレス(`p` の値を 64bit にしたもの)。
+|前提条件 a|`p` が、移植層が CPU と NIC の両方から同じアドレスで触れるようにした領域(DMA 領域・公開メモリ)の中を指していること。
+|注意事項 a|VxWorks は論理 = 物理、Linux はポート層が仮想アドレス = IOVA になるよう張るので、変換はしない。
+|===
+
+.bfm_dma_addr() のフロー図
+image::flow_include_bfm_port__bfm_dma_addr.drawio.svg[bfm_dma_addr() のフロー図]
+
+.bfm_dma_addr() の関係図
+image::call_include_bfm_port__bfm_dma_addr.drawio.svg[bfm_dma_addr() の関係図]
+
+== `src/bfm_core.c`
+
+ライブラリの入口。設定の検査、移植層・PCIe・HCA・接続管理の順の立ち上げ(`bfm_init()`)、その逆順の停止(`bfm_shutdown()`)、非同期の処理(`bfm_poll()`)を持つ。立ち上げ済みかどうかを静的変数 `s_inited` で持つ。
+
+[[src_bfm_core__check_config]]
+=== `check_config()`
+[cols="1,5",options="autowidth"]
+.check_config()
+|===
+|関数名 |`check_config`(`src/bfm_core.c` 8 行目)
+|宣言 |`static int check_config(void)`
+|処理内容 a|立ち上げの前に設定の変数を検査する。
+
+* DMA 領域と公開メモリの先頭・大きさが 4KiB の境界・倍数で、大きさが 0 でないこと
+* DMA 領域と公開メモリが重ならないこと
+* `g_bfm_local_ip` が 0 でないこと
+
+あわせて `g_bfm_stage_size` を 4KiB 以上に、`g_bfm_signal_every` を 1 以上に直す。
+|引数 |なし
+|戻り値 a|`BFM_OK`: 使える設定。`BFM_E_PARAM`: 使えない設定(理由を表示する)。
+|前提条件 a|特になし。
+|注意事項 a|`g_bfm_stage_size` と `g_bfm_signal_every` は、範囲外ならこの関数が書き換える(呼び出し側が入れた値が変わる)。
+|===
+
+.check_config() のフロー図
+image::flow_src_bfm_core__check_config.drawio.svg[check_config() のフロー図]
+
+.check_config() の関係図
+image::call_src_bfm_core__check_config.drawio.svg[check_config() の関係図]
+
+[[src_bfm_core__cleanup]]
+=== `cleanup()`
+[cols="1,5",options="autowidth"]
+.cleanup()
+|===
+|関数名 |`cleanup`(`src/bfm_core.c` 29 行目)
+|宣言 |`static void cleanup(int port_ok)`
+|処理内容 a|立ち上げの途中で失敗したときと停止のときの後片付け。FW が動いていれば止め(`TEARDOWN_HCA`)、BAR0 を張っていれば Bus Master を落として BAR0 を外し、`port_ok` が 0 でなければ移植層を閉じる。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`int` !`port_ok` !0 以外なら `bfm_port_fini()` で移植層を閉じる
+!===
+|戻り値 a|なし
+|前提条件 a|`g_bfm` の `hca_enabled` / `bar0` が、そのときの状態を正しく表していること。
+|注意事項 a|Bus Master を落としてから BAR0 を外すので、この後 NIC はメモリへ DMA しない。`hca_enabled` が 1 のときは FW を止めてから Bus Master を落とす。
+|===
+
+.cleanup() のフロー図
+image::flow_src_bfm_core__cleanup.drawio.svg[cleanup() のフロー図]
+
+.cleanup() の関係図
+image::call_src_bfm_core__cleanup.drawio.svg[cleanup() の関係図]
+
+[[src_bfm_core__bfm_init]]
+=== `bfm_init()`
+[cols="1,5",options="autowidth"]
+.bfm_init()
+|===
+|関数名 |`bfm_init`(`src/bfm_core.c` 40 行目)
+|宣言 |`int bfm_init(void)`
+|処理内容 a|ライブラリを立ち上げる。設定の検査 → 移植層の初期化(DMA 領域と公開メモリを使えるようにする)→ DMA 領域の切り出しの初期化 → PCIe の設定 → BAR0 を張る → HCA の立ち上げ(`mlx5_hca_init()`)→ 接続管理の準備(GSI と接続の枠。`bfm_cm_init()`)の順に行い、使った DMA 領域などを表示する。
+|引数 |なし
+|戻り値 a|`BFM_OK`: 立ち上がった(既に立ち上がっていたときも)。`BFM_E_PARAM`: 設定が不正。`BFM_E_HW`: 移植層・PCIe・BAR0 の失敗。そのほか `mlx5_hca_init()` / `bfm_cm_init()` の戻り値(`BFM_E_HW` / `BFM_E_NOMEM` / `BFM_E_TIMEOUT` など)。
+|前提条件 a|`include/bfm_config.h` の変数を設定し終えていること。1 つのタスクから呼ぶこと。
+|注意事項 a|* 2 回目以降の呼び出しは何もせず `BFM_OK` を返す。
+* 途中で失敗したら `cleanup(1)` で取ったものを返してから戻る(移植層の初期化そのものの失敗は除く)。
+* `g_bfm` と `g_bfm_conn` を 0 で初期化する。
+|===
+
+.bfm_init() のフロー図
+image::flow_src_bfm_core__bfm_init.drawio.svg[bfm_init() のフロー図]
+
+.bfm_init() の関係図
+image::call_src_bfm_core__bfm_init.drawio.svg[bfm_init() の関係図]
+
+[[src_bfm_core__bfm_shutdown]]
+=== `bfm_shutdown()`
+[cols="1,5",options="autowidth"]
+.bfm_shutdown()
+|===
+|関数名 |`bfm_shutdown`(`src/bfm_core.c` 74 行目)
+|宣言 |`void bfm_shutdown(void)`
+|処理内容 a|ライブラリを止める。全部の接続を畳み(`bfm_cm_fini()`)、FW を止め、Bus Master を落とし、BAR0 と移植層を閉じる(`cleanup(1)`)。
+|引数 |なし
+|戻り値 a|なし
+|前提条件 a|`bfm_init()` と同じタスクから呼ぶこと。
+|注意事項 a|立ち上がっていなければ何もしない。接続が残っていれば `bfm_cm_fini()` が相手へ DREQ を送ってから畳む。
+|===
+
+.bfm_shutdown() のフロー図
+image::flow_src_bfm_core__bfm_shutdown.drawio.svg[bfm_shutdown() のフロー図]
+
+.bfm_shutdown() の関係図
+image::call_src_bfm_core__bfm_shutdown.drawio.svg[bfm_shutdown() の関係図]
+
+[[src_bfm_core__bfm_poll]]
+=== `bfm_poll()`
+[cols="1,5",options="autowidth"]
+.bfm_poll()
+|===
+|関数名 |`bfm_poll`(`src/bfm_core.c` 83 行目)
+|宣言 |`int bfm_poll(void)`
+|処理内容 a|非同期の処理を 1 回行う。EQ のイベント(FW のページ要求・リンクの変化・QP のエラー)を読み(`mlx5_eq_poll()`)、GSI に来た CM のメッセージ(相手からの DREQ・REQ の再送)を処理する(`bfm_cm_poll()`)。
+|引数 |なし
+|戻り値 a|処理したイベントとメッセージの数の合計。立ち上がっていなければ 0。
+|前提条件 a|`bfm_init()` と同じタスクから呼ぶこと(データ経路の関数とも同時に呼ばないこと)。
+|注意事項 a|データ経路の関数はこれを呼ばない。相手からの切断や FW のページ要求に答えるため、アプリケーションがときどき呼ぶこと。
+|===
+
+.bfm_poll() のフロー図
+image::flow_src_bfm_core__bfm_poll.drawio.svg[bfm_poll() のフロー図]
+
+.bfm_poll() の関係図
+image::call_src_bfm_core__bfm_poll.drawio.svg[bfm_poll() の関係図]
+
+== `src/bfm_mem.c`
+
+DMA 領域(`g_bfm_dma_base` / `g_bfm_dma_size`)からの静的な切り出し。切り出した量を静的変数 `s_next`(領域の先頭からのバイト数)で持つ。切り出したものを個別に返すことはせず、`bfm_init()` のたびに `bfm_mem_reset()` で先頭から切り直す。接続ごとの資源は `bfm_init()` のときに `BFM_MAX_CONN` 本ぶんを先に切り出しておく。
+
+[[src_bfm_mem__bfm_mem_reset]]
+=== `bfm_mem_reset()`
+[cols="1,5",options="autowidth"]
+.bfm_mem_reset()
+|===
+|関数名 |`bfm_mem_reset`(`src/bfm_mem.c` 11 行目)
+|宣言 |`void bfm_mem_reset(void)`
+|処理内容 a|切り出しを先頭からやり直す(`s_next` を 0 にする)。
+|引数 |なし
+|戻り値 a|なし
+|前提条件 a|それまでに切り出した領域を、もう誰も使っていないこと(NIC も含む)。
+|注意事項 a|領域の中身は消さない(0 で埋めるのは `bfm_mem_alloc()` が切り出すとき)。`bfm_init()` が移植層の初期化の直後に呼ぶ。
+|===
+
+.bfm_mem_reset() のフロー図
+image::flow_src_bfm_mem__bfm_mem_reset.drawio.svg[bfm_mem_reset() のフロー図]
+
+.bfm_mem_reset() の関係図
+image::call_src_bfm_mem__bfm_mem_reset.drawio.svg[bfm_mem_reset() の関係図]
+
+[[src_bfm_mem__bfm_mem_alloc]]
+=== `bfm_mem_alloc()`
+[cols="1,5",options="autowidth"]
+.bfm_mem_alloc()
+|===
+|関数名 |`bfm_mem_alloc`(`src/bfm_mem.c` 21 行目)
+|宣言 |`void *bfm_mem_alloc(uint64_t size, uint64_t align)`
+|処理内容 a|DMA 領域の続きから、`size` バイトを `align` の境界に合わせて切り出し、0 で埋め、キャッシュを吐き出して(`bfm_port_cache_flush()`)先頭を返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint64_t` !`size` !切り出す大きさ(バイト)
+!`uint64_t` !`align` !先頭を合わせる境界(バイト)。2 のべき乗であること。0 は 1 とみなす
+!===
+|戻り値 a|切り出した領域の先頭(CPU のポインタ。そのまま DMA のアドレスにもなる)。`align` が 2 のべき乗でない、または足りなければ `NULL`。
+|前提条件 a|`bfm_mem_reset()` を呼んであること。`g_bfm_dma_base` / `g_bfm_dma_size` が設定され、移植層の初期化(`bfm_port_init()`)で CPU から触れるようになっていること。
+|注意事項 a|* `align` が 2 のべき乗でなければ、表示して `NULL` を返す。
+* 足りないときは、使った量・要求した大きさ・足りない量・`g_bfm_dma_size` を表示して `NULL` を返す(`s_next` は変えない)。
+* 足りるかどうかは、`at + size` を作らずに残りの大きさ(`end - at`)と比べる(足し算の桁あふれを避ける)。境界合わせで `at` が領域の外(`at < base` または `at > end`)になったときも足りないとみなし、足りない量は `size` と表示する。
+* 境界合わせで空いた隙間は使わずに捨てる。
+* 返すための関数は無い。
+|===
+
+.bfm_mem_alloc() のフロー図
+image::flow_src_bfm_mem__bfm_mem_alloc.drawio.svg[bfm_mem_alloc() のフロー図]
+
+.bfm_mem_alloc() の関係図
+image::call_src_bfm_mem__bfm_mem_alloc.drawio.svg[bfm_mem_alloc() の関係図]
+
+[[src_bfm_mem__bfm_mem_used]]
+=== `bfm_mem_used()`
+[cols="1,5",options="autowidth"]
+.bfm_mem_used()
+|===
+|関数名 |`bfm_mem_used`(`src/bfm_mem.c` 46 行目)
+|宣言 |`uint64_t bfm_mem_used(void)`
+|処理内容 a|DMA 領域の先頭から、これまでに切り出した量(境界合わせの隙間を含む)を返す。
+|引数 |なし
+|戻り値 a|使った量(バイト。`s_next`)。
+|前提条件 a|特になし。
+|注意事項 a|`bfm_init()` が立ち上げの終わりに、使った量を表示するのに使う。
+|===
+
+.bfm_mem_used() のフロー図
+image::flow_src_bfm_mem__bfm_mem_used.drawio.svg[bfm_mem_used() のフロー図]
+
+.bfm_mem_used() の関係図
+image::call_src_bfm_mem__bfm_mem_used.drawio.svg[bfm_mem_used() の関係図]
+
+== `src/bfm_pci.c`
+
+PCIe の設定空間を自分で設定する(VxWorks では OS もドライバも設定しないため)。`bfm_pci_setup()` が次の順に行う。
+
+. 装置の確認(Mellanox の ConnectX-4〜7 の PF か)
+. FLR(`g_bfm_pcie_flr`。前回の実行で動いたままの NIC を止める)
+. BAR0 の大きさを測り、`g_bfm_bar0_addr` を書き込む(0 なら今の値を使う)
+. Memory Space / Bus Master を有効にし、INTx を止める(割り込みは使わない)
+. Max Read Request Size(`g_bfm_pcie_mrrs`)
+
+設定空間の読み書きは移植層(`bfm_port_pci_read32()` / `bfm_port_pci_write32()`)を通す。Linux では VFIO の設定空間を通るので、BAR への書き込みは VFIO の中だけで効く(実際の BAR はカーネルが割り当てたまま)。そのため Linux では `g_bfm_bar0_addr` を 0 にしておく。
+
+[[src_bfm_pci__pci_cmd_read]]
+=== `pci_cmd_read()`
+[cols="1,5",options="autowidth"]
+.pci_cmd_read()
+|===
+|関数名 |`pci_cmd_read`(`src/bfm_pci.c` 41 行目)
+|宣言 |`static uint16_t pci_cmd_read(void)`
+|処理内容 a|設定空間の Command レジスタ(オフセット 0x04 の下位 16bit)を読む。
+|引数 |なし
+|戻り値 a|Command レジスタの値。
+|前提条件 a|移植層が初期化されていること(`bfm_port_init()`)。
+|注意事項 a|32bit で読み、上位 16bit(Status)を捨てる。
+|===
+
+.pci_cmd_read() のフロー図
+image::flow_src_bfm_pci__pci_cmd_read.drawio.svg[pci_cmd_read() のフロー図]
+
+.pci_cmd_read() の関係図
+image::call_src_bfm_pci__pci_cmd_read.drawio.svg[pci_cmd_read() の関係図]
+
+[[src_bfm_pci__pci_cmd_write]]
+=== `pci_cmd_write()`
+[cols="1,5",options="autowidth"]
+.pci_cmd_write()
+|===
+|関数名 |`pci_cmd_write`(`src/bfm_pci.c` 47 行目)
+|宣言 |`static void pci_cmd_write(uint16_t cmd)`
+|処理内容 a|設定空間の Command レジスタに `cmd` を書く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint16_t` !`cmd` !Command レジスタに書く値
+!===
+|戻り値 a|なし
+|前提条件 a|移植層が初期化されていること(`bfm_port_init()`)。
+|注意事項 a|32bit で書き、上位 16bit(Status)には 0 を書く。Status は 1 を書くと消えるビットなので、0 を書いて触らない。
+|===
+
+.pci_cmd_write() のフロー図
+image::flow_src_bfm_pci__pci_cmd_write.drawio.svg[pci_cmd_write() のフロー図]
+
+.pci_cmd_write() の関係図
+image::call_src_bfm_pci__pci_cmd_write.drawio.svg[pci_cmd_write() の関係図]
+
+[[src_bfm_pci__pci_find_pcie_cap]]
+=== `pci_find_pcie_cap()`
+[cols="1,5",options="autowidth"]
+.pci_find_pcie_cap()
+|===
+|関数名 |`pci_find_pcie_cap`(`src/bfm_pci.c` 53 行目)
+|宣言 |`static uint32_t pci_find_pcie_cap(void)`
+|処理内容 a|capability の連結リストをたどり、PCI Express の capability(ID 0x10)の位置を探す。
+|引数 |なし
+|戻り値 a|PCI Express の capability の設定空間の位置。無ければ 0。
+|前提条件 a|移植層が初期化されていること(`bfm_port_init()`)。
+|注意事項 a|Status の Capabilities List ビットが立っていなければ探さない。リストが壊れていても止まるよう、たどるのは 48 個までにする。
+|===
+
+.pci_find_pcie_cap() のフロー図
+image::flow_src_bfm_pci__pci_find_pcie_cap.drawio.svg[pci_find_pcie_cap() のフロー図]
+
+.pci_find_pcie_cap() の関係図
+image::call_src_bfm_pci__pci_find_pcie_cap.drawio.svg[pci_find_pcie_cap() の関係図]
+
+[[src_bfm_pci__pci_wait_present]]
+=== `pci_wait_present()`
+[cols="1,5",options="autowidth"]
+.pci_wait_present()
+|===
+|関数名 |`pci_wait_present`(`src/bfm_pci.c` 65 行目)
+|宣言 |`static int pci_wait_present(uint32_t ms)`
+|処理内容 a|設定空間の Vendor ID が Mellanox(`MLX5_VENDOR_ID`)として読めるようになるまで、1ms ごとに読み直して待つ。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`ms` !待つ時間の上限(ミリ秒)
+!===
+|戻り値 a|0: 読めた。-1: 時間切れ。
+|前提条件 a|移植層が初期化されていること(`bfm_port_init()`)。
+|注意事項 a|FLR の後に使う。時間は `bfm_port_time_ns()` で測る。
+|===
+
+.pci_wait_present() のフロー図
+image::flow_src_bfm_pci__pci_wait_present.drawio.svg[pci_wait_present() のフロー図]
+
+.pci_wait_present() の関係図
+image::call_src_bfm_pci__pci_wait_present.drawio.svg[pci_wait_present() の関係図]
+
+[[src_bfm_pci__pci_flr]]
+=== `pci_flr()`
+[cols="1,5",options="autowidth"]
+.pci_flr()
+|===
+|関数名 |`pci_flr`(`src/bfm_pci.c` 79 行目)
+|宣言 |`static int pci_flr(uint32_t pcie)`
+|処理内容 a|FLR(Function Level Reset)をかける。Bus Master を落とし、保留中の DMA(Transactions Pending)が終わるのを最大およそ 100ms 待ってから FLR を出し、100ms 待つ(PCIe 基本仕様の決まり)。その後、設定空間が読めるようになるまで最大 1 秒待つ。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`pcie` !PCI Express の capability の位置(`pci_find_pcie_cap()` の戻り値)
+!===
+|戻り値 a|0: FLR をかけた、または装置が FLR に対応していない。-1: FLR の後、設定空間が読めない。
+|前提条件 a|移植層が初期化されていること(`bfm_port_init()`)。`pcie` が 0 でないこと。
+|注意事項 a|* 装置が FLR に対応していなければ、表示してリセットせずに 0 を返す。
+* 保留中の DMA が 100 回(1ms ごと)見ても終わらなくても、注意を表示してそのまま FLR を出す。
+* FLR をかけると装置の設定空間の値(BAR0・Command など)は初期値に戻る。
+|===
+
+.pci_flr() のフロー図
+image::flow_src_bfm_pci__pci_flr.drawio.svg[pci_flr() のフロー図]
+
+.pci_flr() の関係図
+image::call_src_bfm_pci__pci_flr.drawio.svg[pci_flr() の関係図]
+
+[[src_bfm_pci__pci_setup_bar0]]
+=== `pci_setup_bar0()`
+[cols="1,5",options="autowidth"]
+.pci_setup_bar0()
+|===
+|関数名 |`pci_setup_bar0`(`src/bfm_pci.c` 107 行目)
+|宣言 |`static int pci_setup_bar0(uint64_t addr, uint64_t *out_phys, uint64_t *out_size)`
+|処理内容 a|BAR0 の大きさを測り(全ビットに 1 を書いて読み戻す)、`addr` が 0 でなければ BAR0 に `addr` を書き込む。0 なら元の値を書き戻す。BAR0 の値(物理アドレス)と大きさを返す。測る間は Memory Space と Bus Master を止め、終わったら Command を元に戻す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint64_t` !`addr` !BAR0 に割り当てるアドレス(`g_bfm_bar0_addr`)。0 なら今の値を使う
+!`uint64_t *` !`out_phys` !BAR0 の物理アドレスを返す先
+!`uint64_t *` !`out_size` !BAR0 の大きさ(バイト)を返す先
+!===
+|戻り値 a|0: 成功。-1: BAR0 が 64bit のメモリ BAR でない、BAR0 の大きさが測れない(読み戻した mask が 0、または大きさが 2 のべき乗でない)、または `addr` が BAR0 の大きさの境界に合っていない。
+|前提条件 a|移植層が初期化されていること(`bfm_port_init()`)。
+|注意事項 a|* 大きさが測れないとき、`addr` が境界に合わないときは、理由・`addr`・大きさを表示し、BAR0 と Command を元の値に戻してから -1 を返す。大きさの検査は `addr` が 0 のときも行う。
+* 失敗したときは `*out_phys` / `*out_size` に書かない。
+* 書き込む BAR0 の下位 4bit(種類のビット)は元の値を残す。
+* Linux(VFIO)では BAR への書き込みは VFIO の中だけで効く。
+|===
+
+.pci_setup_bar0() のフロー図
+image::flow_src_bfm_pci__pci_setup_bar0.drawio.svg[pci_setup_bar0() のフロー図]
+
+.pci_setup_bar0() の関係図
+image::call_src_bfm_pci__pci_setup_bar0.drawio.svg[pci_setup_bar0() の関係図]
+
+[[src_bfm_pci__bfm_pci_setup]]
+=== `bfm_pci_setup()`
+[cols="1,5",options="autowidth"]
+.bfm_pci_setup()
+|===
+|関数名 |`bfm_pci_setup`(`src/bfm_pci.c` 146 行目)
+|宣言 |`int bfm_pci_setup(bfm_dev_t *d)`
+|処理内容 a|PCIe の設定一式を行う。装置の確認(Mellanox の ConnectX-4〜7 の PF か)→ PCI Express の capability を探す → FLR(`g_bfm_pcie_flr` が 0 でなければ)→ BAR0 の設定(`pci_setup_bar0()`)→ Max Read Request Size(`g_bfm_pcie_mrrs` が 0 でなければ)→ Memory Space・Bus Master を有効にし INTx を止める、の順に行い、装置の名前・BAR0・リンクの速さと幅・MRRS を表示する。`d` の `vendor` / `device` / `name` / `bar0_phys` / `bar0_size` を埋める。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置の状態(`g_bfm`)。`vendor` / `device` / `name` / `bar0_phys` / `bar0_size` を埋める
+!===
+|戻り値 a|0: 成功。-1: 対応していない装置、PCI Express の capability が無い、FLR の後に設定空間が読めない、BAR0 の設定に失敗した。
+|前提条件 a|移植層が初期化されていること(`bfm_port_init()`)。`g_bfm_pcie_flr` / `g_bfm_bar0_addr` / `g_bfm_pcie_mrrs` を設定してあること。
+|注意事項 a|* `g_bfm_pcie_mrrs` は 128・256・512・1024・2048・4096 のうち、その値以上で最も小さいものにする(4096 より大きければ 4096)。
+* 失敗したときも、それまでに行った設定(FLR など)は戻さない。後片付けは呼び出し側(`bfm_init()` の `cleanup()`)が行う。
+* 装置の ID が表に無いとき(VF など)は `d->name` が `NULL` のまま -1 を返す。
+|===
+
+.bfm_pci_setup() のフロー図
+image::flow_src_bfm_pci__bfm_pci_setup.drawio.svg[bfm_pci_setup() のフロー図]
+
+.bfm_pci_setup() の関係図
+image::call_src_bfm_pci__bfm_pci_setup.drawio.svg[bfm_pci_setup() の関係図]
+
+[[src_bfm_pci__bfm_pci_bus_master]]
+=== `bfm_pci_bus_master()`
+[cols="1,5",options="autowidth"]
+.bfm_pci_bus_master()
+|===
+|関数名 |`bfm_pci_bus_master`(`src/bfm_pci.c` 188 行目)
+|宣言 |`void bfm_pci_bus_master(int on)`
+|処理内容 a|Command レジスタの Bus Master ビットを入れる、または落とす。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`int` !`on` !0 以外なら入れる、0 なら落とす
+!===
+|戻り値 a|なし
+|前提条件 a|移植層が初期化されていること(`bfm_port_init()`)。
+|注意事項 a|落とすと NIC はメモリへ DMA しない。`bfm_core.c` の `cleanup()` が BAR0 を外す前に `bfm_pci_bus_master(0)` を呼ぶ。
+|===
+
+.bfm_pci_bus_master() のフロー図
+image::flow_src_bfm_pci__bfm_pci_bus_master.drawio.svg[bfm_pci_bus_master() のフロー図]
+
+.bfm_pci_bus_master() の関係図
+image::call_src_bfm_pci__bfm_pci_bus_master.drawio.svg[bfm_pci_bus_master() の関係図]
+
+== `src/mlx5_cmd.c`
+
+mlx5 のコマンドキュー、FW へのページの受け渡し(MANAGE_PAGES)、EQ(非同期イベント)を持つ。コマンドキューは entry 0 だけを使い、コマンドを 1 つずつ同期で出す(排他は持たない)。16 バイトを超える入力・出力はメールボックスの鎖(最大 `BFM_MBOX_BLOCKS` ブロック)で渡す。デバイスの状態 `g_bfm` の実体もここに置く。
+
+[[src_mlx5_cmd__mbox_in]]
+=== `mbox_in()`
+[cols="1,5",options="autowidth"]
+.mbox_in()
+|===
+|関数名 |`mbox_in`(`src/mlx5_cmd.c` 34 行目)
+|宣言 |`static volatile uint8_t *mbox_in(const bfm_dev_t *d, uint32_t i)`
+|処理内容 a|入力のメールボックスの `i` 番目のブロックの先頭を返す(`d->mbox_in + i * BFM_MBOX_STRIDE`)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const bfm_dev_t *` !`d` !デバイスの状態
+!`uint32_t` !`i` !ブロックの番号
+!===
+|戻り値 a|ブロックの先頭のアドレス。
+|前提条件 a|`mlx5_cmd_init()` でメールボックスの領域を取ってあること。`i` が `BFM_MBOX_BLOCKS` より小さいこと。
+|注意事項 a|範囲は検査しない。
+|===
+
+.mbox_in() のフロー図
+image::flow_src_mlx5_cmd__mbox_in.drawio.svg[mbox_in() のフロー図]
+
+.mbox_in() の関係図
+image::call_src_mlx5_cmd__mbox_in.drawio.svg[mbox_in() の関係図]
+
+[[src_mlx5_cmd__mbox_out]]
+=== `mbox_out()`
+[cols="1,5",options="autowidth"]
+.mbox_out()
+|===
+|関数名 |`mbox_out`(`src/mlx5_cmd.c` 38 行目)
+|宣言 |`static volatile uint8_t *mbox_out(const bfm_dev_t *d, uint32_t i)`
+|処理内容 a|出力のメールボックスの `i` 番目のブロックの先頭を返す(`d->mbox_out + i * BFM_MBOX_STRIDE`)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const bfm_dev_t *` !`d` !デバイスの状態
+!`uint32_t` !`i` !ブロックの番号
+!===
+|戻り値 a|ブロックの先頭のアドレス。
+|前提条件 a|`mlx5_cmd_init()` でメールボックスの領域を取ってあること。`i` が `BFM_MBOX_BLOCKS` より小さいこと。
+|注意事項 a|範囲は検査しない。
+|===
+
+.mbox_out() のフロー図
+image::flow_src_mlx5_cmd__mbox_out.drawio.svg[mbox_out() のフロー図]
+
+.mbox_out() の関係図
+image::call_src_mlx5_cmd__mbox_out.drawio.svg[mbox_out() の関係図]
+
+[[src_mlx5_cmd__mlx5_cmd_init]]
+=== `mlx5_cmd_init()`
+[cols="1,5",options="autowidth"]
+.mlx5_cmd_init()
+|===
+|関数名 |`mlx5_cmd_init`(`src/mlx5_cmd.c` 47 行目)
+|宣言 |`int mlx5_cmd_init(bfm_dev_t *d)`
+|処理内容 a|コマンドキューを FW に登録する。DMA 領域からコマンドキュー(1 ページ)と入力・出力のメールボックス(各 `BFM_MBOX_BLOCKS` ブロック)を取り、Initialization Segment の `CMDQ_ADDR_L_SZ` の log_stride が 6(entry が 64 バイト)であることを確かめてから、コマンドキューの物理アドレスを `CMDQ_ADDR_H` / `CMDQ_ADDR_L_SZ` へ書く。書いた後 10ms 待つ。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !デバイスの状態(`cmdq` / `mbox_in` / `mbox_out` を埋める)
+!===
+|戻り値 a|`BFM_OK`: 登録した。`BFM_E_NOMEM`: DMA 領域が足りない。`BFM_E_HW`: entry の大きさが 64 バイトでない。
+|前提条件 a|BAR0 を張ってあること(`d->bar0`)。`bfm_mem_reset()` で DMA 領域の切り出しを初期化してあること。
+|注意事項 a|途中で失敗しても、取った DMA 領域は返さない。
+|===
+
+.mlx5_cmd_init() のフロー図
+image::flow_src_mlx5_cmd__mlx5_cmd_init.drawio.svg[mlx5_cmd_init() のフロー図]
+
+.mlx5_cmd_init() の関係図
+image::call_src_mlx5_cmd__mlx5_cmd_init.drawio.svg[mlx5_cmd_init() の関係図]
+
+[[src_mlx5_cmd__mlx5_cmd]]
+=== `mlx5_cmd()`
+[cols="1,5",options="autowidth"]
+.mlx5_cmd()
+|===
+|関数名 |`mlx5_cmd`(`src/mlx5_cmd.c` 73 行目)
+|宣言 |`int mlx5_cmd(bfm_dev_t *d, const uint8_t *in, uint32_t inlen, uint8_t *out, uint32_t outlen, const char *what)`
+|処理内容 a|コマンドを 1 つ出して完了を待つ。
+
+* entry 0 を 0 で埋め、入力の先頭 16 バイトを entry に入れる。16 バイトを超える分は 512 バイトずつ入力のメールボックスの鎖に入れる(ブロック番号と次のブロックの物理アドレスを書く)。
+* 出力が 16 バイトを超えるときは、出力のメールボックスの鎖を用意する。
+* 種類(PCI)と持ち主(FW)を書いてドアベル(`CMD_DBELL` に 1)を鳴らし、持ち主が戻るまで最大 10 秒待つ。
+* delivery status を確かめ、出力を entry とメールボックスから `out` へ写し、出力の status(`out[0]`)が 0 であることを確かめる。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !デバイスの状態
+!`const uint8_t *` !`in` !コマンドの入力(先頭 2 バイトが opcode)
+!`uint32_t` !`inlen` !入力の長さ(バイト。8 以上 16 + 512 x `BFM_MBOX_BLOCKS` 以下)
+!`uint8_t *` !`out` !出力を書く場所
+!`uint32_t` !`outlen` !出力の長さ(バイト。8 以上 16 + 512 x `BFM_MBOX_BLOCKS` 以下)
+!`const char *` !`what` !失敗のときの表示に付けるコマンドの名前
+!===
+|戻り値 a|`BFM_OK`: 成功。`BFM_E_PARAM`: 長さが範囲外。`BFM_E_TIMEOUT`: FW が 10 秒答えない。`BFM_E_HW`: delivery status が 0 でない、または出力の status が 0 でない(status と syndrome を表示する)。
+|前提条件 a|`mlx5_cmd_init()` が成功していること。1 つのタスクから呼ぶこと(排他を持たない)。
+|注意事項 a|* entry 0 とメールボックスを共有するので、同時に 2 つは出せない。
+* 完了は割り込みでなく、持ち主のビットを読み続けて待つ。
+* 失敗のとき `out` の中身は途中まで(または未設定)のことがある。
+|===
+
+.mlx5_cmd() のフロー図
+image::flow_src_mlx5_cmd__mlx5_cmd.drawio.svg[mlx5_cmd() のフロー図]
+
+.mlx5_cmd() の関係図
+image::call_src_mlx5_cmd__mlx5_cmd.drawio.svg[mlx5_cmd() の関係図]
+
+[[src_mlx5_cmd__mlx5_destroy_obj]]
+=== `mlx5_destroy_obj()`
+[cols="1,5",options="autowidth"]
+.mlx5_destroy_obj()
+|===
+|関数名 |`mlx5_destroy_obj`(`src/mlx5_cmd.c` 148 行目)
+|宣言 |`int mlx5_destroy_obj(bfm_dev_t *d, uint16_t opcode, uint32_t id, const char *what)`
+|処理内容 a|入力が 16 バイトで byte 9〜11 にオブジェクトの番号を置く形の解放のコマンド(`DESTROY_QP` / `DESTROY_CQ` など)を出す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !デバイスの状態
+!`uint16_t` !`opcode` !コマンドの opcode
+!`uint32_t` !`id` !解放するオブジェクトの番号(24 ビット)
+!`const char *` !`what` !失敗のときの表示に付けるコマンドの名前
+!===
+|戻り値 a|`mlx5_cmd()` の戻り値。
+|前提条件 a|`mlx5_cmd_init()` が成功していること。
+|注意事項 a|特になし。
+|===
+
+.mlx5_destroy_obj() のフロー図
+image::flow_src_mlx5_cmd__mlx5_destroy_obj.drawio.svg[mlx5_destroy_obj() のフロー図]
+
+.mlx5_destroy_obj() の関係図
+image::call_src_mlx5_cmd__mlx5_destroy_obj.drawio.svg[mlx5_destroy_obj() の関係図]
+
+[[src_mlx5_cmd__mlx5_give_pages]]
+=== `mlx5_give_pages()`
+[cols="1,5",options="autowidth"]
+.mlx5_give_pages()
+|===
+|関数名 |`mlx5_give_pages`(`src/mlx5_cmd.c` 166 行目)
+|宣言 |`int mlx5_give_pages(bfm_dev_t *d, uint16_t func, int32_t npages)`
+|処理内容 a|`MANAGE_PAGES`(op_mod = GIVE)で FW に `npages` ページを渡す。ページは DMA 領域の中の FW 用の区画(`d->fw_pages`、`g_bfm_fw_pages_max` ページ)から `d->fw_pages_used` の続きを順に出す。1 回のコマンドで最大 512 ページ(入力 4112 バイト)を渡し、足りなければ繰り返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !デバイスの状態
+!`uint16_t` !`func` !FW が示した function の番号
+!`int32_t` !`npages` !渡すページの数(0 以下なら何もしない)
+!===
+|戻り値 a|`BFM_OK`: 渡した(`npages` が 0 以下のときも)。`BFM_E_NOMEM`: 区画の残りが足りない(増やすべき値を表示する)。そのほか `mlx5_cmd()` の戻り値。
+|前提条件 a|`d->fw_pages` を取ってあること。
+|注意事項 a|* 渡したページを返してもらうことはしない(`fw_pages_used` は増えるだけ)。
+* 入力の領域は静的変数なので、再入できない。
+* 途中のコマンドが失敗したときは、それまでに渡した分だけ `fw_pages_used` が増えている。
+|===
+
+.mlx5_give_pages() のフロー図
+image::flow_src_mlx5_cmd__mlx5_give_pages.drawio.svg[mlx5_give_pages() のフロー図]
+
+.mlx5_give_pages() の関係図
+image::call_src_mlx5_cmd__mlx5_give_pages.drawio.svg[mlx5_give_pages() の関係図]
+
+[[src_mlx5_cmd__mlx5_cant_give]]
+=== `mlx5_cant_give()`
+[cols="1,5",options="autowidth"]
+.mlx5_cant_give()
+|===
+|関数名 |`mlx5_cant_give`(`src/mlx5_cmd.c` 198 行目)
+|宣言 |`static void mlx5_cant_give(bfm_dev_t *d, uint16_t func)`
+|処理内容 a|`MANAGE_PAGES`(op_mod = CANT_GIVE)を出し、FW にページを渡せないと伝える。伝えないと FW は要求を出し直し続ける。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !デバイスの状態
+!`uint16_t` !`func` !FW が示した function の番号
+!===
+|戻り値 a|なし
+|前提条件 a|`mlx5_cmd_init()` が成功していること。
+|注意事項 a|コマンドの失敗は無視する。
+|===
+
+.mlx5_cant_give() のフロー図
+image::flow_src_mlx5_cmd__mlx5_cant_give.drawio.svg[mlx5_cant_give() のフロー図]
+
+.mlx5_cant_give() の関係図
+image::call_src_mlx5_cmd__mlx5_cant_give.drawio.svg[mlx5_cant_give() の関係図]
+
+[[src_mlx5_cmd__mlx5_eq_create]]
+=== `mlx5_eq_create()`
+[cols="1,5",options="autowidth"]
+.mlx5_eq_create()
+|===
+|関数名 |`mlx5_eq_create`(`src/mlx5_cmd.c` 217 行目)
+|宣言 |`int mlx5_eq_create(bfm_dev_t *d)`
+|処理内容 a|EQ を 1 本作る(`2^BFM_EQ_LOG` 個 x 64 バイト)。
+
+* DMA 領域から EQ の領域を取り、全 EQE の owner を 1 にして書き戻す。
+* EQ のドアベル用の UAR を取る(`mlx5_alloc_uar()`)。
+* 購読するイベント(Linux の `MLX5_ASYNC_EVENT_MASK` と同じ組。`page_request_disable` が 0 ならページ要求も)を `d->eq_mask` に入れる。
+* `CREATE_EQ` を出し、返った EQ の番号を `d->eqn` に入れ、`d->eq_cc` を 0 にする。
+
+割り込みは使わない(arm しない)。中身は `mlx5_eq_poll()` で読む。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !デバイスの状態(`eq_buf` / `eq_uarn` / `eq_mask` / `eqn` / `eq_cc` を埋める)
+!===
+|戻り値 a|`BFM_OK`: 作った。`BFM_E_PARAM`: EQ の領域が 4 ページを超える(`BFM_EQ_LOG` が 8 を超える)。`BFM_E_NOMEM`: DMA 領域が足りない。そのほか `mlx5_alloc_uar()` / `mlx5_cmd()` の戻り値。
+|前提条件 a|`mlx5_cmd_init()` が成功し、HCA が動いていること。
+|注意事項 a|* 入力の領域は静的変数で、EQ の領域は 4 ページまでしか載らない(`BFM_EQ_LOG` が 7 で 2 ページ)。4 ページを超えるときは、DMA 領域を取る前に `BFM_E_PARAM` で戻る。
+* 失敗しても、取った DMA 領域と UAR は返さない。
+|===
+
+.mlx5_eq_create() のフロー図
+image::flow_src_mlx5_cmd__mlx5_eq_create.drawio.svg[mlx5_eq_create() のフロー図]
+
+.mlx5_eq_create() の関係図
+image::call_src_mlx5_cmd__mlx5_eq_create.drawio.svg[mlx5_eq_create() の関係図]
+
+[[src_mlx5_cmd__mlx5_eq_update_ci]]
+=== `mlx5_eq_update_ci()`
+[cols="1,5",options="autowidth"]
+.mlx5_eq_update_ci()
+|===
+|関数名 |`mlx5_eq_update_ci`(`src/mlx5_cmd.c` 256 行目)
+|宣言 |`static void mlx5_eq_update_ci(bfm_dev_t *d)`
+|処理内容 a|EQ の消費位置を FW へ知らせる。UAR ページの中の EQ のドアベル(arm しない。オフセット 0x48)に、`eq_cc` の下位 24 ビットと EQ の番号(上位 8 ビット)を書く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !デバイスの状態
+!===
+|戻り値 a|なし
+|前提条件 a|`mlx5_eq_create()` が成功していること。
+|注意事項 a|arm しないので、割り込みは上がらない。
+|===
+
+.mlx5_eq_update_ci() のフロー図
+image::flow_src_mlx5_cmd__mlx5_eq_update_ci.drawio.svg[mlx5_eq_update_ci() のフロー図]
+
+.mlx5_eq_update_ci() の関係図
+image::call_src_mlx5_cmd__mlx5_eq_update_ci.drawio.svg[mlx5_eq_update_ci() の関係図]
+
+[[src_mlx5_cmd__mlx5_eq_poll]]
+=== `mlx5_eq_poll()`
+[cols="1,5",options="autowidth"]
+.mlx5_eq_poll()
+|===
+|関数名 |`mlx5_eq_poll`(`src/mlx5_cmd.c` 268 行目)
+|宣言 |`int mlx5_eq_poll(bfm_dev_t *d)`
+|処理内容 a|EQ に溜まったイベントを最大 `2^BFM_EQ_LOG` 個読む。
+
+* ページ要求: function とページ数を覚えておき、読み終わった後に最後の 1 つにだけ答える(正なら `mlx5_give_pages()`、渡せなければ `mlx5_cant_give()`。負(返却の申し出)なら預けたままにする)。
+* ポートの変化: `d->link_up` を更新して表示する。
+* CQ のエラー: 表示する。
+* QP のエラー(WQ_CATAS_ERROR・WQ_INVAL_REQ・WQ_ACCESS_ERROR・PATH_MIG_FAILED): 種類が QP なら `bfm_conn_mark_error()` で接続をエラーにし、表示する。
+* そのほか(COMM_EST など): 何もしない。
+
+16 個ごとと読み終わりに、消費位置を FW へ知らせる。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !デバイスの状態
+!===
+|戻り値 a|読んだイベントの数。EQ を作っていなければ 0。
+|前提条件 a|1 つのタスクから呼ぶこと(コマンドキューを使う)。
+|注意事項 a|* FW は答えが来るまで同じページ要求を出し直すので、全部に答えると与えすぎる。そのため 1 回の読み取りの最後の要求にだけ答える。
+* ページを渡すのに失敗しても戻り値には現れない。
+|===
+
+.mlx5_eq_poll() のフロー図
+image::flow_src_mlx5_cmd__mlx5_eq_poll.drawio.svg[mlx5_eq_poll() のフロー図]
+
+.mlx5_eq_poll() の関係図
+image::call_src_mlx5_cmd__mlx5_eq_poll.drawio.svg[mlx5_eq_poll() の関係図]
+
+== `src/mlx5_hca.c`
+
+HCA の立ち上げと停止、QP 以外の資源(UAR・PD・MKey・CQ)、ポート、RoCE のアドレスを扱う。立ち上げの手順は Linux の mlx5_core と同じ順(FW の初期化待ち → コマンドキュー → `ENABLE_HCA` → ISSI → boot のページ → `HOST_ENDIANNESS` → HCA の能力(general / atomic / roce)→ init のページ → `INIT_HCA`)で、その後に EQ・PD・MKey(自分用 / 公開用)・ポート・vport の `roce_en`・GID を用意する(`mlx5_hca_init()`)。ConnectX-4〜7 の違いは、能力を 4096 バイトまるごと読み書きする、BlueFlame の窓の大きさを `log_bf_reg_size` から求める、QP の `ts_format` を RoCE の能力に合わせる、`num_vhca_ports` が 0 でなければ `SET_ROCE_ADDRESS` にポート番号を入れる、FW のページの上限を `g_bfm_fw_pages_max` にする、で吸収する。能力の読み書きには静的な緩衝 `s_cap_out` / `s_cap_in` を使う。
+
+[[src_mlx5_hca__wait_fw_init]]
+=== `wait_fw_init()`
+[cols="1,5",options="autowidth"]
+.wait_fw_init()
+|===
+|関数名 |`wait_fw_init`(`src/mlx5_hca.c` 21 行目)
+|宣言 |`static int wait_fw_init(bfm_dev_t *d, const char *phase)`
+|処理内容 a|初期化セグメントの `MLX5_ISEG_INITIALIZING` の最上位ビットが 0 になる(FW の初期化が終わる)まで、1ms ごとに読んで待つ。待つのは最大 `FW_INIT_TIMEOUT_MS`(120 秒)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!`const char *` !`phase` !表示用の段階の名前(`"pre-init"` / `"init"`)
+!===
+|戻り値 a|`BFM_OK`: 初期化が終わった。`BFM_E_TIMEOUT`: 120 秒で終わらなかった(理由を表示する)。
+|前提条件 a|`d->bar0` が張られていること。
+|注意事項 a|ConnectX-7 は FW の起動に長くかかることがあるので、待ちを 120 秒にしている。
+|===
+
+.wait_fw_init() のフロー図
+image::flow_src_mlx5_hca__wait_fw_init.drawio.svg[wait_fw_init() のフロー図]
+
+.wait_fw_init() の関係図
+image::call_src_mlx5_hca__wait_fw_init.drawio.svg[wait_fw_init() の関係図]
+
+[[src_mlx5_hca__simple_cmd]]
+=== `simple_cmd()`
+[cols="1,5",options="autowidth"]
+.simple_cmd()
+|===
+|関数名 |`simple_cmd`(`src/mlx5_hca.c` 34 行目)
+|宣言 |`static int simple_cmd(bfm_dev_t *d, uint16_t opcode, uint16_t op_mod, const char *what)`
+|処理内容 a|入力が 16 バイトで opcode と op_mod だけを入れるコマンドを出す(`ENABLE_HCA` に使う)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!`uint16_t` !`opcode` !コマンドの opcode
+!`uint16_t` !`op_mod` !コマンドの op_mod
+!`const char *` !`what` !表示用のコマンドの名前
+!===
+|戻り値 a|`mlx5_cmd()` の戻り値(`BFM_OK` / `BFM_E_HW` / `BFM_E_TIMEOUT` など)。
+|前提条件 a|コマンドキューが使えること(`mlx5_cmd_init()` の後)。
+|注意事項 a|出力(16 バイト)は捨てる。
+|===
+
+.simple_cmd() のフロー図
+image::flow_src_mlx5_hca__simple_cmd.drawio.svg[simple_cmd() のフロー図]
+
+.simple_cmd() の関係図
+image::call_src_mlx5_hca__simple_cmd.drawio.svg[simple_cmd() の関係図]
+
+[[src_mlx5_hca__query_pages]]
+=== `query_pages()`
+[cols="1,5",options="autowidth"]
+.query_pages()
+|===
+|関数名 |`query_pages`(`src/mlx5_hca.c` 42 行目)
+|宣言 |`static int query_pages(bfm_dev_t *d, uint16_t op_mod, uint16_t *func, int32_t *n)`
+|処理内容 a|`QUERY_PAGES` で、FW が求めるページの数と、その関数の番号を読む。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!`uint16_t` !`op_mod` !1 = boot のページ、2 = init のページ
+!`uint16_t *` !`func` ![出力] 関数の番号(出力の byte 10〜11)
+!`int32_t *` !`n` ![出力] 求めるページの数(出力の byte 12〜15。符号つき)
+!===
+|戻り値 a|`BFM_OK`: 読めた。そのほか `mlx5_cmd()` の戻り値。
+|前提条件 a|`ENABLE_HCA` の後であること。
+|注意事項 a|失敗したときは `*func` と `*n` を書き換えない。
+|===
+
+.query_pages() のフロー図
+image::flow_src_mlx5_hca__query_pages.drawio.svg[query_pages() のフロー図]
+
+.query_pages() の関係図
+image::call_src_mlx5_hca__query_pages.drawio.svg[query_pages() の関係図]
+
+[[src_mlx5_hca__satisfy_pages]]
+=== `satisfy_pages()`
+[cols="1,5",options="autowidth"]
+.satisfy_pages()
+|===
+|関数名 |`satisfy_pages`(`src/mlx5_hca.c` 54 行目)
+|宣言 |`static int satisfy_pages(bfm_dev_t *d, int boot)`
+|処理内容 a|FW が求める boot または init のページの数を `query_pages()` で読み、その数だけ `mlx5_give_pages()` で渡す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!`int` !`boot` !0 以外なら boot のページ(op_mod 1)、0 なら init のページ(op_mod 2)
+!===
+|戻り値 a|`BFM_OK`: 渡し終えた(求める数が 0 以下のときも)。そのほか `query_pages()` / `mlx5_give_pages()` の戻り値(`BFM_E_NOMEM`: FW 用の区画が足りない など)。
+|前提条件 a|`d->fw_pages` が確保済みであること。
+|注意事項 a|求める数が 0 以下なら `mlx5_give_pages()` は何もしない。
+|===
+
+.satisfy_pages() のフロー図
+image::flow_src_mlx5_hca__satisfy_pages.drawio.svg[satisfy_pages() のフロー図]
+
+.satisfy_pages() の関係図
+image::call_src_mlx5_hca__satisfy_pages.drawio.svg[satisfy_pages() の関係図]
+
+[[src_mlx5_hca__set_issi]]
+=== `set_issi()`
+[cols="1,5",options="autowidth"]
+.set_issi()
+|===
+|関数名 |`set_issi`(`src/mlx5_hca.c` 64 行目)
+|宣言 |`static int set_issi(bfm_dev_t *d)`
+|処理内容 a|`QUERY_ISSI` で対応する ISSI を読み、ISSI 1 に対応していれば `SET_ISSI` で ISSI 1 にする。対応していなければ ISSI 0 のまま進む。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!===
+|戻り値 a|`BFM_OK`: ISSI 1 にした、または ISSI 0 のまま進む。そのほか `mlx5_cmd()` の戻り値。
+|前提条件 a|`ENABLE_HCA` の後であること。
+|注意事項 a|ISSI 1 に対応しているかは、`QUERY_ISSI` の出力の byte 108〜111(`supported_issi_dw0`)のビット 1 で見る。
+|===
+
+.set_issi() のフロー図
+image::flow_src_mlx5_hca__set_issi.drawio.svg[set_issi() のフロー図]
+
+.set_issi() の関係図
+image::call_src_mlx5_hca__set_issi.drawio.svg[set_issi() の関係図]
+
+[[src_mlx5_hca__access_reg]]
+=== `access_reg()`
+[cols="1,5",options="autowidth"]
+.access_reg()
+|===
+|関数名 |`access_reg`(`src/mlx5_hca.c` 81 行目)
+|宣言 |`static int access_reg(bfm_dev_t *d, uint16_t reg, int read, uint8_t data[16], const char *what)`
+|処理内容 a|`ACCESS_REG` で装置のレジスタ(16 バイト)を読む、または書く。読めたときも書けたときも、出力のレジスタの内容を `data` に写す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!`uint16_t` !`reg` !レジスタの番号(`MLX5_REG_PMTU` など)
+!`int` !`read` !0 以外なら読む(op_mod 1)、0 なら書く(op_mod 0)
+!`uint8_t [16]` !`data` ![入出力] レジスタの内容 16 バイト。書くときは書く値、成功したら出力の内容に置き換わる
+!`const char *` !`what` !表示用のコマンドの名前
+!===
+|戻り値 a|`mlx5_cmd()` の戻り値。
+|前提条件 a|コマンドキューが使えること。
+|注意事項 a|失敗したときは `data` を書き換えない。
+|===
+
+.access_reg() のフロー図
+image::flow_src_mlx5_hca__access_reg.drawio.svg[access_reg() のフロー図]
+
+.access_reg() の関係図
+image::call_src_mlx5_hca__access_reg.drawio.svg[access_reg() の関係図]
+
+[[src_mlx5_hca__set_host_endianness]]
+=== `set_host_endianness()`
+[cols="1,5",options="autowidth"]
+.set_host_endianness()
+|===
+|関数名 |`set_host_endianness`(`src/mlx5_hca.c` 94 行目)
+|宣言 |`static int set_host_endianness(bfm_dev_t *d)`
+|処理内容 a|`HOST_ENDIANNESS` のレジスタに CPU のバイト順を書く(Linux の `set_hca_ctrl()` と同じ)。ビッグエンディアンの CPU なら byte 0 を 0x80、リトルエンディアンなら 0x00 にする。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!===
+|戻り値 a|`access_reg()` の戻り値。
+|前提条件 a|boot のページを渡した後であること。
+|注意事項 a|バイト順は `BFM_HOST_BIG_ENDIAN` で決まる(コンパイル時)。
+|===
+
+.set_host_endianness() のフロー図
+image::flow_src_mlx5_hca__set_host_endianness.drawio.svg[set_host_endianness() のフロー図]
+
+.set_host_endianness() の関係図
+image::call_src_mlx5_hca__set_host_endianness.drawio.svg[set_host_endianness() の関係図]
+
+[[src_mlx5_hca__query_cap]]
+=== `query_cap()`
+[cols="1,5",options="autowidth"]
+.query_cap()
+|===
+|関数名 |`query_cap`(`src/mlx5_hca.c` 104 行目)
+|宣言 |`static int query_cap(bfm_dev_t *d, uint16_t type, const char *what)`
+|処理内容 a|`QUERY_HCA_CAP` で、指定した種類の能力の今の値(current)を読み、出力をまるごと `s_cap_out` に置く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!`uint16_t` !`type` !能力の種類(`MLX5_CAP_GENERAL` / `MLX5_CAP_ATOMIC` / `MLX5_CAP_ROCE`)
+!`const char *` !`what` !表示用のコマンドの名前
+!===
+|戻り値 a|`mlx5_cmd()` の戻り値。
+|前提条件 a|コマンドキューが使えること。
+|注意事項 a|結果は静的な緩衝 `s_cap_out`(16 + `MLX5_HCA_CAP_BYTES` バイト。能力は byte 16 から)に入る。次の `query_cap()` で上書きされる。op_mod は `(type << 1) OR 1`。
+|===
+
+.query_cap() のフロー図
+image::flow_src_mlx5_hca__query_cap.drawio.svg[query_cap() のフロー図]
+
+.query_cap() の関係図
+image::call_src_mlx5_hca__query_cap.drawio.svg[query_cap() の関係図]
+
+[[src_mlx5_hca__set_cap]]
+=== `set_cap()`
+[cols="1,5",options="autowidth"]
+.set_cap()
+|===
+|関数名 |`set_cap`(`src/mlx5_hca.c` 113 行目)
+|宣言 |`static int set_cap(bfm_dev_t *d, uint16_t type, const char *what)`
+|処理内容 a|`s_cap_out` にある能力(読んで書き換えたもの)を、そのまま `SET_HCA_CAP` で書く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!`uint16_t` !`type` !能力の種類
+!`const char *` !`what` !表示用のコマンドの名前
+!===
+|戻り値 a|`mlx5_cmd()` の戻り値。
+|前提条件 a|直前に同じ種類の `query_cap()` で `s_cap_out` を埋めてあること。
+|注意事項 a|入力は静的な緩衝 `s_cap_in` で組む。op_mod は `type << 1`。
+|===
+
+.set_cap() のフロー図
+image::flow_src_mlx5_hca__set_cap.drawio.svg[set_cap() のフロー図]
+
+.set_cap() の関係図
+image::call_src_mlx5_hca__set_cap.drawio.svg[set_cap() の関係図]
+
+[[src_mlx5_hca__setup_general_caps]]
+=== `setup_general_caps()`
+[cols="1,5",options="autowidth"]
+.setup_general_caps()
+|===
+|関数名 |`setup_general_caps`(`src/mlx5_hca.c` 128 行目)
+|宣言 |`static int setup_general_caps(bfm_dev_t *d)`
+|処理内容 a|general の能力を読み、要るもの(`page_request_disable`・`log_max_ra_req_qp`・`log_max_ra_res_qp`・`port_type`・`roce`・`bf`・`log_bf_reg_size`・`num_vhca_ports`)を取り出して `d` に入れ、今の値のまま `SET_HCA_CAP` で書き戻す。BlueFlame の 1 面の大きさ `bf_buf_size` を `2^log_bf_reg_size / 2`(上限 `BFM_WQE_MAX`)にする。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!===
+|戻り値 a|`BFM_OK`: 読めて書き戻せた。`BFM_E_HW`: ポートが Ethernet でない。そのほか `query_cap()` / `set_cap()` の戻り値。
+|前提条件 a|`HOST_ENDIANNESS` を書いた後で、`INIT_HCA` の前であること。
+|注意事項 a|* 能力の位置は `struct mlx5_ifc_cmd_hca_cap_bits` のビット位置 / 8。
+* RoCE の能力ビットが立っていなくても注意を表示するだけで進む。
+* `log_bf_reg_size` が 8〜12 の外なら注意を表示し、9(512 バイト)として扱う。
+* 書き戻す値は読んだ値のまま(変えるものが無い)。
+|===
+
+.setup_general_caps() のフロー図
+image::flow_src_mlx5_hca__setup_general_caps.drawio.svg[setup_general_caps() のフロー図]
+
+.setup_general_caps() の関係図
+image::call_src_mlx5_hca__setup_general_caps.drawio.svg[setup_general_caps() の関係図]
+
+[[src_mlx5_hca__setup_atomic_caps]]
+=== `setup_atomic_caps()`
+[cols="1,5",options="autowidth"]
+.setup_atomic_caps()
+|===
+|関数名 |`setup_atomic_caps`(`src/mlx5_hca.c` 166 行目)
+|宣言 |`static int setup_atomic_caps(bfm_dev_t *d)`
+|処理内容 a|atomic の能力を読み、対応する演算(`atomic_ops`)と大きさ(`atomic_size_qp`)を `d` に入れる。`g_bfm_atomic_host_endian` が 0 以外で、8 バイトの atomic をホストのバイト順で扱えて、まだそうなっていなければ、その設定(`atomic_req_8B_endianness_mode` = 1)を書いて読み直す(Linux の `handle_hca_cap_atomic()` と同じ)。あわせて `atomic_host_order` と QP の `atomic_mode` を決める(Linux の `get_atomic_mode()` と同じ規則。拡張 atomic があれば対応する最大の大きさの log2(3 未満なら 3)、なければ標準の CS / FA の両方に対応していれば 1)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!===
+|戻り値 a|`BFM_OK`: 設定した(atomic の能力が読めなかったときも)。`BFM_E_HW`: バイト順の設定の書き込み、または読み直しに失敗した。
+|前提条件 a|`setup_general_caps()` の後で、`INIT_HCA` の前であること。
+|注意事項 a|* atomic の能力が読めなければ `atomic_mode` を 0 にして `BFM_OK` を返す(相手からの atomic は受けない)。
+* `atomic_host_order` は、バイト順の設定が 1 か、CPU がビッグエンディアンなら 1。
+* 8 バイトの CAS と FAA の両方に対応していなければ注意を表示する。
+|===
+
+.setup_atomic_caps() のフロー図
+image::flow_src_mlx5_hca__setup_atomic_caps.drawio.svg[setup_atomic_caps() のフロー図]
+
+.setup_atomic_caps() の関係図
+image::call_src_mlx5_hca__setup_atomic_caps.drawio.svg[setup_atomic_caps() の関係図]
+
+[[src_mlx5_hca__setup_roce_caps]]
+=== `setup_roce_caps()`
+[cols="1,5",options="autowidth"]
+.setup_roce_caps()
+|===
+|関数名 |`setup_roce_caps`(`src/mlx5_hca.c` 205 行目)
+|宣言 |`static void setup_roce_caps(bfm_dev_t *d)`
+|処理内容 a|RoCE の能力を読み、`qp_ts_format`(byte 3 の下位 2 ビット)が 0 でなければ、QP の `ts_format` を 1(DEFAULT)にする(`d->qp_ts_format = 1`)。それ以外は 0。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!===
+|戻り値 a|なし
+|前提条件 a|`INIT_HCA` の前であること。
+|注意事項 a|ConnectX-7 は時刻の形式を実時間だけにできるので、`ts_format` が 0(free running)だと `CREATE_QP` が断られうる。そのための設定。RoCE の能力が読めなければ 0 のままにする(失敗を返さない)。
+|===
+
+.setup_roce_caps() のフロー図
+image::flow_src_mlx5_hca__setup_roce_caps.drawio.svg[setup_roce_caps() のフロー図]
+
+.setup_roce_caps() の関係図
+image::call_src_mlx5_hca__setup_roce_caps.drawio.svg[setup_roce_caps() の関係図]
+
+[[src_mlx5_hca__mlx5_alloc_uar]]
+=== `mlx5_alloc_uar()`
+[cols="1,5",options="autowidth"]
+.mlx5_alloc_uar()
+|===
+|関数名 |`mlx5_alloc_uar`(`src/mlx5_hca.c` 216 行目)
+|宣言 |`int mlx5_alloc_uar(bfm_dev_t *d, uint32_t *uarn)`
+|処理内容 a|`ALLOC_UAR` で UAR を 1 つ取り、その番号を返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!`uint32_t *` !`uarn` ![出力] UAR の番号(出力の byte 9〜11)
+!===
+|戻り値 a|`mlx5_cmd()` の戻り値。
+|前提条件 a|`INIT_HCA` の後であること。
+|注意事項 a|失敗したときは `*uarn` を書き換えない。返すことはしない(解放のコマンドを出さない)。
+|===
+
+.mlx5_alloc_uar() のフロー図
+image::flow_src_mlx5_hca__mlx5_alloc_uar.drawio.svg[mlx5_alloc_uar() のフロー図]
+
+.mlx5_alloc_uar() の関係図
+image::call_src_mlx5_hca__mlx5_alloc_uar.drawio.svg[mlx5_alloc_uar() の関係図]
+
+[[src_mlx5_hca__alloc_pd]]
+=== `alloc_pd()`
+[cols="1,5",options="autowidth"]
+.alloc_pd()
+|===
+|関数名 |`alloc_pd`(`src/mlx5_hca.c` 225 行目)
+|宣言 |`static int alloc_pd(bfm_dev_t *d, uint32_t *pdn)`
+|処理内容 a|`ALLOC_PD` で PD を 1 つ取り、その番号を返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!`uint32_t *` !`pdn` ![出力] PD の番号(出力の byte 9〜11)
+!===
+|戻り値 a|`mlx5_cmd()` の戻り値。
+|前提条件 a|`INIT_HCA` の後であること。
+|注意事項 a|失敗したときは `*pdn` を書き換えない。
+|===
+
+.alloc_pd() のフロー図
+image::flow_src_mlx5_hca__alloc_pd.drawio.svg[alloc_pd() のフロー図]
+
+.alloc_pd() の関係図
+image::call_src_mlx5_hca__alloc_pd.drawio.svg[alloc_pd() の関係図]
+
+[[src_mlx5_hca__create_mkey_pa]]
+=== `create_mkey_pa()`
+[cols="1,5",options="autowidth"]
+.create_mkey_pa()
+|===
+|関数名 |`create_mkey_pa`(`src/mlx5_hca.c` 240 行目)
+|宣言 |`static int create_mkey_pa(bfm_dev_t *d, uint8_t access, uint64_t start, uint64_t len, uint8_t key8, uint32_t *mkey, const char *what)`
+|処理内容 a|`CREATE_MKEY` で PA(物理アドレスをそのまま使う)モードの MKey を作る。特定の QP に結びつけず、PD は `d->pdn`。`len` が 0 なら全アドレス(`length64`)にする。鍵は、出力の MKey の番号を 8 ビット左へずらし、下位 8 ビットを `key8` にしたもの。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!`uint8_t` !`access` !mkc の byte 2(`umr_en a rw rr lw lr` と `access_mode_1_0`)。`access_mode_1_0` は 0(PA)
+!`uint64_t` !`start` !先頭のアドレス
+!`uint64_t` !`len` !長さ(バイト)。0 なら全アドレス
+!`uint8_t` !`key8` !鍵の下位 8 ビット(`mkey_7_0`)
+!`uint32_t *` !`mkey` ![出力] 作った鍵
+!`const char *` !`what` !表示用のコマンドの名前
+!===
+|戻り値 a|`mlx5_cmd()` の戻り値。
+|前提条件 a|`d->pdn` が取ってあること(`alloc_pd()` の後)。
+|注意事項 a|失敗したときは `*mkey` を書き換えない。
+|===
+
+.create_mkey_pa() のフロー図
+image::flow_src_mlx5_hca__create_mkey_pa.drawio.svg[create_mkey_pa() のフロー図]
+
+.create_mkey_pa() の関係図
+image::call_src_mlx5_hca__create_mkey_pa.drawio.svg[create_mkey_pa() の関係図]
+
+[[src_mlx5_hca__mlx5_cq_create]]
+=== `mlx5_cq_create()`
+[cols="1,5",options="autowidth"]
+.mlx5_cq_create()
+|===
+|関数名 |`mlx5_cq_create`(`src/mlx5_hca.c` 262 行目)
+|宣言 |`int mlx5_cq_create(bfm_dev_t *d, uint32_t uarn, volatile uint8_t *buf, uint32_t log_n, volatile uint32_t *dbr, uint32_t *cqn)`
+|処理内容 a|`CREATE_CQ` で CQ を作る。CQE は 64 バイトで `2^log_n` 個。CQE は全部「まだ書かれていない」(opcode = `MLX5_CQE_INVALID`、owner = 0)にし、ドアベルのレコードを 0 にしてキャッシュから書き出してから、CQ の文脈(大きさ・UAR・EQ・ドアベルのレコードのアドレス)と各ページの物理アドレスを渡す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!`uint32_t` !`uarn` !CQ に結びつける UAR の番号
+!`volatile uint8_t *` !`buf` !CQE の緩衝(DMA 領域。4KiB のページの並び)
+!`uint32_t` !`log_n` !CQE の数の log2
+!`volatile uint32_t *` !`dbr` !ドアベルのレコード(DMA 領域。8 バイト)
+!`uint32_t *` !`cqn` ![出力] CQ の番号
+!===
+|戻り値 a|`BFM_OK`: 作れた。`BFM_E_PARAM`: `log_n` が 10 を超える(緩衝が 16 ページを超える)。そのほか `mlx5_cmd()` の戻り値。
+|前提条件 a|`d->eqn` が作ってあること(`mlx5_eq_create()` の後)。`buf` が `2^log_n` × 64 バイト以上あること。
+|注意事項 a|* 割り込みは使わない(arm しない)。
+* ページの大きさは 4KiB(`log_page_size` = 0)。
+* `log_n` の検査は `buf` / `dbr` に触る前に行う(CQE は 1024 個 x 64 バイト = 16 ページまで。入力の PAS の数で決まる)。
+* 失敗したときは `*cqn` を書き換えない。
+|===
+
+.mlx5_cq_create() のフロー図
+image::flow_src_mlx5_hca__mlx5_cq_create.drawio.svg[mlx5_cq_create() のフロー図]
+
+.mlx5_cq_create() の関係図
+image::call_src_mlx5_hca__mlx5_cq_create.drawio.svg[mlx5_cq_create() の関係図]
+
+[[src_mlx5_hca__port_set_mtu]]
+=== `port_set_mtu()`
+[cols="1,5",options="autowidth"]
+.port_set_mtu()
+|===
+|関数名 |`port_set_mtu`(`src/mlx5_hca.c` 297 行目)
+|宣言 |`static int port_set_mtu(bfm_dev_t *d, uint16_t ip_mtu)`
+|処理内容 a|ポート 1 の MTU を IP の MTU(Linux の `ip link set mtu` と同じ意味)で設定する。PMTU のレジスタはフレーム長(IP の MTU + 22。Linux の `MLX5E_SW2HW_MTU()` と同じ換算)で扱うので、換算して `admin_mtu` に書く。ポートの上限(`max_mtu`)を超えるなら上限に切り詰める。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!`uint16_t` !`ip_mtu` !IP の MTU
+!===
+|戻り値 a|`BFM_OK`: 書けた。`BFM_E_HW`: PMTU が読めなかった。そのほか PMTU の書き込みの `access_reg()` の戻り値。
+|前提条件 a|`INIT_HCA` の後であること。
+|注意事項 a|* フレーム長は 32bit で計算する(`ip_mtu` が 65535 に近くても桁あふれしない)。
+* 上限が 0 と読めたときは、上限を 0xffff(16bit の欄に書ける最大)とみなす。
+* 切り詰めたときは表示する。
+|===
+
+.port_set_mtu() のフロー図
+image::flow_src_mlx5_hca__port_set_mtu.drawio.svg[port_set_mtu() のフロー図]
+
+.port_set_mtu() の関係図
+image::call_src_mlx5_hca__port_set_mtu.drawio.svg[port_set_mtu() の関係図]
+
+[[src_mlx5_hca__frame_to_ip_mtu]]
+=== `frame_to_ip_mtu()`
+[cols="1,5",options="autowidth"]
+.frame_to_ip_mtu()
+|===
+|関数名 |`frame_to_ip_mtu`(`src/mlx5_hca.c` 316 行目)
+|宣言 |`static unsigned frame_to_ip_mtu(uint16_t frame)`
+|処理内容 a|PMTU のフレーム長を IP の MTU に直す(`PORT_MTU_OVERHEAD` = 22 を引く)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint16_t` !`frame` !フレーム長(PMTU の `admin_mtu` / `oper_mtu` / `max_mtu`)
+!===
+|戻り値 a|IP の MTU。`frame` が 22 以下なら 0。
+|前提条件 a|特になし。
+|注意事項 a|引き算で負にならないよう、22 以下は 0 にする(リンクが上がっていないときの `oper_mtu` の 0 など)。`port_log_mtu()` が表示に使う。
+|===
+
+.frame_to_ip_mtu() のフロー図
+image::flow_src_mlx5_hca__frame_to_ip_mtu.drawio.svg[frame_to_ip_mtu() のフロー図]
+
+.frame_to_ip_mtu() の関係図
+image::call_src_mlx5_hca__frame_to_ip_mtu.drawio.svg[frame_to_ip_mtu() の関係図]
+
+[[src_mlx5_hca__port_log_mtu]]
+=== `port_log_mtu()`
+[cols="1,5",options="autowidth"]
+.port_log_mtu()
+|===
+|関数名 |`port_log_mtu`(`src/mlx5_hca.c` 322 行目)
+|宣言 |`static void port_log_mtu(bfm_dev_t *d)`
+|処理内容 a|ポート 1 の PMTU を読み、設定(`admin_mtu`)・実際(`oper_mtu`)・上限(`max_mtu`)を IP の MTU に直して(`frame_to_ip_mtu()`)表示する。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!===
+|戻り値 a|なし
+|前提条件 a|`INIT_HCA` の後であること。
+|注意事項 a|* PMTU が読めなければ何も表示しない。
+* フレーム長が 22 以下の値は 0 と表示する。
+|===
+
+.port_log_mtu() のフロー図
+image::flow_src_mlx5_hca__port_log_mtu.drawio.svg[port_log_mtu() のフロー図]
+
+.port_log_mtu() の関係図
+image::call_src_mlx5_hca__port_log_mtu.drawio.svg[port_log_mtu() の関係図]
+
+[[src_mlx5_hca__port_up]]
+=== `port_up()`
+[cols="1,5",options="autowidth"]
+.port_up()
+|===
+|関数名 |`port_up`(`src/mlx5_hca.c` 332 行目)
+|宣言 |`static int port_up(bfm_dev_t *d)`
+|処理内容 a|PAOS のレジスタでポート 1 の `admin_status` を UP にし(`ase` を立てる)、`oper_status` が UP(1)になるまで 10ms ごとに読んで待つ。UP になれば `d->link_up = 1`。`g_bfm_link_wait_ms` を過ぎても上がらなければ、注意を表示してそのまま進む。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!===
+|戻り値 a|`BFM_OK`: UP にした(リンクが上がらなかったときも)。`BFM_E_HW`: PAOS の書き込みに失敗した、または待ちの最後の PAOS の読みに失敗した。
+|前提条件 a|`INIT_HCA` の後であること。
+|注意事項 a|* 待ちの間の PAOS の読みの失敗は、上がっていないのと同じに扱って待ち続ける。時間切れになったとき、最後の読みが失敗していれば「PAOS が読めない」を表示して `BFM_E_HW` を返す。
+* リンクが後で上がれば EQ のポートの変化のイベントで `link_up` が立つ(`mlx5_eq_poll()`)。
+|===
+
+.port_up() のフロー図
+image::flow_src_mlx5_hca__port_up.drawio.svg[port_up() のフロー図]
+
+.port_up() の関係図
+image::call_src_mlx5_hca__port_up.drawio.svg[port_up() の関係図]
+
+[[src_mlx5_hca__vport_enable_roce]]
+=== `vport_enable_roce()`
+[cols="1,5",options="autowidth"]
+.vport_enable_roce()
+|===
+|関数名 |`vport_enable_roce`(`src/mlx5_hca.c` 362 行目)
+|宣言 |`static int vport_enable_roce(bfm_dev_t *d)`
+|処理内容 a|`MODIFY_NIC_VPORT_CONTEXT` で vport の `roce_en` を立てる(`field_select.roce_en` と `nic_vport_context.roce_en`)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!===
+|戻り値 a|`mlx5_cmd()` の戻り値。
+|前提条件 a|`INIT_HCA` の後であること。
+|注意事項 a|立てないと QP の `INIT2RTR` が断られる。入力(516 バイト)は静的な緩衝に組む。
+|===
+
+.vport_enable_roce() のフロー図
+image::flow_src_mlx5_hca__vport_enable_roce.drawio.svg[vport_enable_roce() のフロー図]
+
+.vport_enable_roce() の関係図
+image::call_src_mlx5_hca__vport_enable_roce.drawio.svg[vport_enable_roce() の関係図]
+
+[[src_mlx5_hca__vport_query_mac]]
+=== `vport_query_mac()`
+[cols="1,5",options="autowidth"]
+.vport_query_mac()
+|===
+|関数名 |`vport_query_mac`(`src/mlx5_hca.c` 374 行目)
+|宣言 |`static int vport_query_mac(bfm_dev_t *d, uint8_t mac[6])`
+|処理内容 a|`QUERY_NIC_VPORT_CONTEXT` で vport の `permanent_address`(`nic_vport_context` のビット 0x7b0 から 6 バイト)を読み、MAC アドレスとして返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!`uint8_t [6]` !`mac` ![出力] MAC アドレス 6 バイト
+!===
+|戻り値 a|`mlx5_cmd()` の戻り値。
+|前提条件 a|`INIT_HCA` の後であること。
+|注意事項 a|失敗したときは `mac` を書き換えない。出力(272 バイト)は静的な緩衝で受ける。
+|===
+
+.vport_query_mac() のフロー図
+image::flow_src_mlx5_hca__vport_query_mac.drawio.svg[vport_query_mac() のフロー図]
+
+.vport_query_mac() の関係図
+image::call_src_mlx5_hca__vport_query_mac.drawio.svg[vport_query_mac() の関係図]
+
+[[src_mlx5_hca__set_roce_address]]
+=== `set_roce_address()`
+[cols="1,5",options="autowidth"]
+.set_roce_address()
+|===
+|関数名 |`set_roce_address`(`src/mlx5_hca.c` 385 行目)
+|宣言 |`static int set_roce_address(bfm_dev_t *d)`
+|処理内容 a|`SET_ROCE_ADDRESS` で GID の表の 0 番に、`d->gid`(自分の IPv4 から作った RoCE v2 の GID)と `d->mac` を入れる(L3 の種類は IPv4、RoCE の版は v2)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!===
+|戻り値 a|`mlx5_cmd()` の戻り値。
+|前提条件 a|`d->gid` と `d->mac` が入っていること。
+|注意事項 a|`d->num_vhca_ports` が 0 でなければ `vhca_port_num` に 1 を入れる(ConnectX-7 への備え)。
+|===
+
+.set_roce_address() のフロー図
+image::flow_src_mlx5_hca__set_roce_address.drawio.svg[set_roce_address() のフロー図]
+
+.set_roce_address() の関係図
+image::call_src_mlx5_hca__set_roce_address.drawio.svg[set_roce_address() の関係図]
+
+[[src_mlx5_hca__mlx5_gid_from_ipv4]]
+=== `mlx5_gid_from_ipv4()`
+[cols="1,5",options="autowidth"]
+.mlx5_gid_from_ipv4()
+|===
+|関数名 |`mlx5_gid_from_ipv4`(`src/mlx5_hca.c` 398 行目)
+|宣言 |`void mlx5_gid_from_ipv4(uint32_t ip, uint8_t gid[16])`
+|処理内容 a|IPv4 アドレスから、IPv4 を写した IPv6 の形(`::ffff:a.b.c.d`)の GID を作る。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`ip` !IPv4 アドレス(ホストのバイト順)
+!`uint8_t [16]` !`gid` ![出力] GID 16 バイト
+!===
+|戻り値 a|なし
+|前提条件 a|特になし。
+|注意事項 a|byte 12〜15 にはビッグエンディアンで書く。
+|===
+
+.mlx5_gid_from_ipv4() のフロー図
+image::flow_src_mlx5_hca__mlx5_gid_from_ipv4.drawio.svg[mlx5_gid_from_ipv4() のフロー図]
+
+.mlx5_gid_from_ipv4() の関係図
+image::call_src_mlx5_hca__mlx5_gid_from_ipv4.drawio.svg[mlx5_gid_from_ipv4() の関係図]
+
+[[src_mlx5_hca__mlx5_hca_init]]
+=== `mlx5_hca_init()`
+[cols="1,5",options="autowidth"]
+.mlx5_hca_init()
+|===
+|関数名 |`mlx5_hca_init`(`src/mlx5_hca.c` 410 行目)
+|宣言 |`int mlx5_hca_init(bfm_dev_t *d)`
+|処理内容 a|HCA を立ち上げる。FW の版とコマンドの版を確かめ、FW の初期化待ち → コマンドキューの初期化 → FW の初期化待ち → `ENABLE_HCA` → ISSI → FW 用のページの区画の確保 → boot のページ → `HOST_ENDIANNESS` → general / atomic / roce の能力 → init のページ → `INIT_HCA` の順に進める。その後、EQ・PD・MKey(自分用の全アドレス、公開メモリ用)を作り、ポートの MTU の設定・ポートを上げる・vport の `roce_en`・MAC と IP と GID の用意・`SET_ROCE_ADDRESS` を行う。最後に、FW が追加で求めるページに、要求が 100ms 来なくなるまで(上限 2 秒)EQ を見て答える。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!===
+|戻り値 a|`BFM_OK`: 立ち上がった。`BFM_E_HW`: 装置が見えない、コマンドの版が違う、コマンドの失敗など。`BFM_E_TIMEOUT`: FW の初期化やコマンドが時間切れ。`BFM_E_NOMEM`: FW 用のページの区画が取れない、または FW の求めるページが多すぎる。そのほか途中で呼ぶ関数の戻り値。
+|前提条件 a|`d->bar0` が張られ、PCIe の設定(Bus Master など)が済んでいること。DMA 領域の切り出しが初期化済みであること。
+|注意事項 a|* 途中で失敗しても、ここでは取ったものを返さない(呼び出し側の `cleanup()` が `hca_enabled` を見て FW を止める)。
+* `ENABLE_HCA` が通った時点で `d->hca_enabled = 1` にする。
+* 公開メモリの鍵の下位 8 ビットは、そのときの時刻(ns を 10 ビット右へずらしたもの)から作る。自分用の鍵(`lkey`)の下位 8 ビットは 0。
+* `g_bfm_port_mtu` が 0 なら MTU を設定しない。`g_bfm_local_mac` が全部 0 なら vport の MAC を使う。
+|===
+
+.mlx5_hca_init() のフロー図
+image::flow_src_mlx5_hca__mlx5_hca_init.drawio.svg[mlx5_hca_init() のフロー図]
+
+.mlx5_hca_init() の関係図
+image::call_src_mlx5_hca__mlx5_hca_init.drawio.svg[mlx5_hca_init() の関係図]
+
+[[src_mlx5_hca__mlx5_hca_teardown]]
+=== `mlx5_hca_teardown()`
+[cols="1,5",options="autowidth"]
+.mlx5_hca_teardown()
+|===
+|関数名 |`mlx5_hca_teardown`(`src/mlx5_hca.c` 490 行目)
+|宣言 |`void mlx5_hca_teardown(bfm_dev_t *d)`
+|処理内容 a|`TEARDOWN_HCA` で FW を止める。まず graceful(profile 0)で出し、断られたら force(profile 1)で出す。最後に `d->hca_enabled = 0` にする。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !装置
+!===
+|戻り値 a|なし
+|前提条件 a|呼び出し側が、この後に Bus Master を落とすこと。
+|注意事項 a|* `d->hca_enabled` が 0 なら何もしない。
+* この後は FW にコマンドを出さない(資源を壊さずに止めた後の `MANAGE_PAGES`・`DISABLE_HCA` は返らないことがある。実機で確認済み)。
+* force も失敗した(コマンドが失敗した、または出力の byte 15 のビット 0 が立っていた)ときは、注意(次の立ち上げの FLR で戻す)を表示し、何も返さずに `hca_enabled` を 0 にする。
+|===
+
+.mlx5_hca_teardown() のフロー図
+image::flow_src_mlx5_hca__mlx5_hca_teardown.drawio.svg[mlx5_hca_teardown() のフロー図]
+
+.mlx5_hca_teardown() の関係図
+image::call_src_mlx5_hca__mlx5_hca_teardown.drawio.svg[mlx5_hca_teardown() の関係図]
+
+== `src/mlx5_qp.c`
+
+QP(RC と GSI)の作成・状態遷移・破棄を持つ。QP の作成のときに送受信で共有する CQ も作る。QPC の欄の位置は ConnectX-4 / 4 Lx の実機で確かめたもの(ソースの冒頭のコメント)を使う。RC は RST → INIT → RTR → RTS、GSI(UD)は RST → INIT → RTR → RTS と進める。
+
+[[src_mlx5_qp__qp_in_header]]
+=== `qp_in_header()`
+[cols="1,5",options="autowidth"]
+.qp_in_header()
+|===
+|関数名 |`qp_in_header`(`src/mlx5_qp.c` 29 行目)
+|宣言 |`static void qp_in_header(uint8_t *in, uint16_t opcode, uint32_t qpn, uint32_t optpar)`
+|処理内容 a|QP の状態遷移のコマンドの入力(`QP_IN_SIZE` バイト)を 0 で埋め、opcode・QPN・opt_param_mask を書く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint8_t *` !`in` !入力の領域(`QP_IN_SIZE` バイト以上)
+!`uint16_t` !`opcode` !コマンドの opcode
+!`uint32_t` !`qpn` !QP の番号(24 ビット。in[9..11])
+!`uint32_t` !`optpar` !opt_param_mask(in[16..19])
+!===
+|戻り値 a|なし
+|前提条件 a|`in` が `QP_IN_SIZE` バイト以上あること。
+|注意事項 a|特になし。
+|===
+
+.qp_in_header() のフロー図
+image::flow_src_mlx5_qp__qp_in_header.drawio.svg[qp_in_header() のフロー図]
+
+.qp_in_header() の関係図
+image::call_src_mlx5_qp__qp_in_header.drawio.svg[qp_in_header() の関係図]
+
+[[src_mlx5_qp__mlx5_udp_sport]]
+=== `mlx5_udp_sport()`
+[cols="1,5",options="autowidth"]
+.mlx5_udp_sport()
+|===
+|関数名 |`mlx5_udp_sport`(`src/mlx5_qp.c` 38 行目)
+|宣言 |`uint16_t mlx5_udp_sport(uint32_t lqpn, uint32_t rqpn)`
+|処理内容 a|RoCE v2 の UDP の送信元ポートを、自分と相手の QPN から計算する(Linux の `rdma_calc_flow_label()` + `rdma_flow_label_to_udp_sport()` と同じ)。QPN の積を畳んで 20 ビットの flow label を作り、それを 14 ビットに畳んで 0xc000 を OR する。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`lqpn` !自分の QPN
+!`uint32_t` !`rqpn` !相手の QPN
+!===
+|戻り値 a|UDP の送信元ポート(0xc000〜0xffff)。
+|前提条件 a|特になし。
+|注意事項 a|Linux と同じ値になるので、相手が Linux でも経路の振り分けがそろう。
+|===
+
+.mlx5_udp_sport() のフロー図
+image::flow_src_mlx5_qp__mlx5_udp_sport.drawio.svg[mlx5_udp_sport() のフロー図]
+
+.mlx5_udp_sport() の関係図
+image::call_src_mlx5_qp__mlx5_udp_sport.drawio.svg[mlx5_udp_sport() の関係図]
+
+[[src_mlx5_qp__mlx5_qp_create]]
+=== `mlx5_qp_create()`
+[cols="1,5",options="autowidth"]
+.mlx5_qp_create()
+|===
+|関数名 |`mlx5_qp_create`(`src/mlx5_qp.c` 55 行目)
+|宣言 |`int mlx5_qp_create(bfm_dev_t *d, bfm_qp_t *qp, uint8_t st, uint8_t cs_req)`
+|処理内容 a|QP を作る。
+
+* RQ・SQ の大きさを検査し、WQ のページ数を数える(切り上げ)。
+* 送受信で共有する CQ を作る(`mlx5_cq_create()`)。
+* WQ(RQ の直後に SQ)とドアベルのレコードを 0 で埋めて書き戻す。`qp->sq` を SQ の先頭にする。
+* `CREATE_QP` を出す。QPC には st・pd・mtu(1024。後で変える)と log_msg_max(20)・RQ と SQ の大きさ・ts_format・uar_page・送受信の cqn・dbr_addr・rq_type(通常)・cs_req を入れ、WQ の各ページの物理アドレスを並べる。
+* 返った QPN を `qp->qpn` に入れ、生産位置を 0 にし、自分の開始 PSN を時刻から決める。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !デバイスの状態
+!`bfm_qp_t *` !`qp` !QP(`rq_log` / `sq_log` / `cq_log` / `wq` / `dbr` / `cq` / `cq_dbr` / `uarn` は呼び出し側が埋めておく)
+!`uint8_t` !`st` !QP の種類(`MLX5_QP_ST_RC` か `MLX5_QP_ST_QP1`(GSI))
+!`uint8_t` !`cs_req` !QPC の cs_req。0x11 で 32 バイトまでの read / atomic の応答を CQE に書かせる
+!===
+|戻り値 a|`BFM_OK`: 作った。`BFM_E_PARAM`: `rq_log` か `sq_log` が 16 を超える、または WQ が 32 ページを超える。そのほか `mlx5_cq_create()` / `mlx5_cmd()` の戻り値。
+|前提条件 a|`qp` の上の欄を埋めてあること。`wq` が WQ の大きさ(16 x 2^rq_log + 64 x 2^sq_log バイト)を 4KiB に切り上げた分だけあること(ページ数は切り上げで数え、各ページの物理アドレスを渡す)。`d->pdn` が決まっていること。
+|注意事項 a|* `CREATE_QP` が失敗したら、作った CQ を壊して `has_cq` を 0 に戻す。
+* 大きさの検査(`rq_log` / `sq_log` が 16 以下、WQ が 32 ページ以下)は CQ を作る前に行うので、`BFM_E_PARAM` で戻るときは何も作らない。
+* 入力の領域は静的変数なので、再入できない。
+|===
+
+.mlx5_qp_create() のフロー図
+image::flow_src_mlx5_qp__mlx5_qp_create.drawio.svg[mlx5_qp_create() のフロー図]
+
+.mlx5_qp_create() の関係図
+image::call_src_mlx5_qp__mlx5_qp_create.drawio.svg[mlx5_qp_create() の関係図]
+
+[[src_mlx5_qp__mlx5_qp_rst2init]]
+=== `mlx5_qp_rst2init()`
+[cols="1,5",options="autowidth"]
+.mlx5_qp_rst2init()
+|===
+|関数名 |`mlx5_qp_rst2init`(`src/mlx5_qp.c` 108 行目)
+|宣言 |`int mlx5_qp_rst2init(bfm_dev_t *d, bfm_qp_t *qp, int ud)`
+|処理内容 a|QP を RST から INIT へ移す(`RST2INIT_QP`)。QPC には pd・rlky・ポート番号(1)だけを入れ、UD(GSI)なら Q_Key(`MLX5_QP1_QKEY`)も入れる。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !デバイスの状態
+!`bfm_qp_t *` !`qp` !QP(`qpn` が決まっていること)
+!`int` !`ud` !0 以外なら UD(GSI)として Q_Key を入れる
+!===
+|戻り値 a|`mlx5_cmd()` の戻り値。
+|前提条件 a|`mlx5_qp_create()` が成功していること。
+|注意事項 a|rre などのアクセスのフラグを入れると ConnectX-4 の FW は BAD_PARAM で断るので、ここでは入れない(RTR2RTS で入れる)。
+|===
+
+.mlx5_qp_rst2init() のフロー図
+image::flow_src_mlx5_qp__mlx5_qp_rst2init.drawio.svg[mlx5_qp_rst2init() のフロー図]
+
+.mlx5_qp_rst2init() の関係図
+image::call_src_mlx5_qp__mlx5_qp_rst2init.drawio.svg[mlx5_qp_rst2init() の関係図]
+
+[[src_mlx5_qp__mlx5_qp_ud_to_rts]]
+=== `mlx5_qp_ud_to_rts()`
+[cols="1,5",options="autowidth"]
+.mlx5_qp_ud_to_rts()
+|===
+|関数名 |`mlx5_qp_ud_to_rts`(`src/mlx5_qp.c` 121 行目)
+|宣言 |`int mlx5_qp_ud_to_rts(bfm_dev_t *d, bfm_qp_t *qp)`
+|処理内容 a|GSI(UD)の QP を INIT → RTR → RTS へ移す。INIT2RTR では pd・mtu(1024)と log_msg_max・ポート番号・Q_Key を入れ(opt_param_mask は PKEY・QKEY)、RTR2RTS では next_send_psn に自分の開始 PSN を入れる。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !デバイスの状態
+!`bfm_qp_t *` !`qp` !GSI の QP(INIT にあること)
+!===
+|戻り値 a|`BFM_OK`: RTS になった。そのほか `mlx5_cmd()` の戻り値。
+|前提条件 a|`mlx5_qp_rst2init()`(`ud` = 1)が成功していること。
+|注意事項 a|相手の情報は送る WQE に載せるので、ここでは入れない。INIT2RTR が失敗したら RTR2RTS は出さない。
+|===
+
+.mlx5_qp_ud_to_rts() のフロー図
+image::flow_src_mlx5_qp__mlx5_qp_ud_to_rts.drawio.svg[mlx5_qp_ud_to_rts() のフロー図]
+
+.mlx5_qp_ud_to_rts() の関係図
+image::call_src_mlx5_qp__mlx5_qp_ud_to_rts.drawio.svg[mlx5_qp_ud_to_rts() の関係図]
+
+[[src_mlx5_qp__floor_log2]]
+=== `floor_log2()`
+[cols="1,5",options="autowidth"]
+.floor_log2()
+|===
+|関数名 |`floor_log2`(`src/mlx5_qp.c` 138 行目)
+|宣言 |`static uint8_t floor_log2(uint32_t v)`
+|処理内容 a|`v` の log2 を切り捨てで求める(`v` が 1 以下なら 0)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`v` !値(1 以上を想定)
+!===
+|戻り値 a|切り捨てた log2。
+|前提条件 a|特になし。
+|注意事項 a|`v` が 0 でも 0 を返す。
+|===
+
+.floor_log2() のフロー図
+image::flow_src_mlx5_qp__floor_log2.drawio.svg[floor_log2() のフロー図]
+
+.floor_log2() の関係図
+image::call_src_mlx5_qp__floor_log2.drawio.svg[floor_log2() の関係図]
+
+[[src_mlx5_qp__log_rra]]
+=== `log_rra()`
+[cols="1,5",options="autowidth"]
+.log_rra()
+|===
+|関数名 |`log_rra`(`src/mlx5_qp.c` 149 行目)
+|宣言 |`static uint8_t log_rra(const bfm_dev_t *d)`
+|処理内容 a|responder として同時に受け付ける read / atomic の数の log2 を返す。HCA の能力 `log_max_ra_res_qp` を上限 4(16 個)で抑えた値。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const bfm_dev_t *` !`d` !デバイスの状態
+!===
+|戻り値 a|`log_max_ra_res_qp` と 4 の小さいほう。
+|前提条件 a|HCA の能力を読んであること(`d->log_max_ra_res_qp`)。
+|注意事項 a|特になし。
+|===
+
+.log_rra() のフロー図
+image::flow_src_mlx5_qp__log_rra.drawio.svg[log_rra() のフロー図]
+
+.log_rra() の関係図
+image::call_src_mlx5_qp__log_rra.drawio.svg[log_rra() の関係図]
+
+[[src_mlx5_qp__mlx5_qp_init2rtr_rc]]
+=== `mlx5_qp_init2rtr_rc()`
+[cols="1,5",options="autowidth"]
+.mlx5_qp_init2rtr_rc()
+|===
+|関数名 |`mlx5_qp_init2rtr_rc`(`src/mlx5_qp.c` 160 行目)
+|宣言 |`int mlx5_qp_init2rtr_rc(bfm_dev_t *d, bfm_qp_t *qp, struct bfm_conn *c)`
+|処理内容 a|RC の QP を INIT から RTR へ移す(`INIT2RTR_QP`。opt_param_mask は RRE・RAE・RWE・PKEY)。QPC には pd・経路 MTU と log_msg_max(20)・相手の QPN・log_rra_max・min_rnr_nak(12)・next_rcv_psn(自分が名乗った PSN)を入れ、アドレスパスには GID の 0 番・hop_limit(64)・相手の GID・UDP の送信元ポート(`mlx5_udp_sport()`)・ポート番号(1)・相手の MAC を入れる。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !デバイスの状態
+!`bfm_qp_t *` !`qp` !RC の QP(INIT にあること)
+!`struct bfm_conn *` !`c` !接続(`path_mtu` / `peer_qpn` / `peer_gid` / `peer_mac` を使う)
+!===
+|戻り値 a|`mlx5_cmd()` の戻り値。
+|前提条件 a|`mlx5_qp_rst2init()` が成功し、`c` に相手の情報が入っていること。
+|注意事項 a|log_rra_max(responder として受け付ける read / atomic の数)はここで入れる。RTR2RTS で書いても FW は保持しない。
+|===
+
+.mlx5_qp_init2rtr_rc() のフロー図
+image::flow_src_mlx5_qp__mlx5_qp_init2rtr_rc.drawio.svg[mlx5_qp_init2rtr_rc() のフロー図]
+
+.mlx5_qp_init2rtr_rc() の関係図
+image::call_src_mlx5_qp__mlx5_qp_init2rtr_rc.drawio.svg[mlx5_qp_init2rtr_rc() の関係図]
+
+[[src_mlx5_qp__mlx5_qp_rtr2rts_rc]]
+=== `mlx5_qp_rtr2rts_rc()`
+[cols="1,5",options="autowidth"]
+.mlx5_qp_rtr2rts_rc()
+|===
+|関数名 |`mlx5_qp_rtr2rts_rc`(`src/mlx5_qp.c` 187 行目)
+|宣言 |`int mlx5_qp_rtr2rts_rc(bfm_dev_t *d, bfm_qp_t *qp, struct bfm_conn *c)`
+|処理内容 a|RC の QP を RTR から RTS へ移す(`RTR2RTS_QP`。opt_param_mask は RRE・RAE・RWE・PM_STATE・RNR_TIMEOUT)。
+
+* requester として出せる read / atomic の数(log_sra_max)を、自分の能力(上限 4)と相手が受け付ける数 `c->peer_rr` の小さいほうにし、その数を `c->max_rd` に入れる。
+* QPC には pm_state(MIGRATED)・ack_timeout(`g_bfm_ack_timeout`)・ポート番号・log_sra_max と retry_count(`g_bfm_retry_count`)・rnr_retry(7 = 無限)・next_send_psn(相手が名乗った PSN)・log_rra_max と atomic_mode・rre と rwe(atomic_mode が 0 でなければ rae も)を入れる。
+* atomic_mode を付けて断られたら、atomic_mode = 0 でもう一度試す(相手からの atomic は受けない)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !デバイスの状態
+!`bfm_qp_t *` !`qp` !RC の QP(RTR にあること)
+!`struct bfm_conn *` !`c` !接続(`peer_rr` / `peer_psn` を使い、`max_rd` を書く)
+!===
+|戻り値 a|`BFM_OK`: RTS になった。そのほか `mlx5_cmd()` の戻り値(atomic_mode = 0 で失敗したとき)。
+|前提条件 a|`mlx5_qp_init2rtr_rc()` が成功していること。HCA の能力(`log_max_ra_req_qp` / `log_max_ra_res_qp` / `atomic_mode`)を読んであること。
+|注意事項 a|* 試すのは多くて 2 回(1 回目は `d->atomic_mode`、2 回目は 0)。2 回目で成功したときは、atomic_mode が断られたことを表示する。
+* `d->atomic_mode` が 0 なら 1 回目の失敗でそのまま戻る。
+|===
+
+.mlx5_qp_rtr2rts_rc() のフロー図
+image::flow_src_mlx5_qp__mlx5_qp_rtr2rts_rc.drawio.svg[mlx5_qp_rtr2rts_rc() のフロー図]
+
+.mlx5_qp_rtr2rts_rc() の関係図
+image::call_src_mlx5_qp__mlx5_qp_rtr2rts_rc.drawio.svg[mlx5_qp_rtr2rts_rc() の関係図]
+
+[[src_mlx5_qp__mlx5_qp_destroy]]
+=== `mlx5_qp_destroy()`
+[cols="1,5",options="autowidth"]
+.mlx5_qp_destroy()
+|===
+|関数名 |`mlx5_qp_destroy`(`src/mlx5_qp.c` 221 行目)
+|宣言 |`void mlx5_qp_destroy(bfm_dev_t *d, bfm_qp_t *qp)`
+|処理内容 a|QP と CQ を壊す。作ってあるもの(`has_qp` / `has_cq`)だけに `DESTROY_QP` / `DESTROY_CQ` を出し、両方の印を 0 にする。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !デバイスの状態
+!`bfm_qp_t *` !`qp` !壊す QP
+!===
+|戻り値 a|なし
+|前提条件 a|特になし。
+|注意事項 a|* コマンドの失敗は無視する。
+* UAR は返さない(呼び出し側が返す)。WQ などの DMA 領域も返さない。
+|===
+
+.mlx5_qp_destroy() のフロー図
+image::flow_src_mlx5_qp__mlx5_qp_destroy.drawio.svg[mlx5_qp_destroy() のフロー図]
+
+.mlx5_qp_destroy() の関係図
+image::call_src_mlx5_qp__mlx5_qp_destroy.drawio.svg[mlx5_qp_destroy() の関係図]
+
+== `src/bfm_cm.c`
+
+接続の確立と切断。IP のスタックを持たないので、RC QP を繋ぐための情報(QP 番号・開始 PSN・公開メモリの先頭と rkey と大きさ・MAC)の交換を、RoCE の GSI(QP1)の上で IB CM の REQ / REP / RTU を使って行う。Linux の rdma_cm(librdmacm)と同じ形なので、Linux の相手(`tools/bfm_peer.c`)とも繋がる。
+
+* 掛け側 `bfm_connect()`: REQ を送り、REP を受け、RTU を送る。
+* 受け側 `bfm_accept()`: REQ を受け、REP を送り、RTU を待つ。
+* 切断 `bfm_disconnect()`: DREQ を送り、DREP を待つ。相手からの DREQ には `bfm_cm_poll()` が DREP を返す。
+
+公開メモリの情報は private data で渡す(REQ は rdma_cm の cma_hdr 36 バイトの後ろ、REP は先頭から)。中身は `'BFM1'`・版・旗(bit0 = MAC あり)・公開メモリの先頭・rkey・大きさ・MAC で、すべてビッグエンディアン。GSI の受信は 1 本の CQ に全部来るので、拾った CM の MAD はいったん待ち行列(`s_pend`、16 枠)に入れ、各処理が自分の欲しいものを取り出す(5 秒より古いものは `bfm_cm_poll()` が捨てる)。接続の枠 `g_bfm_conn[BFM_MAX_CONN]` もこのファイルが持つ。
+
+[[src_bfm_cm__cm_rand32]]
+=== `cm_rand32()`
+[cols="1,5",options="autowidth"]
+.cm_rand32()
+|===
+|関数名 |`cm_rand32`(`src/bfm_cm.c` 72 行目)
+|宣言 |`static uint32_t cm_rand32(void)`
+|処理内容 a|32 ビットの擬似乱数を返す。静的変数 `x` に `bfm_port_time_ns()` と定数を足した値を XOR で混ぜ、xorshift(13・7・17)をかけて、上位寄りの 32 ビット(`x >> 16`)を返す。
+|引数 |なし
+|戻り値 a|32 ビットの擬似乱数。
+|前提条件 a|特になし。
+|注意事項 a|暗号用ではない。呼ぶたびに今の時刻を混ぜるので、立ち上げ直しても同じ列にならない。comm id・トランザクション ID・GUID の乱数部分・cma_hdr の送り元ポートに使う。
+|===
+
+.cm_rand32() のフロー図
+image::flow_src_bfm_cm__cm_rand32.drawio.svg[cm_rand32() のフロー図]
+
+.cm_rand32() の関係図
+image::call_src_bfm_cm__cm_rand32.drawio.svg[cm_rand32() の関係図]
+
+[[src_bfm_cm__ms_since]]
+=== `ms_since()`
+[cols="1,5",options="autowidth"]
+.ms_since()
+|===
+|関数名 |`ms_since`(`src/bfm_cm.c` 82 行目)
+|宣言 |`static uint64_t ms_since(uint64_t t0)`
+|処理内容 a|時刻 `t0` から今までの経過時間をミリ秒で返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint64_t` !`t0` !起点の時刻(`bfm_port_time_ns()` の値、ナノ秒)
+!===
+|戻り値 a|経過時間(ミリ秒、切り捨て)。
+|前提条件 a|`t0` は `bfm_port_time_ns()` で取った値であること。
+|注意事項 a|特になし。
+|===
+
+.ms_since() のフロー図
+image::flow_src_bfm_cm__ms_since.drawio.svg[ms_since() のフロー図]
+
+.ms_since() の関係図
+image::call_src_bfm_cm__ms_since.drawio.svg[ms_since() の関係図]
+
+[[src_bfm_cm__gsi_post_recv]]
+=== `gsi_post_recv()`
+[cols="1,5",options="autowidth"]
+.gsi_post_recv()
+|===
+|関数名 |`gsi_post_recv`(`src/bfm_cm.c` 91 行目)
+|宣言 |`static void gsi_post_recv(void)`
+|処理内容 a|GSI の受信キューに受信の WQE を 1 つ出す。`rq_pc` の位置の WQE(16 バイト)に、受信枠の大きさ `BFM_GSI_RX_SLOT`・`g_bfm.lkey`・受信枠 `s_rx_ring + idx * BFM_GSI_RX_SLOT` の DMA アドレスを書き、`rq_pc` を進めてドアベルレコード(`dbr[0]`)を書き換える。
+|引数 |なし
+|戻り値 a|なし
+|前提条件 a|`bfm_cm_init()` で GSI の WQ・ドアベルレコード・受信枠を切り出してあること。
+|注意事項 a|受信枠の位置は WQE の位置と同じ添字で決まる(`gsi_pump()` は CQE の `wqe_cnt` から枠を引く)。WQE とドアベルレコードはキャッシュを書き戻してから NIC に見せる。
+|===
+
+.gsi_post_recv() のフロー図
+image::flow_src_bfm_cm__gsi_post_recv.drawio.svg[gsi_post_recv() のフロー図]
+
+.gsi_post_recv() の関係図
+image::call_src_bfm_cm__gsi_post_recv.drawio.svg[gsi_post_recv() の関係図]
+
+[[src_bfm_cm__gsi_pump]]
+=== `gsi_pump()`
+[cols="1,5",options="autowidth"]
+.gsi_pump()
+|===
+|関数名 |`gsi_pump`(`src/bfm_cm.c` 110 行目)
+|宣言 |`static int gsi_pump(void)`
+|処理内容 a|GSI の CQ を読み切る。送信の完了(`MLX5_CQE_REQ`)は送信中の数 `s_tx_outstanding` を減らすだけ。受信の完了(`MLX5_CQE_RESP_SEND`)は、CM クラス(0x07)の MAD なら待ち行列 `s_pend` の空き枠(空きが無ければいちばん古い枠)へ写し、受信を出し直す。それ以外の完了はエラーとして表示して -1 を返す。
+|引数 |なし
+|戻り値 a|受け取って待ち行列に入れた CM の MAD の数。GSI のエラー完了を見たら -1。
+|前提条件 a|`bfm_cm_init()` で GSI を用意してあること。
+|注意事項 a|* 待ち行列が満杯のときは、いちばん古い MAD を上書きする(相手が再送する前提)。
+* CM クラス以外の MAD や短すぎる受信は捨てて、受信だけを出し直す。
+* エラー完了を見たらその場で -1 を返し、残りの CQE は次の呼び出しで読む。送信のエラー(`MLX5_CQE_REQ_ERR`)は送信中の数を減らし、受信のエラー(`MLX5_CQE_RESP_ERR`)は受信を出し直す。
+|===
+
+.gsi_pump() のフロー図
+image::flow_src_bfm_cm__gsi_pump.drawio.svg[gsi_pump() のフロー図]
+
+.gsi_pump() の関係図
+image::call_src_bfm_cm__gsi_pump.drawio.svg[gsi_pump() の関係図]
+
+[[src_bfm_cm__gsi_send]]
+=== `gsi_send()`
+[cols="1,5",options="autowidth"]
+.gsi_send()
+|===
+|関数名 |`gsi_send`(`src/bfm_cm.c` 161 行目)
+|宣言 |`static int gsi_send(const uint8_t *mad, const uint8_t peer_gid[16], const uint8_t peer_mac[6])`
+|処理内容 a|MAD(256 バイト)を相手の GSI(QPN 1)へ UD の SEND で送る。送信中の数が `BFM_GSI_TXBUFS` に達していれば `gsi_pump()` で空くのを待つ。MAD を送信の置き場 `s_tx_buf`(順に使い回す)へ写し、ctrl・datagram(Q_Key・宛先 QPN 1・UDP の送り元ポート・相手の MAC・hop limit 64・GRH・相手の GID)・data の 2 WQEBB の WQE を作り、ドアベルレコードを書き換えて、WQE の先頭 8 バイトを GSI の UAR のドアベルへ書く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const uint8_t *` !`mad` !送る MAD(256 バイト)
+!`const uint8_t [16]` !`peer_gid` !相手の GID(16 バイト)
+!`const uint8_t [6]` !`peer_mac` !相手の MAC(6 バイト)
+!===
+|戻り値 a|`BFM_OK`: 送信を出した(完了は待たない)。`BFM_E_CQE`: 送信の置き場が空くのを待つ間に GSI のエラー完了を見た。`BFM_E_TIMEOUT`: 送信の置き場が 1 秒空かなかった。
+|前提条件 a|`bfm_cm_init()` で GSI を用意してあること。
+|注意事項 a|* 完了を待たずに戻る。完了は後の `gsi_pump()` が数える。
+* 送信の置き場は `BFM_GSI_TXBUFS` 個を順に使い回すので、送信中の数がその数より少ない間だけ次を出す。
+* 待つ間の `gsi_pump()` で受けた MAD は待ち行列に入る(捨てない)。
+|===
+
+.gsi_send() のフロー図
+image::flow_src_bfm_cm__gsi_send.drawio.svg[gsi_send() のフロー図]
+
+.gsi_send() の関係図
+image::call_src_bfm_cm__gsi_send.drawio.svg[gsi_send() の関係図]
+
+[[src_bfm_cm__pend_take]]
+=== `pend_take()`
+[cols="1,5",options="autowidth"]
+.pend_take()
+|===
+|関数名 |`pend_take`(`src/bfm_cm.c` 222 行目)
+|宣言 |`static int pend_take(uint16_t attr, cm_match_fn match, const void *arg, uint8_t *out)`
+|処理内容 a|待ち行列 `s_pend` から、属性が `attr` で、`match` が NULL でなければ `match(mad, arg)` が真になる MAD を 1 つ探し、`out` へ写してその枠を空ける。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint16_t` !`attr` !欲しい MAD の属性(`CM_ATTR_REQ` など)
+!`cm_match_fn` !`match` !追加の条件の関数(`match_remote_comm()` / `match_req_port()`)。NULL なら属性だけで選ぶ
+!`const void *` !`arg` !`match` に渡す値
+!`uint8_t *` !`out` !見つけた MAD を写す先(256 バイト)
+!===
+|戻り値 a|1: 見つけて取り出した。0: 無かった。
+|前提条件 a|特になし。
+|注意事項 a|枠の番号の若い順に探し、最初に合ったものを取る(受けた順とは限らない)。
+|===
+
+.pend_take() のフロー図
+image::flow_src_bfm_cm__pend_take.drawio.svg[pend_take() のフロー図]
+
+.pend_take() の関係図
+image::call_src_bfm_cm__pend_take.drawio.svg[pend_take() の関係図]
+
+[[src_bfm_cm__pend_age]]
+=== `pend_age()`
+[cols="1,5",options="autowidth"]
+.pend_age()
+|===
+|関数名 |`pend_age`(`src/bfm_cm.c` 234 行目)
+|宣言 |`static void pend_age(void)`
+|処理内容 a|待ち行列 `s_pend` のうち、受けてから `PEND_AGE_MS`(5 秒)より古い MAD を捨てる。
+|引数 |なし
+|戻り値 a|なし
+|前提条件 a|特になし。
+|注意事項 a|誰も取り出さない MAD で待ち行列が埋まらないようにする。捨てた MAD は相手が再送する前提。
+|===
+
+.pend_age() のフロー図
+image::flow_src_bfm_cm__pend_age.drawio.svg[pend_age() のフロー図]
+
+.pend_age() の関係図
+image::call_src_bfm_cm__pend_age.drawio.svg[pend_age() の関係図]
+
+[[src_bfm_cm__match_remote_comm]]
+=== `match_remote_comm()`
+[cols="1,5",options="autowidth"]
+.match_remote_comm()
+|===
+|関数名 |`match_remote_comm`(`src/bfm_cm.c` 243 行目)
+|宣言 |`static int match_remote_comm(const uint8_t *mad, const void *arg)`
+|処理内容 a|相手の MAD の REMOTE_COMM_ID(payload の 4〜7 バイト)が、`arg` の指す自分の comm id と同じかを返す。`pend_take()` の条件に使う。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const uint8_t *` !`mad` !調べる MAD
+!`const void *` !`arg` !自分の comm id(`uint32_t` へのポインタ)
+!===
+|戻り値 a|1: 同じ。0: 違う。
+|前提条件 a|`arg` は `uint32_t` を指すこと。
+|注意事項 a|REP・REJ・RTU・DREQ・DREP の宛先の接続を見分けるのに使う。
+|===
+
+.match_remote_comm() のフロー図
+image::flow_src_bfm_cm__match_remote_comm.drawio.svg[match_remote_comm() のフロー図]
+
+.match_remote_comm() の関係図
+image::call_src_bfm_cm__match_remote_comm.drawio.svg[match_remote_comm() の関係図]
+
+[[src_bfm_cm__match_req_port]]
+=== `match_req_port()`
+[cols="1,5",options="autowidth"]
+.match_req_port()
+|===
+|関数名 |`match_req_port`(`src/bfm_cm.c` 248 行目)
+|宣言 |`static int match_req_port(const uint8_t *mad, const void *arg)`
+|処理内容 a|REQ の SERVICE_ID(payload の 8〜15 バイト)が、`CM_PORT_SPACE`(0x0106)を 16 ビット左へずらして `arg` の指すポート番号と OR した値と同じかを返す。`pend_take()` の条件に使う。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const uint8_t *` !`mad` !調べる MAD(REQ)
+!`const void *` !`arg` !待ち受けるポート番号(`uint16_t` へのポインタ)
+!===
+|戻り値 a|1: 同じ。0: 違う。
+|前提条件 a|`arg` は `uint16_t` を指すこと。
+|注意事項 a|SERVICE_ID の形は Linux の rdma_cm の port space(RDMA_PS_TCP)と同じ。
+|===
+
+.match_req_port() のフロー図
+image::flow_src_bfm_cm__match_req_port.drawio.svg[match_req_port() のフロー図]
+
+.match_req_port() の関係図
+image::call_src_bfm_cm__match_req_port.drawio.svg[match_req_port() の関係図]
+
+[[src_bfm_cm__mad_header]]
+=== `mad_header()`
+[cols="1,5",options="autowidth"]
+.mad_header()
+|===
+|関数名 |`mad_header`(`src/bfm_cm.c` 258 行目)
+|宣言 |`static void mad_header(uint8_t *mad, uint64_t tid, uint16_t attr)`
+|処理内容 a|MAD(256 バイト)を 0 で埋め、CM の MAD の頭(base_version 1・クラス 0x07・クラスの版 2・メソッド SEND・トランザクション ID・属性)を書く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint8_t *` !`mad` !書く先(256 バイト)
+!`uint64_t` !`tid` !トランザクション ID
+!`uint16_t` !`attr` !属性(`CM_ATTR_REQ` など)
+!===
+|戻り値 a|なし
+|前提条件 a|特になし。
+|注意事項 a|特になし。
+|===
+
+.mad_header() のフロー図
+image::flow_src_bfm_cm__mad_header.drawio.svg[mad_header() のフロー図]
+
+.mad_header() の関係図
+image::call_src_bfm_cm__mad_header.drawio.svg[mad_header() の関係図]
+
+[[src_bfm_cm__local_guid]]
+=== `local_guid()`
+[cols="1,5",options="autowidth"]
+.local_guid()
+|===
+|関数名 |`local_guid`(`src/bfm_cm.c` 270 行目)
+|宣言 |`static uint64_t local_guid(void)`
+|処理内容 a|自分の CA GUID を作って返す。自分の MAC から EUI-64 を作り(先頭のバイトの bit1 を反転)、EUI-64 で 0xfffe が入る真ん中の 16 ビットに `bfm_cm_init()` で決めた乱数 `s_guid_salt` を入れる。
+|引数 |なし
+|戻り値 a|64 ビットの CA GUID。
+|前提条件 a|`g_bfm.mac` と `s_guid_salt` が決まっていること(`bfm_cm_init()` の後)。
+|注意事項 a|Linux の ib_cm は (CA GUID, QPN) で相手を見分ける。立ち上げ直した後の FW は QPN を同じ順に配り直すので、GUID まで同じだと前の実行の接続の残りと重なり REJ reason 10(stale connection)で断られる。それを避けるために真ん中を乱数にしている。
+|===
+
+.local_guid() のフロー図
+image::flow_src_bfm_cm__local_guid.drawio.svg[local_guid() のフロー図]
+
+.local_guid() の関係図
+image::call_src_bfm_cm__local_guid.drawio.svg[local_guid() の関係図]
+
+[[src_bfm_cm__put_priv]]
+=== `put_priv()`
+[cols="1,5",options="autowidth"]
+.put_priv()
+|===
+|関数名 |`put_priv`(`src/bfm_cm.c` 277 行目)
+|宣言 |`static void put_priv(uint8_t *p)`
+|処理内容 a|自分の公開メモリの情報を private data の形で書く。`'BFM1'`・版 1・旗 1(MAC あり)・公開メモリの先頭 `g_bfm_mr_base`・rkey `g_bfm.rkey`・大きさ `g_bfm_mr_size`・自分の MAC を、ビッグエンディアンで書く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint8_t *` !`p` !書く先(36 バイト)
+!===
+|戻り値 a|なし
+|前提条件 a|`g_bfm.rkey` と `g_bfm.mac` が決まっていること。
+|注意事項 a|特になし。
+|===
+
+.put_priv() のフロー図
+image::flow_src_bfm_cm__put_priv.drawio.svg[put_priv() のフロー図]
+
+.put_priv() の関係図
+image::call_src_bfm_cm__put_priv.drawio.svg[put_priv() の関係図]
+
+[[src_bfm_cm__get_priv]]
+=== `get_priv()`
+[cols="1,5",options="autowidth"]
+.get_priv()
+|===
+|関数名 |`get_priv`(`src/bfm_cm.c` 289 行目)
+|宣言 |`static int get_priv(struct bfm_conn *c, const uint8_t *p, int *mac_ok)`
+|処理内容 a|相手の private data を読み、公開メモリの先頭・rkey・大きさを接続 `c` に入れる。`'BFM1'` の形なら、旗の bit0 が立っていれば相手の MAC も `c->peer_mac` に入れる。vfio_nvme の `tools/rdma_short_peer` の形(`'RSHT'`。大きさは 32 ビット)も読む。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct bfm_conn *` !`c` !情報を入れる接続
+!`const uint8_t *` !`p` !相手の private data の先頭
+!`int *` !`mac_ok` !相手の MAC を読めたら 1、読めなければ 0 を入れる先
+!===
+|戻り値 a|1: 公開メモリの情報があった。0: 知らない形(何も入れない)。
+|前提条件 a|特になし。
+|注意事項 a|`*mac_ok` は最初に 0 にする。`'RSHT'` の形には MAC が無いので `*mac_ok` は 0 のまま。
+|===
+
+.get_priv() のフロー図
+image::flow_src_bfm_cm__get_priv.drawio.svg[get_priv() のフロー図]
+
+.get_priv() の関係図
+image::call_src_bfm_cm__get_priv.drawio.svg[get_priv() の関係図]
+
+[[src_bfm_cm__own_rr]]
+=== `own_rr()`
+[cols="1,5",options="autowidth"]
+.own_rr()
+|===
+|関数名 |`own_rr`(`src/bfm_cm.c` 312 行目)
+|宣言 |`static uint8_t own_rr(void)`
+|処理内容 a|自分が受け付ける同時の read / atomic の数を返す。HCA の `log_max_ra_res_qp` を 4 で頭打ちにして、2 のその乗を返す。
+|引数 |なし
+|戻り値 a|同時の read / atomic の数(1〜16)。
+|前提条件 a|`g_bfm.log_max_ra_res_qp` が HCA の能力から読んであること。
+|注意事項 a|REQ・REP の RESPONDER_RESOURCES(REQ では INITIATOR_DEPTH も)に入れる。
+|===
+
+.own_rr() のフロー図
+image::flow_src_bfm_cm__own_rr.drawio.svg[own_rr() のフロー図]
+
+.own_rr() の関係図
+image::call_src_bfm_cm__own_rr.drawio.svg[own_rr() の関係図]
+
+[[src_bfm_cm__build_req]]
+=== `build_req()`
+[cols="1,5",options="autowidth"]
+.build_req()
+|===
+|関数名 |`build_req`(`src/bfm_cm.c` 318 行目)
+|宣言 |`static void build_req(const struct bfm_conn *c, uint8_t *mad)`
+|処理内容 a|接続 `c` の REQ を作る。MAD の頭(属性 `CM_ATTR_REQ`)の後ろに、自分の comm id・SERVICE_ID(`CM_PORT_SPACE` とポート番号)・CA GUID・QPN・RESPONDER_RESOURCES と INITIATOR_DEPTH(`own_rr()`)・CM の応答待ち時間・開始 PSN・再送回数 7・PKEY 0xffff・PATH_MTU・RNR の再送回数 7・CM の再送回数 3・自分と相手の GID・hop limit 64・LOCAL_ACK_TIMEOUT(`g_bfm_ack_timeout`)を書く。private data には rdma_cm の cma_hdr(IPv4、送り元ポートは 0xc000 以上の乱数、送り元と宛先の IP)と、その後ろに自分の公開メモリの情報(`put_priv()`)を入れる。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const struct bfm_conn *` !`c` !接続(tid・comm id・ポート・QP・相手の GID と IP・path_mtu が決まっていること)
+!`uint8_t *` !`mad` !書く先(256 バイト)
+!===
+|戻り値 a|なし
+|前提条件 a|`c->qp` が作ってあり、`c->tid`・`c->local_comm_id`・`c->port`・`c->peer_gid`・`c->peer_ip`・`c->path_mtu` が決まっていること。
+|注意事項 a|cma_hdr の送り元ポートは呼ぶたびに乱数で変わる(再送の REQ でも変わる)。
+|===
+
+.build_req() のフロー図
+image::flow_src_bfm_cm__build_req.drawio.svg[build_req() のフロー図]
+
+.build_req() の関係図
+image::call_src_bfm_cm__build_req.drawio.svg[build_req() の関係図]
+
+[[src_bfm_cm__build_rep]]
+=== `build_rep()`
+[cols="1,5",options="autowidth"]
+.build_rep()
+|===
+|関数名 |`build_rep`(`src/bfm_cm.c` 346 行目)
+|宣言 |`static void build_rep(const struct bfm_conn *c, uint8_t *mad)`
+|処理内容 a|接続 `c` の REP を作る。MAD の頭(属性 `CM_ATTR_REP`)の後ろに、自分と相手の comm id・QPN・開始 PSN・RESPONDER_RESOURCES(`own_rr()`)・INITIATOR_DEPTH(`c->max_rd`)・TARGET_ACK_DELAY 14・RNR の再送回数 7・CA GUID を書き、private data(payload の 36 バイトから)に自分の公開メモリの情報(`put_priv()`)を入れる。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const struct bfm_conn *` !`c` !接続(tid・comm id・QP・max_rd が決まっていること)
+!`uint8_t *` !`mad` !書く先(256 バイト)
+!===
+|戻り値 a|なし
+|前提条件 a|`c->qp` が作ってあり、`c->tid`・`c->local_comm_id`・`c->remote_comm_id`・`c->max_rd` が決まっていること(`c->max_rd` は QP を RTS へ進めるときに決まる)。
+|注意事項 a|`bfm_accept()` の最初の REP と、`bfm_cm_poll()` の REP の送り直し(REQ の再送が来たとき)の両方で使う。
+|===
+
+.build_rep() のフロー図
+image::flow_src_bfm_cm__build_rep.drawio.svg[build_rep() のフロー図]
+
+.build_rep() の関係図
+image::call_src_bfm_cm__build_rep.drawio.svg[build_rep() の関係図]
+
+[[src_bfm_cm__build_short]]
+=== `build_short()`
+[cols="1,5",options="autowidth"]
+.build_short()
+|===
+|関数名 |`build_short`(`src/bfm_cm.c` 362 行目)
+|宣言 |`static void build_short(uint8_t *mad, uint64_t tid, uint16_t attr, uint32_t local, uint32_t remote)`
+|処理内容 a|comm id の組だけを持つ短い CM の MAD(RTU・DREQ・DREP)を作る。MAD の頭を書き、payload の先頭に自分の comm id と相手の comm id を書く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint8_t *` !`mad` !書く先(256 バイト)
+!`uint64_t` !`tid` !トランザクション ID
+!`uint16_t` !`attr` !属性(`CM_ATTR_RTU` / `CM_ATTR_DREQ` / `CM_ATTR_DREP`)
+!`uint32_t` !`local` !自分の comm id
+!`uint32_t` !`remote` !相手の comm id
+!===
+|戻り値 a|なし
+|前提条件 a|特になし。
+|注意事項 a|DREQ の REMOTE_QPN は呼び出し側(`bfm_disconnect()`)が後から書き足す。
+|===
+
+.build_short() のフロー図
+image::flow_src_bfm_cm__build_short.drawio.svg[build_short() のフロー図]
+
+.build_short() の関係図
+image::call_src_bfm_cm__build_short.drawio.svg[build_short() の関係図]
+
+[[src_bfm_cm__conn_alloc]]
+=== `conn_alloc()`
+[cols="1,5",options="autowidth"]
+.conn_alloc()
+|===
+|関数名 |`conn_alloc`(`src/bfm_cm.c` 373 行目)
+|宣言 |`static struct bfm_conn *conn_alloc(void)`
+|処理内容 a|接続の枠 `g_bfm_conn` から空き(`BFM_CS_FREE`)を 1 つ探し、`BFM_CS_SETUP` にして返す。
+|引数 |なし
+|戻り値 a|取った枠。空きが無ければ NULL(理由を表示する)。
+|前提条件 a|`bfm_cm_init()` で枠を初期化してあること。
+|注意事項 a|枠の資源(QP の WQ・CQ・UAR・中継バッファ)は `bfm_cm_init()` で切り出し済みのものを使い回す。
+|===
+
+.conn_alloc() のフロー図
+image::flow_src_bfm_cm__conn_alloc.drawio.svg[conn_alloc() のフロー図]
+
+.conn_alloc() の関係図
+image::call_src_bfm_cm__conn_alloc.drawio.svg[conn_alloc() の関係図]
+
+[[src_bfm_cm__conn_create_qp]]
+=== `conn_create_qp()`
+[cols="1,5",options="autowidth"]
+.conn_create_qp()
+|===
+|関数名 |`conn_create_qp`(`src/bfm_cm.c` 386 行目)
+|宣言 |`static int conn_create_qp(struct bfm_conn *c)`
+|処理内容 a|接続 `c` の RC QP を作り、INIT まで進める。`g_bfm_scatter_cqe` が 0 でなければ scatter to CQE を有効にする(`cs_req = 0x11`)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct bfm_conn *` !`c` !接続
+!===
+|戻り値 a|`BFM_OK`: INIT まで進んだ。そのほか `mlx5_qp_create()` / `mlx5_qp_rst2init()` の戻り値。
+|前提条件 a|`c->qp` の WQ・CQ・UAR などが `bfm_cm_init()` で用意してあること。
+|注意事項 a|`mlx5_qp_create()` が失敗したら `mlx5_qp_rst2init()` は呼ばない。失敗したときの後始末は呼び出し側が `conn_release()` で行う。
+|===
+
+.conn_create_qp() のフロー図
+image::flow_src_bfm_cm__conn_create_qp.drawio.svg[conn_create_qp() のフロー図]
+
+.conn_create_qp() の関係図
+image::call_src_bfm_cm__conn_create_qp.drawio.svg[conn_create_qp() の関係図]
+
+[[src_bfm_cm__conn_release]]
+=== `conn_release()`
+[cols="1,5",options="autowidth"]
+.conn_release()
+|===
+|関数名 |`conn_release`(`src/bfm_cm.c` 394 行目)
+|宣言 |`static void conn_release(struct bfm_conn *c)`
+|処理内容 a|接続 `c` を返す。データ経路の状態を外し(`bfm_ops_detach()`)、RC QP を壊し(`mlx5_qp_destroy()`)、枠を `BFM_CS_FREE` に戻す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct bfm_conn *` !`c` !接続
+!===
+|戻り値 a|なし
+|前提条件 a|特になし。
+|注意事項 a|相手へは何も送らない(切断の DREQ は `bfm_disconnect()` が送る)。枠ごとの資源(WQ・CQ・UAR・中継バッファ)は返さず、次の接続で使い回す。
+|===
+
+.conn_release() のフロー図
+image::flow_src_bfm_cm__conn_release.drawio.svg[conn_release() のフロー図]
+
+.conn_release() の関係図
+image::call_src_bfm_cm__conn_release.drawio.svg[conn_release() の関係図]
+
+[[src_bfm_cm__conn_to_rts]]
+=== `conn_to_rts()`
+[cols="1,5",options="autowidth"]
+.conn_to_rts()
+|===
+|関数名 |`conn_to_rts`(`src/bfm_cm.c` 401 行目)
+|宣言 |`static int conn_to_rts(struct bfm_conn *c)`
+|処理内容 a|接続 `c` の RC QP を INIT から RTR、RTS へ進める。相手の QPN・PSN・GID・MAC・path_mtu などは `c` から取る。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct bfm_conn *` !`c` !接続(相手の情報が入っていること)
+!===
+|戻り値 a|`BFM_OK`: RTS になった。そのほか `mlx5_qp_init2rtr_rc()` / `mlx5_qp_rtr2rts_rc()` の戻り値。
+|前提条件 a|`conn_create_qp()` で INIT まで進めてあり、`c` に相手の情報(`peer_qpn`・`peer_psn`・`peer_gid`・`peer_mac`・`peer_rr`・`path_mtu`)が入っていること。
+|注意事項 a|RTR へ進めるのに失敗したら RTS へは進めない。
+|===
+
+.conn_to_rts() のフロー図
+image::flow_src_bfm_cm__conn_to_rts.drawio.svg[conn_to_rts() のフロー図]
+
+.conn_to_rts() の関係図
+image::call_src_bfm_cm__conn_to_rts.drawio.svg[conn_to_rts() の関係図]
+
+[[src_bfm_cm__conn_log_up]]
+=== `conn_log_up()`
+[cols="1,5",options="autowidth"]
+.conn_log_up()
+|===
+|関数名 |`conn_log_up`(`src/bfm_cm.c` 408 行目)
+|宣言 |`static void conn_log_up(const struct bfm_conn *c, const char *how)`
+|処理内容 a|接続ができたことを表示する。掛け側・受け側の別、自分と相手の QPN、相手の IP、相手の公開メモリの先頭・大きさ・rkey、MTU、同時の read / atomic の数、BlueFlame の有無を出す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const struct bfm_conn *` !`c` !接続
+!`const char *` !`how` !表示する「掛け側」「受け側」の文字列
+!===
+|戻り値 a|なし
+|前提条件 a|特になし。
+|注意事項 a|特になし。
+|===
+
+.conn_log_up() のフロー図
+image::flow_src_bfm_cm__conn_log_up.drawio.svg[conn_log_up() のフロー図]
+
+.conn_log_up() の関係図
+image::call_src_bfm_cm__conn_log_up.drawio.svg[conn_log_up() の関係図]
+
+[[src_bfm_cm__bfm_cm_init]]
+=== `bfm_cm_init()`
+[cols="1,5",options="autowidth"]
+.bfm_cm_init()
+|===
+|関数名 |`bfm_cm_init`(`src/bfm_cm.c` 424 行目)
+|宣言 |`int bfm_cm_init(void)`
+|処理内容 a|接続管理を用意する(`bfm_init()` から呼ばれる)。待ち行列と送信の数を 0 にし、GUID の乱数 `s_guid_salt` を決め、GSI の WQ・ドアベルレコード・CQ・受信枠・送信の置き場を DMA 領域から切り出す。UAR を取って GSI(QP1)を作り、INIT・RTS へ進め、受信を `BFM_GSI_PREPOST` 個出す。続けて接続の枠ごとに、0 で埋めて、RC QP の WQ・ドアベルレコード・CQ・CQ のドアベルレコード・中継バッファ(`g_bfm_stage_size` を 4KiB に切り上げた大きさ)を切り出し、UAR を取ってドアベルの窓を決め、BlueFlame を使うなら UAR を write-combining でも張る。全部そろってから `s_gsi_ready = 1` にする。
+|引数 |なし
+|戻り値 a|`BFM_OK`: 用意できた。`BFM_E_NOMEM`: DMA 領域が足りない。そのほか `mlx5_alloc_uar()` / `mlx5_qp_create()` / `mlx5_qp_rst2init()` / `mlx5_qp_ud_to_rts()` の戻り値。
+|前提条件 a|HCA が立ち上がっていること(`mlx5_hca_init()` の後)。`bfm_mem_reset()` で DMA 領域の切り出しが初期化してあること。
+|注意事項 a|* 途中で失敗しても DMA 領域・UAR・GSI は返さない。後始末は呼び出し側(`bfm_init()` の `cleanup()`。HCA を止める)に任せる。
+* 接続の枠の準備で失敗したとき(`fail`)は、それまでに write-combining で張った UAR の窓を `bfm_port_bar0_wc_release()` で返し、全部の枠の `c->bf` を NULL にしてから戻る。
+* `s_gsi_ready = 1` にするのは全部そろって成功するときだけなので、失敗したときは `s_gsi_ready` は 0 のまま(`bfm_connect()` などは NULL を返す)。
+* `g_bfm_bf_enable` と `g_bfm.bf_cap` が立っているのに WC で張れなかったときは、注意を表示して BlueFlame なしで動かす(`c->bf = NULL`)。
+|===
+
+.bfm_cm_init() のフロー図
+image::flow_src_bfm_cm__bfm_cm_init.drawio.svg[bfm_cm_init() のフロー図]
+
+.bfm_cm_init() の関係図
+image::call_src_bfm_cm__bfm_cm_init.drawio.svg[bfm_cm_init() の関係図]
+
+[[src_bfm_cm__bfm_cm_fini]]
+=== `bfm_cm_fini()`
+[cols="1,5",options="autowidth"]
+.bfm_cm_fini()
+|===
+|関数名 |`bfm_cm_fini`(`src/bfm_cm.c` 491 行目)
+|宣言 |`void bfm_cm_fini(void)`
+|処理内容 a|接続管理を畳む(`bfm_shutdown()` から呼ばれる)。使っている接続の枠はすべて `bfm_disconnect()` で切断し、write-combining で張った UAR の窓を外して、`s_gsi_ready = 0` にする。
+|引数 |なし
+|戻り値 a|なし
+|前提条件 a|`bfm_cm_init()` の後であること。
+|注意事項 a|GSI の QP や UAR は壊さない(HCA の停止で消える)。切断する接続があれば、それぞれ DREP を最大 1 秒待つ。
+|===
+
+.bfm_cm_fini() のフロー図
+image::flow_src_bfm_cm__bfm_cm_fini.drawio.svg[bfm_cm_fini() のフロー図]
+
+.bfm_cm_fini() の関係図
+image::call_src_bfm_cm__bfm_cm_fini.drawio.svg[bfm_cm_fini() の関係図]
+
+[[src_bfm_cm__bfm_connect]]
+=== `bfm_connect()`
+[cols="1,5",options="autowidth"]
+.bfm_connect()
+|===
+|関数名 |`bfm_connect`(`src/bfm_cm.c` 504 行目)
+|宣言 |`bfm_conn_t *bfm_connect(uint32_t peer_ip, const uint8_t peer_mac[6], uint16_t port, uint32_t timeout_ms)`
+|処理内容 a|相手へ接続を掛ける(掛け側)。接続の枠を取り、相手の IP・MAC・GID・ポート・path_mtu を入れて RC QP を INIT まで作り、comm id とトランザクション ID を乱数で決める。REQ を送り、REP か REJ が来るまで `REQ_RETRY_MS`(2 秒)ごとに最大 `REQ_RETRIES`(4)回まで再送する。REP が来たら相手の comm id・QPN・PSN・同時の read / atomic の数・公開メモリの情報を読み、QP を RTS へ進めて RTU を送り、データ経路に繋いで `BFM_CS_UP` にする。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`peer_ip` !相手の IPv4 アドレス。0 なら `g_bfm_peer_ip` と `g_bfm_peer_mac` を使う
+!`const uint8_t [6]` !`peer_mac` !相手の MAC(6 バイト)。`peer_ip` が 0 なら無視する。NULL なら `g_bfm_peer_mac` を使う
+!`uint16_t` !`port` !相手の待ち受けるポート番号。0 なら `g_bfm_cm_port`
+!`uint32_t` !`timeout_ms` !REP を待つ時間の上限(ミリ秒)。0 なら 10 秒(`(REQ_RETRIES + 1) * REQ_RETRY_MS`)
+!===
+|戻り値 a|接続(`bfm_conn_t *`)。失敗したら NULL(接続管理が用意されていない、相手の IP が無い、枠が無い、QP の失敗、REP が来ない、REJ が来た、REP に公開メモリの情報が無い、送信の失敗)。
+|前提条件 a|`bfm_init()` の後であること。`peer_ip` が 0 でなく `peer_mac` が NULL でなければ、`peer_mac` は 6 バイトを指すこと。
+|注意事項 a|* 相手の MAC は引数(または `g_bfm_peer_mac`)のものを使い、REP の private data の MAC は使わない。
+* REP の private data が bfmem の形(`'BFM1'` / `'RSHT'`)でなければ失敗にする。
+* 失敗したときは相手へ何も送らずに(REJ も DREQ も送らない)枠を返す。
+* path_mtu は `g_bfm_path_mtu` が 1〜5 ならそれ、そうでなければ 3(1024 バイト)。
+|===
+
+.bfm_connect() のフロー図
+image::flow_src_bfm_cm__bfm_connect.drawio.svg[bfm_connect() のフロー図]
+
+.bfm_connect() の関係図
+image::call_src_bfm_cm__bfm_connect.drawio.svg[bfm_connect() の関係図]
+
+[[src_bfm_cm__bfm_accept]]
+=== `bfm_accept()`
+[cols="1,5",options="autowidth"]
+.bfm_accept()
+|===
+|関数名 |`bfm_accept`(`src/bfm_cm.c` 580 行目)
+|宣言 |`bfm_conn_t *bfm_accept(uint16_t port, uint32_t timeout_ms)`
+|処理内容 a|相手からの接続を受ける(受け側)。`gsi_pump()` と `bfm_cm_poll()` を回しながら、`port` 宛ての REQ を待つ。REQ が来たら接続の枠を取り、REQ から tid・相手の comm id・QPN・同時の read / atomic の数・PSN・path_mtu(自分の値と相手の値の小さい方)・GID・IP・公開メモリの情報・MAC を読む。RC QP を作って RTS まで進め、comm id を乱数で決めて REP を送り、データ経路に繋いで `BFM_CS_UP` にする。その後 RTU を最大 `RTU_WAIT_MS`(3 秒)待つ。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint16_t` !`port` !待ち受けるポート番号。0 なら `g_bfm_cm_port`
+!`uint32_t` !`timeout_ms` !REQ を待つ時間の上限(ミリ秒)。0 なら無期限に待つ
+!===
+|戻り値 a|接続(`bfm_conn_t *`)。失敗したら NULL(接続管理が用意されていない、REQ が時間内に来ない、枠が無い、相手の MAC が分からない、QP の失敗、送信の失敗)。
+|前提条件 a|`bfm_init()` の後であること。
+|注意事項 a|* REQ の private data に公開メモリの情報が無ければ、表示だけして相手のメモリに触れない接続(`raddr`・`rlen`・`rkey` が 0)として進める。
+* private data に MAC が無ければ `g_bfm_peer_mac` を使う。それも 0 なら枠を返して NULL を返す(REQ は取り出し済みで、相手へは何も送らない)。
+* RTU が来なくても QP は RTS なので、注意を表示して接続を返す。
+* 待つ間に `bfm_cm_poll()` を呼ぶので、既存の接続への DREQ や REQ の再送もここで処理される。
+|===
+
+.bfm_accept() のフロー図
+image::flow_src_bfm_cm__bfm_accept.drawio.svg[bfm_accept() のフロー図]
+
+.bfm_accept() の関係図
+image::call_src_bfm_cm__bfm_accept.drawio.svg[bfm_accept() の関係図]
+
+[[src_bfm_cm__bfm_disconnect]]
+=== `bfm_disconnect()`
+[cols="1,5",options="autowidth"]
+.bfm_disconnect()
+|===
+|関数名 |`bfm_disconnect`(`src/bfm_cm.c` 647 行目)
+|宣言 |`int bfm_disconnect(bfm_conn_t *c)`
+|処理内容 a|接続を切って枠を返す。接続が `BFM_CS_UP` か `BFM_CS_ERROR` なら、相手へ DREQ(REMOTE_QPN つき、トランザクション ID は乱数)を送り、DREP を最大 `DREP_WAIT_MS`(1 秒)待つ。待つ間に相手からも DREQ が来たら DREP を返して待つのをやめる。最後に `conn_release()` で QP を壊して枠を返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_conn_t *` !`c` !切る接続
+!===
+|戻り値 a|`BFM_OK`: 枠を返した(DREP が来なくても、DREQ を送れなくても)。`BFM_E_PARAM`: `c` が NULL か、既に空いている枠。
+|前提条件 a|`c` は `bfm_connect()` / `bfm_accept()` が返した接続であること。
+|注意事項 a|* 相手が先に切って `BFM_CS_CLOSED` になった接続は、DREQ を送らずに枠だけ返す。
+* DREQ の送信に失敗しても、DREP を待たずに枠を返す。
+* 呼んだ後 `c` は使えない。
+|===
+
+.bfm_disconnect() のフロー図
+image::flow_src_bfm_cm__bfm_disconnect.drawio.svg[bfm_disconnect() のフロー図]
+
+.bfm_disconnect() の関係図
+image::call_src_bfm_cm__bfm_disconnect.drawio.svg[bfm_disconnect() の関係図]
+
+[[src_bfm_cm__bfm_cm_poll]]
+=== `bfm_cm_poll()`
+[cols="1,5",options="autowidth"]
+.bfm_cm_poll()
+|===
+|関数名 |`bfm_cm_poll`(`src/bfm_cm.c` 679 行目)
+|宣言 |`int bfm_cm_poll(void)`
+|処理内容 a|GSI に来た CM のメッセージを処理する。`gsi_pump()` で受け取った後、待ち行列の DREQ をすべて取り出し、宛先の comm id が同じ使用中の接続(作っている途中の `BFM_CS_SETUP` を除く)へ DREP を返して、`BFM_CS_UP` か `BFM_CS_ERROR` なら `BFM_CS_CLOSED` にする。次に、待ち行列に残っている REQ のうち、確立済み(`BFM_CS_UP`)の接続の相手の comm id と GID が同じもの(RTU が落ちたための REQ の再送)には REP を送り直してその REQ を捨てる。最後に古い MAD を捨てる(`pend_age()`)。
+|引数 |なし
+|戻り値 a|処理したメッセージの数(DREP を返した数と REP を送り直した数の和)。接続管理が用意されていなければ 0。
+|前提条件 a|`bfm_init()` と同じタスクから呼ぶこと。
+|注意事項 a|* 相手が切った接続は `BFM_CS_CLOSED` になるだけで枠は返さない。アプリケーションが `bfm_disconnect()` で返すこと(表示もそう促す)。
+* どの接続にも当たらない DREQ は捨てる(DREP を返さない)。
+* 作っている途中の枠(`BFM_CS_SETUP`)は `local_comm_id` がまだ前の値なので、DREQ の宛先として見ない。
+* 新しい接続への REQ は待ち行列に残し、`bfm_accept()` に任せる。
+* `bfm_poll()` と `bfm_accept()` から呼ばれる。
+|===
+
+.bfm_cm_poll() のフロー図
+image::flow_src_bfm_cm__bfm_cm_poll.drawio.svg[bfm_cm_poll() のフロー図]
+
+.bfm_cm_poll() の関係図
+image::call_src_bfm_cm__bfm_cm_poll.drawio.svg[bfm_cm_poll() の関係図]
+
+== `src/bfm_ops.c`
+
+データ経路。相手の公開メモリへの write / read / atomic(CAS・FAA)を、1 個の操作 = 1 個の WQE として出す。WQE は手元の作業域で組み、SQ のリング(ホストメモリ)へ写し、doorbell record を進めてから、同じ WQE を UAR の BlueFlame の窓へ MMIO で書く(`post()`)。窓は write-combining なので 64 バイトが 1 個の PCIe の書き込みにまとまり、NIC はドアベルと一緒に WQE を受け取る。窓は 2 面あり交互に使う。小さい write はデータを WQE に埋め込む(inline)。read と atomic は必ず完了通知(CQE)を求め、32 バイトまでの応答は CQE に入るので CPU がそこから写す。完了は `poll_one()` で CQ から拾い、`wait_done()` で待つ。
+
+[[src_bfm_ops__conn_usable]]
+=== `conn_usable()`
+[cols="1,5",options="autowidth"]
+.conn_usable()
+|===
+|関数名 |`conn_usable`(`src/bfm_ops.c` 25 行目)
+|宣言 |`static inline int conn_usable(const struct bfm_conn *c)`
+|処理内容 a|接続がデータ経路で使えるかを調べる。`c` が NULL でなく、状態が `BFM_CS_UP` であること。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const struct bfm_conn *` !`c` !調べる接続(NULL 可)
+!===
+|戻り値 a|1: 使える。0: 使えない(NULL、または `BFM_CS_UP` でない)。
+|前提条件 a|特になし。
+|注意事項 a|特になし。
+|===
+
+.conn_usable() のフロー図
+image::flow_src_bfm_ops__conn_usable.drawio.svg[conn_usable() のフロー図]
+
+.conn_usable() の関係図
+image::call_src_bfm_ops__conn_usable.drawio.svg[conn_usable() の関係図]
+
+[[src_bfm_ops__map_syndrome]]
+=== `map_syndrome()`
+[cols="1,5",options="autowidth"]
+.map_syndrome()
+|===
+|関数名 |`map_syndrome`(`src/bfm_ops.c` 30 行目)
+|宣言 |`static int map_syndrome(uint8_t synd)`
+|処理内容 a|エラー完了の CQE の syndrome を、ライブラリの戻り値に直す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint8_t` !`synd` !CQE の syndrome(byte 55)
+!===
+|戻り値 a|`BFM_E_REMOTE`: 0x12・0x13・0x14(相手が拒否)。`BFM_E_RETRY`: 0x15・0x16(再送が尽きた)。`BFM_E_CQE`: そのほか。
+|前提条件 a|特になし。
+|注意事項 a|特になし。
+|===
+
+.map_syndrome() のフロー図
+image::flow_src_bfm_ops__map_syndrome.drawio.svg[map_syndrome() のフロー図]
+
+.map_syndrome() の関係図
+image::call_src_bfm_ops__map_syndrome.drawio.svg[map_syndrome() の関係図]
+
+[[src_bfm_ops__syndrome_str]]
+=== `syndrome_str()`
+[cols="1,5",options="autowidth"]
+.syndrome_str()
+|===
+|関数名 |`syndrome_str`(`src/bfm_ops.c` 39 行目)
+|宣言 |`static const char *syndrome_str(uint8_t synd)`
+|処理内容 a|エラー完了の CQE の syndrome を、表示用の名前(と短い説明)に直す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint8_t` !`synd` !CQE の syndrome(byte 55)
+!===
+|戻り値 a|syndrome の名前の文字列(静的な文字列)。知らない値は `"?"`。
+|前提条件 a|特になし。
+|注意事項 a|`poll_one()` がエラー完了を表示するときに使う。
+|===
+
+.syndrome_str() のフロー図
+image::flow_src_bfm_ops__syndrome_str.drawio.svg[syndrome_str() のフロー図]
+
+.syndrome_str() の関係図
+image::call_src_bfm_ops__syndrome_str.drawio.svg[syndrome_str() の関係図]
+
+[[src_bfm_ops__poll_one]]
+=== `poll_one()`
+[cols="1,5",options="autowidth"]
+.poll_one()
+|===
+|関数名 |`poll_one`(`src/bfm_ops.c` 61 行目)
+|宣言 |`static int poll_one(struct bfm_conn *c)`
+|処理内容 a|CQ から CQE を 1 個読む。CQ の消費位置(`cq_cc`)の CQE の owner ビットと opcode を見て、新しい CQE が無ければ 0 を返す。あれば消費位置を進めて CQ の doorbell record に書く。エラー完了なら syndrome を記録し、接続を `BFM_CS_ERROR` にする。正常な完了なら、CQE の WQE カウンタが指す WQE までを済んだ扱いにし(`sq_done` を進める)、応答データを CQE に抱えていればその CQE を `last_scat` に覚える。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct bfm_conn *` !`c` !完了を拾う接続
+!===
+|戻り値 a|1: 正常な完了を 1 個拾った。0: まだ CQE が無い。負: エラー完了(`map_syndrome()` の値。`BFM_E_REMOTE` / `BFM_E_RETRY` / `BFM_E_CQE`)。
+|前提条件 a|`c` の QP・CQ が作られ、`bfm_ops_attach()` 済みであること。
+|注意事項 a|* CQE は投稿の順に来るので、正常な完了 1 個でその WQE までの全部(通知なしで出したものを含む)を済んだ扱いにする。
+* 済んだ位置は、CQE の WQE カウンタ(16 ビット)を `sq_done` の 32 ビットへ広げ、その WQE の大きさ(`wqe_bbs[]`)を足して求める。
+* エラー完了では `sq_done` を進めない。接続が `BFM_CS_UP` のときだけ表示して `BFM_CS_ERROR` にする(2 回目以降は表示しない)。
+* `last_scat` は CQ のリングの中を指すので、次の CQE を拾うまでに読むこと。
+|===
+
+.poll_one() のフロー図
+image::flow_src_bfm_ops__poll_one.drawio.svg[poll_one() のフロー図]
+
+.poll_one() の関係図
+image::call_src_bfm_ops__poll_one.drawio.svg[poll_one() の関係図]
+
+[[src_bfm_ops__wait_done]]
+=== `wait_done()`
+[cols="1,5",options="autowidth"]
+.wait_done()
+|===
+|関数名 |`wait_done`(`src/bfm_ops.c` 89 行目)
+|宣言 |`static int wait_done(struct bfm_conn *c, uint32_t target)`
+|処理内容 a|SQ の位置 `target`(WQEBB の位置)まで済む(`sq_done` が `target` に達する)まで、`poll_one()` で完了を拾い続ける。`g_bfm_op_timeout_ms` を過ぎたら接続をエラーにして時間切れを返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct bfm_conn *` !`c` !待つ接続
+!`uint32_t` !`target` !済むのを待つ SQ の位置(WQEBB 単位。普通は `c->qp.sq_pc`)
+!===
+|戻り値 a|`BFM_OK`: `target` まで済んだ。`BFM_E_TIMEOUT`: 時間切れ。そのほか負: エラー完了(`poll_one()` の値)。
+|前提条件 a|`target` までの WQE の中に、通知を求めた WQE があること(無ければ完了が来ず時間切れになる)。
+|注意事項 a|* 時刻は CQE が無いときの 4096 回に 1 回だけ見る。
+* 時間切れのときは表示して接続を `BFM_CS_ERROR` にする。
+* 位置の比較は 32 ビットの差の符号で行う(周回してもよい)。
+|===
+
+.wait_done() のフロー図
+image::flow_src_bfm_ops__wait_done.drawio.svg[wait_done() のフロー図]
+
+.wait_done() の関係図
+image::call_src_bfm_ops__wait_done.drawio.svg[wait_done() の関係図]
+
+[[src_bfm_ops__post]]
+=== `post()`
+[cols="1,5",options="autowidth"]
+.post()
+|===
+|関数名 |`post`(`src/bfm_ops.c` 110 行目)
+|宣言 |`static int post(struct bfm_conn *c, const uint64_t *w, uint32_t bbs)`
+|処理内容 a|組み終えた WQE(`w`、`bbs` 個の WQEBB)を SQ のリングへ写し、doorbell record を進めて、ドアベルを鳴らす。SQ に空きが無ければ、完了を拾って空くのを待つ。WQE が BlueFlame の窓に収まれば WQE 本体を窓へ書き、収まらない(または BlueFlame が無い)ときは先頭 8 バイトだけを UC のドアベルへ書く。最後に窓の面を切り替える。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct bfm_conn *` !`c` !出す接続
+!`const uint64_t *` !`w` !組み終えた WQE(8 バイト単位の作業域)
+!`uint32_t` !`bbs` !WQE の大きさ(WQEBB = 64 バイトの数)
+!===
+|戻り値 a|`BFM_OK`: 出した。そのほか負: 空きを待つ間の `poll_one()` のエラー完了の値、または `wait_done()` の失敗の値(エラー完了なら `poll_one()` の値、時間切れなら `BFM_E_TIMEOUT`)。
+|前提条件 a|`w` の制御セグメントの WQE の位置が、今の `c->qp.sq_pc` で組まれていること(`build_ctrl()`)。
+|注意事項 a|* 書く順は、リングへ写す → `bfm_dma_wmb()` → doorbell record(`dbr[1]`)→ `bfm_dma_wmb()` → 窓(またはドアベル)→ `bfm_wc_flush()`。
+* 位置ごとの WQE の大きさを `wqe_bbs[]` に覚える(`poll_one()` が済んだ位置を求めるのに使う)。
+* 空きを待つ間の `wait_done()` の失敗は、その戻り値(エラー完了も時間切れも)をそのまま返す。
+|===
+
+.post() のフロー図
+image::flow_src_bfm_ops__post.drawio.svg[post() のフロー図]
+
+.post() の関係図
+image::call_src_bfm_ops__post.drawio.svg[post() の関係図]
+
+[[src_bfm_ops__put32]]
+=== `put32()`
+[cols="1,5",options="autowidth"]
+.put32()
+|===
+|関数名 |`put32`(`src/bfm_ops.c` 148 行目)
+|宣言 |`static inline void put32(uint64_t *w, unsigned byte_off, uint32_t v)`
+|処理内容 a|WQE の作業域の `byte_off` バイト目へ、32 ビットの値をビッグエンディアンで書く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint64_t *` !`w` !WQE の作業域
+!`unsigned` !`byte_off` !書く位置(バイト)
+!`uint32_t` !`v` !書く値(ホスト順)
+!===
+|戻り値 a|なし
+|前提条件 a|`byte_off + 4` が作業域に収まること。
+|注意事項 a|特になし。
+|===
+
+.put32() のフロー図
+image::flow_src_bfm_ops__put32.drawio.svg[put32() のフロー図]
+
+.put32() の関係図
+image::call_src_bfm_ops__put32.drawio.svg[put32() の関係図]
+
+[[src_bfm_ops__put64]]
+=== `put64()`
+[cols="1,5",options="autowidth"]
+.put64()
+|===
+|関数名 |`put64`(`src/bfm_ops.c` 153 行目)
+|宣言 |`static inline void put64(uint64_t *w, unsigned byte_off, uint64_t v)`
+|処理内容 a|WQE の作業域の `byte_off` バイト目へ、64 ビットの値をビッグエンディアンで書く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint64_t *` !`w` !WQE の作業域
+!`unsigned` !`byte_off` !書く位置(バイト)
+!`uint64_t` !`v` !書く値(ホスト順)
+!===
+|戻り値 a|なし
+|前提条件 a|`byte_off + 8` が作業域に収まること。
+|注意事項 a|特になし。
+|===
+
+.put64() のフロー図
+image::flow_src_bfm_ops__put64.drawio.svg[put64() のフロー図]
+
+.put64() の関係図
+image::call_src_bfm_ops__put64.drawio.svg[put64() の関係図]
+
+[[src_bfm_ops__build_ctrl]]
+=== `build_ctrl()`
+[cols="1,5",options="autowidth"]
+.build_ctrl()
+|===
+|関数名 |`build_ctrl`(`src/bfm_ops.c` 159 行目)
+|宣言 |`static void build_ctrl(struct bfm_conn *c, uint64_t *w, uint32_t opcode, uint32_t ds, int signaled)`
+|処理内容 a|WQE の制御セグメント(先頭 16 バイト)を組む。WQE の位置(今の `sq_pc` の下位 16 ビット)と opcode、QP の番号と DS の数、完了通知を求めるか(`MLX5_WQE_CTRL_CQ_UPDATE`)を書く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct bfm_conn *` !`c` !出す接続
+!`uint64_t *` !`w` !WQE の作業域
+!`uint32_t` !`opcode` !WQE の opcode(`MLX5_OPCODE_*`)
+!`uint32_t` !`ds` !WQE の大きさ(16 バイト単位)
+!`int` !`signaled` !0 以外なら完了通知(CQE)を求める
+!===
+|戻り値 a|なし
+|前提条件 a|この WQE を、次に `post()` で出すこと(位置を今の `sq_pc` で書くため)。
+|注意事項 a|特になし。
+|===
+
+.build_ctrl() のフロー図
+image::flow_src_bfm_ops__build_ctrl.drawio.svg[build_ctrl() のフロー図]
+
+.build_ctrl() の関係図
+image::call_src_bfm_ops__build_ctrl.drawio.svg[build_ctrl() の関係図]
+
+[[src_bfm_ops__build_raddr]]
+=== `build_raddr()`
+[cols="1,5",options="autowidth"]
+.build_raddr()
+|===
+|関数名 |`build_raddr`(`src/bfm_ops.c` 167 行目)
+|宣言 |`static void build_raddr(struct bfm_conn *c, uint64_t *w, uint64_t off)`
+|処理内容 a|WQE の remote address セグメント(byte 16〜31)を組む。相手の公開メモリの先頭 + `off` と、相手の rkey を書く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct bfm_conn *` !`c` !出す接続(相手の `raddr` / `rkey` を持つ)
+!`uint64_t *` !`w` !WQE の作業域
+!`uint64_t` !`off` !相手の公開メモリの先頭からのオフセット
+!===
+|戻り値 a|なし
+|前提条件 a|`off` の範囲を `check_range()` で確かめてあること。
+|注意事項 a|特になし。
+|===
+
+.build_raddr() のフロー図
+image::flow_src_bfm_ops__build_raddr.drawio.svg[build_raddr() のフロー図]
+
+.build_raddr() の関係図
+image::call_src_bfm_ops__build_raddr.drawio.svg[build_raddr() の関係図]
+
+[[src_bfm_ops__build_dseg]]
+=== `build_dseg()`
+[cols="1,5",options="autowidth"]
+.build_dseg()
+|===
+|関数名 |`build_dseg`(`src/bfm_ops.c` 174 行目)
+|宣言 |`static void build_dseg(uint64_t *w, unsigned at, uint32_t len, uint64_t addr)`
+|処理内容 a|WQE のデータセグメント(16 バイト)を `at` バイト目に組む。長さ、手元の lkey(`g_bfm.lkey`)、手元のバッファの DMA アドレスを書く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint64_t *` !`w` !WQE の作業域
+!`unsigned` !`at` !データセグメントを置く位置(バイト)
+!`uint32_t` !`len` !データの長さ(バイト)
+!`uint64_t` !`addr` !手元のバッファの DMA アドレス
+!===
+|戻り値 a|なし
+|前提条件 a|`addr` が DMA 領域の中のアドレス(`bfm_dma_addr()` の値)であること。
+|注意事項 a|特になし。
+|===
+
+.build_dseg() のフロー図
+image::flow_src_bfm_ops__build_dseg.drawio.svg[build_dseg() のフロー図]
+
+.build_dseg() の関係図
+image::call_src_bfm_ops__build_dseg.drawio.svg[build_dseg() の関係図]
+
+[[src_bfm_ops__build_write_inline]]
+=== `build_write_inline()`
+[cols="1,5",options="autowidth"]
+.build_write_inline()
+|===
+|関数名 |`build_write_inline`(`src/bfm_ops.c` 182 行目)
+|宣言 |`static uint32_t build_write_inline(struct bfm_conn *c, uint64_t *w, uint64_t off, const void *src, uint32_t len, int signaled)`
+|処理内容 a|データを WQE に埋め込んだ RDMA write の WQE を組む。WQE を 0 で埋め、制御セグメント(`MLX5_OPCODE_RDMA_WRITE`)と remote address セグメントを組み、byte 32 に inline セグメントの頭(`MLX5_INLINE_SEG` OR 長さ)、byte 36 からデータを置く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct bfm_conn *` !`c` !出す接続
+!`uint64_t *` !`w` !WQE の作業域
+!`uint64_t` !`off` !相手の公開メモリの先頭からのオフセット
+!`const void *` !`src` !書くデータ
+!`uint32_t` !`len` !データの長さ(バイト)
+!`int` !`signaled` !0 以外なら完了通知を求める
+!===
+|戻り値 a|WQE の大きさ(WQEBB の数)。
+|前提条件 a|`len` が `INLINE_MAX` 以下であること。
+|注意事項 a|DS の数は 2 + (4 + len + 15) / 16。0 で埋めるのは WQEBB の単位に切り上げた大きさ。
+|===
+
+.build_write_inline() のフロー図
+image::flow_src_bfm_ops__build_write_inline.drawio.svg[build_write_inline() のフロー図]
+
+.build_write_inline() の関係図
+image::call_src_bfm_ops__build_write_inline.drawio.svg[build_write_inline() の関係図]
+
+[[src_bfm_ops__check_range]]
+=== `check_range()`
+[cols="1,5",options="autowidth"]
+.check_range()
+|===
+|関数名 |`check_range`(`src/bfm_ops.c` 194 行目)
+|宣言 |`static int check_range(const struct bfm_conn *c, uint64_t off, uint32_t len)`
+|処理内容 a|操作の前に、接続が使えることと、相手の公開メモリの範囲 [off, off + len) が収まることを確かめる。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const struct bfm_conn *` !`c` !操作する接続(NULL 可)
+!`uint64_t` !`off` !相手の公開メモリの先頭からのオフセット
+!`uint32_t` !`len` !長さ(バイト)
+!===
+|戻り値 a|`BFM_OK`: 使える。`BFM_E_STATE`: 接続が使えない。`BFM_E_PARAM`: 長さが 0、相手の公開メモリが 0、または範囲外。
+|前提条件 a|特になし。
+|注意事項 a|`off + len` のあふれが起きない形で比べる。
+|===
+
+.check_range() のフロー図
+image::flow_src_bfm_ops__check_range.drawio.svg[check_range() のフロー図]
+
+.check_range() の関係図
+image::call_src_bfm_ops__check_range.drawio.svg[check_range() の関係図]
+
+[[src_bfm_ops__bfm_ops_attach]]
+=== `bfm_ops_attach()`
+[cols="1,5",options="autowidth"]
+.bfm_ops_attach()
+|===
+|関数名 |`bfm_ops_attach`(`src/bfm_ops.c` 205 行目)
+|宣言 |`int bfm_ops_attach(struct bfm_conn *c)`
+|処理内容 a|接続ができた後に、データ経路の状態を初期化する。QP の番号を 8 ビットずらした値(`qpn8`)を求め、済んだ位置を今の SQ の位置に合わせ、通知なしの数・窓の面・記録した syndrome・`last_scat` を 0 にする。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct bfm_conn *` !`c` !接続ができた接続
+!===
+|戻り値 a|`BFM_OK`(常に)。
+|前提条件 a|`c` の QP が作られ、`c->qp.qpn` と `c->qp.sq_pc` が正しいこと。
+|注意事項 a|接続管理(`bfm_connect()` / `bfm_accept()`)が呼ぶ。
+|===
+
+.bfm_ops_attach() のフロー図
+image::flow_src_bfm_ops__bfm_ops_attach.drawio.svg[bfm_ops_attach() のフロー図]
+
+.bfm_ops_attach() の関係図
+image::call_src_bfm_ops__bfm_ops_attach.drawio.svg[bfm_ops_attach() の関係図]
+
+[[src_bfm_ops__bfm_ops_detach]]
+=== `bfm_ops_detach()`
+[cols="1,5",options="autowidth"]
+.bfm_ops_detach()
+|===
+|関数名 |`bfm_ops_detach`(`src/bfm_ops.c` 216 行目)
+|宣言 |`void bfm_ops_detach(struct bfm_conn *c)`
+|処理内容 a|接続を返すときに、データ経路の状態を片付ける(`last_scat` を NULL にする)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct bfm_conn *` !`c` !返す接続
+!===
+|戻り値 a|なし
+|前提条件 a|特になし。
+|注意事項 a|接続管理(`conn_release()`)が呼ぶ。
+|===
+
+.bfm_ops_detach() のフロー図
+image::flow_src_bfm_ops__bfm_ops_detach.drawio.svg[bfm_ops_detach() のフロー図]
+
+.bfm_ops_detach() の関係図
+image::call_src_bfm_ops__bfm_ops_detach.drawio.svg[bfm_ops_detach() の関係図]
+
+[[src_bfm_ops__bfm_conn_mark_error]]
+=== `bfm_conn_mark_error()`
+[cols="1,5",options="autowidth"]
+.bfm_conn_mark_error()
+|===
+|関数名 |`bfm_conn_mark_error`(`src/bfm_ops.c` 222 行目)
+|宣言 |`void bfm_conn_mark_error(uint32_t qpn, const char *why)`
+|処理内容 a|EQ のイベントで QP のエラーを知ったときに、その QP を使っている接続を探し、使えている(`BFM_CS_UP`)ものを表示して `BFM_CS_ERROR` にする。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`qpn` !エラーになった QP の番号
+!`const char *` !`why` !表示する理由
+!===
+|戻り値 a|なし
+|前提条件 a|特になし。
+|注意事項 a|`mlx5_eq_poll()` が呼ぶ。`BFM_CS_UP` でない接続と QP を作っていない接続は変えない。
+|===
+
+.bfm_conn_mark_error() のフロー図
+image::flow_src_bfm_ops__bfm_conn_mark_error.drawio.svg[bfm_conn_mark_error() のフロー図]
+
+.bfm_conn_mark_error() の関係図
+image::call_src_bfm_ops__bfm_conn_mark_error.drawio.svg[bfm_conn_mark_error() の関係図]
+
+[[src_bfm_ops__bfm_ops_post_rw]]
+=== `bfm_ops_post_rw()`
+[cols="1,5",options="autowidth"]
+.bfm_ops_post_rw()
+|===
+|関数名 |`bfm_ops_post_rw`(`src/bfm_ops.c` 240 行目)
+|宣言 |`int bfm_ops_post_rw(struct bfm_conn *c, int is_read, uint64_t off, uint32_t stage_off, const void *src, uint32_t len)`
+|処理内容 a|性能の試験用(試験プログラムの bench が使う)。write か read を、完了を待たずに 1 個出す。完了通知は必ず求めるので、完了は `bfm_ops_poll1()` で 1 個ずつ、出した順に拾える。write で `len` が `INLINE_MAX` 以下ならデータを WQE に埋め込み、そうでなければ中継バッファの `stage_off` から送る。read は中継バッファの `stage_off` へ読む。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct bfm_conn *` !`c` !出す接続
+!`int` !`is_read` !0: write。0 以外: read
+!`uint64_t` !`off` !相手の公開メモリの先頭からのオフセット
+!`uint32_t` !`stage_off` !中継バッファの中の位置(バイト)
+!`const void *` !`src` !inline の write で埋め込むデータ
+!`uint32_t` !`len` !長さ(バイト)
+!===
+|戻り値 a|`BFM_OK`: 出した。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗、または(inline でない write と read で)`stage_off + len` が中継バッファを超える。そのほか `post()` の戻り値。
+|前提条件 a|SQ に積む数を、試験側が `bfm_ops_poll1()` で拾える数に抑えること。
+|注意事項 a|* 中継バッファから送る write では、中身は呼び出し側が置く(この関数は `src` を写さない)。
+* inline の write は中継バッファを使わないので、`stage_off` を見ない(`stage_off + len` の検査は inline でない write と read だけに掛かる)。
+* read の応答が CQE に入った(32 バイトまで)ときは、中継バッファには書かれない。
+|===
+
+.bfm_ops_post_rw() のフロー図
+image::flow_src_bfm_ops__bfm_ops_post_rw.drawio.svg[bfm_ops_post_rw() のフロー図]
+
+.bfm_ops_post_rw() の関係図
+image::call_src_bfm_ops__bfm_ops_post_rw.drawio.svg[bfm_ops_post_rw() の関係図]
+
+[[src_bfm_ops__bfm_ops_poll1]]
+=== `bfm_ops_poll1()`
+[cols="1,5",options="autowidth"]
+.bfm_ops_poll1()
+|===
+|関数名 |`bfm_ops_poll1`(`src/bfm_ops.c` 257 行目)
+|宣言 |`int bfm_ops_poll1(struct bfm_conn *c)`
+|処理内容 a|性能の試験用(試験プログラムの bench が使う)。完了を 1 個拾う(`poll_one()` をそのまま呼ぶ)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct bfm_conn *` !`c` !完了を拾う接続
+!===
+|戻り値 a|1: 拾った。0: まだ無い。負: エラー完了(`poll_one()` の値)。
+|前提条件 a|`bfm_ops_post_rw()` で出した操作があること。
+|注意事項 a|特になし。
+|===
+
+.bfm_ops_poll1() のフロー図
+image::flow_src_bfm_ops__bfm_ops_poll1.drawio.svg[bfm_ops_poll1() のフロー図]
+
+.bfm_ops_poll1() の関係図
+image::call_src_bfm_ops__bfm_ops_poll1.drawio.svg[bfm_ops_poll1() の関係図]
+
+[[src_bfm_ops__bfm_write]]
+=== `bfm_write()`
+[cols="1,5",options="autowidth"]
+.bfm_write()
+|===
+|関数名 |`bfm_write`(`src/bfm_ops.c` 262 行目)
+|宣言 |`int bfm_write(bfm_conn_t *c, uint64_t off, const void *src, uint32_t len)`
+|処理内容 a|相手の公開メモリ + `off` へ `len` バイト書き、相手の NIC が受け取った(完了が返った)ところで戻る。`INLINE_MAX` バイトまではデータを WQE に埋め込んで 1 個の WQE で出す。それより長いものは、中継バッファの大きさずつ中継バッファへ写して RDMA write で送り、1 回ごとに完了を待つ。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_conn_t *` !`c` !書く接続
+!`uint64_t` !`off` !相手の公開メモリの先頭からのオフセット
+!`const void *` !`src` !書くデータ
+!`uint32_t` !`len` !長さ(バイト)
+!===
+|戻り値 a|`BFM_OK`: 書けた。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗。そのほか `post()` / `wait_done()` の戻り値(`BFM_E_TIMEOUT`、エラー完了の値)。
+|前提条件 a|`bfm_connect()` / `bfm_accept()` で得た接続であること。同じ接続を複数のタスクから同時に使わないこと。
+|注意事項 a|* 長いものを分けて送る途中で失敗すると、それまでの分は相手に書かれている。
+* 中継バッファへ写した後に `bfm_port_cache_flush()` でキャッシュを書き戻す。
+|===
+
+.bfm_write() のフロー図
+image::flow_src_bfm_ops__bfm_write.drawio.svg[bfm_write() のフロー図]
+
+.bfm_write() の関係図
+image::call_src_bfm_ops__bfm_write.drawio.svg[bfm_write() の関係図]
+
+[[src_bfm_ops__bfm_write_post]]
+=== `bfm_write_post()`
+[cols="1,5",options="autowidth"]
+.bfm_write_post()
+|===
+|関数名 |`bfm_write_post`(`src/bfm_ops.c` 290 行目)
+|宣言 |`int bfm_write_post(bfm_conn_t *c, uint64_t off, const void *src, uint32_t len)`
+|処理内容 a|データを WQE に埋め込んだ write を、完了を待たずに出す。通知なしが `g_bfm_signal_every` 個続いたとき、または SQ に積んだ量が半分を超えたときだけ完了通知を求める。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_conn_t *` !`c` !書く接続
+!`uint64_t` !`off` !相手の公開メモリの先頭からのオフセット
+!`const void *` !`src` !書くデータ
+!`uint32_t` !`len` !長さ(バイト。`bfm_inline_max()` 以下)
+!===
+|戻り値 a|`BFM_OK`: 出した。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗、または `len` が `INLINE_MAX` を超える。そのほか `post()` の戻り値。
+|前提条件 a|`bfm_write()` と同じ。
+|注意事項 a|* 終わるのを待つには `bfm_flush()` を呼ぶこと。
+* 送る順に相手のメモリへ届く(RC の順序保証)。
+* 通知を挟むのは、通知なしが続きすぎると SQ の空き(`sq_done`)が分からなくなるため。
+|===
+
+.bfm_write_post() のフロー図
+image::flow_src_bfm_ops__bfm_write_post.drawio.svg[bfm_write_post() のフロー図]
+
+.bfm_write_post() の関係図
+image::call_src_bfm_ops__bfm_write_post.drawio.svg[bfm_write_post() の関係図]
+
+[[src_bfm_ops__bfm_flush]]
+=== `bfm_flush()`
+[cols="1,5",options="autowidth"]
+.bfm_flush()
+|===
+|関数名 |`bfm_flush`(`src/bfm_ops.c` 304 行目)
+|宣言 |`int bfm_flush(bfm_conn_t *c)`
+|処理内容 a|`bfm_write_post()` で出したものが全部終わるまで待つ。最後に出したものが通知なしなら、通知を求める NOP を足して出し、その完了を待つ(完了は投稿の順なので、NOP の完了 = それまでの write が全部相手に受け取られた)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_conn_t *` !`c` !待つ接続
+!===
+|戻り値 a|`BFM_OK`: 全部終わった(出したものが無いときも)。`BFM_E_STATE`: 接続が使えない。そのほか `post()` / `wait_done()` の戻り値。
+|前提条件 a|`bfm_write()` と同じ。
+|注意事項 a|特になし。
+|===
+
+.bfm_flush() のフロー図
+image::flow_src_bfm_ops__bfm_flush.drawio.svg[bfm_flush() のフロー図]
+
+.bfm_flush() の関係図
+image::call_src_bfm_ops__bfm_flush.drawio.svg[bfm_flush() の関係図]
+
+[[src_bfm_ops__bfm_read]]
+=== `bfm_read()`
+[cols="1,5",options="autowidth"]
+.bfm_read()
+|===
+|関数名 |`bfm_read`(`src/bfm_ops.c` 320 行目)
+|宣言 |`int bfm_read(bfm_conn_t *c, uint64_t off, void *dst, uint32_t len)`
+|処理内容 a|相手の公開メモリ + `off` から `len` バイト読む。中継バッファの大きさずつ RDMA read を出して完了を待ち、応答が CQE に入っていて 32 バイト以下ならその CQE から、そうでなければ中継バッファから `dst` へ写す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_conn_t *` !`c` !読む接続
+!`uint64_t` !`off` !相手の公開メモリの先頭からのオフセット
+!`void *` !`dst` !読んだデータを置く先
+!`uint32_t` !`len` !長さ(バイト)
+!===
+|戻り値 a|`BFM_OK`: 読めた。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗。そのほか `post()` / `wait_done()` の戻り値。
+|前提条件 a|`bfm_write()` と同じ。
+|注意事項 a|* 途中で失敗すると、`dst` にはそれまでの分だけが入っている。
+* 中継バッファから写す前に `bfm_port_cache_inval()` でキャッシュを捨てる。
+|===
+
+.bfm_read() のフロー図
+image::flow_src_bfm_ops__bfm_read.drawio.svg[bfm_read() のフロー図]
+
+.bfm_read() の関係図
+image::call_src_bfm_ops__bfm_read.drawio.svg[bfm_read() の関係図]
+
+[[src_bfm_ops__atomic_result]]
+=== `atomic_result()`
+[cols="1,5",options="autowidth"]
+.atomic_result()
+|===
+|関数名 |`atomic_result`(`src/bfm_ops.c` 351 行目)
+|宣言 |`static uint64_t atomic_result(struct bfm_conn *c)`
+|処理内容 a|atomic の元の値(8 バイト)を数にする。応答が CQE に入っていればそこから読み、ビッグエンディアンとして直す。そうでなければ中継バッファから読み、HCA がホスト順の設定(`g_bfm.atomic_host_order`)ならそのまま、そうでなければビッグエンディアンとして直す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct bfm_conn *` !`c` !atomic を終えた接続
+!===
+|戻り値 a|atomic の元の値(ホスト順)。
+|前提条件 a|`c` の直前の完了が、この atomic の完了であること。
+|注意事項 a|CQE に入って返った値は、HCA の設定によらずビッグエンディアン(ConnectX-4 Lx で確認)。メモリへ書かれた値は、HCA がホスト順の設定ならホスト順、そうでなければビッグエンディアン。
+|===
+
+.atomic_result() のフロー図
+image::flow_src_bfm_ops__atomic_result.drawio.svg[atomic_result() のフロー図]
+
+.atomic_result() の関係図
+image::call_src_bfm_ops__atomic_result.drawio.svg[atomic_result() の関係図]
+
+[[src_bfm_ops__atomic_op]]
+=== `atomic_op()`
+[cols="1,5",options="autowidth"]
+.atomic_op()
+|===
+|関数名 |`atomic_op`(`src/bfm_ops.c` 368 行目)
+|宣言 |`static int atomic_op(struct bfm_conn *c, uint32_t opcode, uint64_t off, uint64_t swap_add, uint64_t cmp, uint64_t *old)`
+|処理内容 a|8 バイトの atomic(CAS・FAA)を 1 個出して完了を待ち、元の値を `*old` に返す。WQE は制御セグメント・remote address セグメント・atomic セグメント(byte 32 に `swap_add`、byte 40 に `cmp`)・元の値を受けるデータセグメント(中継バッファ)の 64 バイト。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct bfm_conn *` !`c` !操作する接続
+!`uint32_t` !`opcode` !`MLX5_OPCODE_ATOMIC_CS` か `MLX5_OPCODE_ATOMIC_FA`
+!`uint64_t` !`off` !相手の公開メモリの先頭からのオフセット
+!`uint64_t` !`swap_add` !CAS なら置き換える値、FAA なら足す値
+!`uint64_t` !`cmp` !CAS なら比べる値(FAA では 0)
+!`uint64_t *` !`old` !元の値を入れる先(NULL なら返さない)
+!===
+|戻り値 a|`BFM_OK`: 終わった。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗、または相手のアドレス(`raddr + off`)が 8 の倍数でない。そのほか `post()` / `wait_done()` の戻り値。
+|前提条件 a|`bfm_write()` と同じ。
+|注意事項 a|失敗したときは `*old` を書かない。
+|===
+
+.atomic_op() のフロー図
+image::flow_src_bfm_ops__atomic_op.drawio.svg[atomic_op() のフロー図]
+
+.atomic_op() の関係図
+image::call_src_bfm_ops__atomic_op.drawio.svg[atomic_op() の関係図]
+
+[[src_bfm_ops__bfm_cas]]
+=== `bfm_cas()`
+[cols="1,5",options="autowidth"]
+.bfm_cas()
+|===
+|関数名 |`bfm_cas`(`src/bfm_ops.c` 387 行目)
+|宣言 |`int bfm_cas(bfm_conn_t *c, uint64_t off, uint64_t expect, uint64_t desired, uint64_t *old)`
+|処理内容 a|相手の公開メモリ + `off` の 8 バイトに compare-and-swap を行う。値が `expect` なら `desired` に置き換え、元の値を `*old` に返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_conn_t *` !`c` !操作する接続
+!`uint64_t` !`off` !相手の公開メモリの先頭からのオフセット(8 の倍数)
+!`uint64_t` !`expect` !比べる値
+!`uint64_t` !`desired` !置き換える値
+!`uint64_t *` !`old` !元の値を入れる先(NULL なら返さない)
+!===
+|戻り値 a|`atomic_op()` の戻り値。
+|前提条件 a|`bfm_write()` と同じ。
+|注意事項 a|`*old == expect` なら置き換わった。
+|===
+
+.bfm_cas() のフロー図
+image::flow_src_bfm_ops__bfm_cas.drawio.svg[bfm_cas() のフロー図]
+
+.bfm_cas() の関係図
+image::call_src_bfm_ops__bfm_cas.drawio.svg[bfm_cas() の関係図]
+
+[[src_bfm_ops__bfm_faa]]
+=== `bfm_faa()`
+[cols="1,5",options="autowidth"]
+.bfm_faa()
+|===
+|関数名 |`bfm_faa`(`src/bfm_ops.c` 392 行目)
+|宣言 |`int bfm_faa(bfm_conn_t *c, uint64_t off, uint64_t add, uint64_t *old)`
+|処理内容 a|相手の公開メモリ + `off` の 8 バイトに fetch-and-add を行い、足す前の値を `*old` に返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_conn_t *` !`c` !操作する接続
+!`uint64_t` !`off` !相手の公開メモリの先頭からのオフセット(8 の倍数)
+!`uint64_t` !`add` !足す値
+!`uint64_t *` !`old` !足す前の値を入れる先(NULL なら返さない)
+!===
+|戻り値 a|`atomic_op()` の戻り値。
+|前提条件 a|`bfm_write()` と同じ。
+|注意事項 a|特になし。
+|===
+
+.bfm_faa() のフロー図
+image::flow_src_bfm_ops__bfm_faa.drawio.svg[bfm_faa() のフロー図]
+
+.bfm_faa() の関係図
+image::call_src_bfm_ops__bfm_faa.drawio.svg[bfm_faa() の関係図]
+
+[[src_bfm_ops__bfm_inline_max]]
+=== `bfm_inline_max()`
+[cols="1,5",options="autowidth"]
+.bfm_inline_max()
+|===
+|関数名 |`bfm_inline_max`(`src/bfm_ops.c` 397 行目)
+|宣言 |`uint32_t bfm_inline_max(void)`
+|処理内容 a|WQE に埋め込める write の最大バイト数(`INLINE_MAX` = `BFM_WQE_MAX` - 32 - 4)を返す。
+|引数 |なし
+|戻り値 a|`INLINE_MAX`(`BFM_WQE_MAX` が 256 なら 220)。
+|前提条件 a|特になし。
+|注意事項 a|特になし。
+|===
+
+.bfm_inline_max() のフロー図
+image::flow_src_bfm_ops__bfm_inline_max.drawio.svg[bfm_inline_max() のフロー図]
+
+.bfm_inline_max() の関係図
+image::call_src_bfm_ops__bfm_inline_max.drawio.svg[bfm_inline_max() の関係図]
+
+[[src_bfm_ops__bfm_bf_active]]
+=== `bfm_bf_active()`
+[cols="1,5",options="autowidth"]
+.bfm_bf_active()
+|===
+|関数名 |`bfm_bf_active`(`src/bfm_ops.c` 402 行目)
+|宣言 |`int bfm_bf_active(const bfm_conn_t *c)`
+|処理内容 a|接続が BlueFlame で WQE を送っている(WC の窓が取れた)かを返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const bfm_conn_t *` !`c` !調べる接続(NULL 可)
+!===
+|戻り値 a|1: BlueFlame を使っている。0: 使っていない、または `c` が NULL。
+|前提条件 a|特になし。
+|注意事項 a|特になし。
+|===
+
+.bfm_bf_active() のフロー図
+image::flow_src_bfm_ops__bfm_bf_active.drawio.svg[bfm_bf_active() のフロー図]
+
+.bfm_bf_active() の関係図
+image::call_src_bfm_ops__bfm_bf_active.drawio.svg[bfm_bf_active() の関係図]
+
+[[src_bfm_ops__bfm_is_up]]
+=== `bfm_is_up()`
+[cols="1,5",options="autowidth"]
+.bfm_is_up()
+|===
+|関数名 |`bfm_is_up`(`src/bfm_ops.c` 407 行目)
+|宣言 |`int bfm_is_up(const bfm_conn_t *c)`
+|処理内容 a|接続が使えるかを返す(`conn_usable()`)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const bfm_conn_t *` !`c` !調べる接続(NULL 可)
+!===
+|戻り値 a|1: 使える。0: エラーか相手から切断された、または `c` が NULL。
+|前提条件 a|特になし。
+|注意事項 a|0 になった接続は `bfm_disconnect()` で返すこと。
+|===
+
+.bfm_is_up() のフロー図
+image::flow_src_bfm_ops__bfm_is_up.drawio.svg[bfm_is_up() のフロー図]
+
+.bfm_is_up() の関係図
+image::call_src_bfm_ops__bfm_is_up.drawio.svg[bfm_is_up() の関係図]
+
+[[src_bfm_ops__bfm_remote_size]]
+=== `bfm_remote_size()`
+[cols="1,5",options="autowidth"]
+.bfm_remote_size()
+|===
+|関数名 |`bfm_remote_size`(`src/bfm_ops.c` 412 行目)
+|宣言 |`uint64_t bfm_remote_size(const bfm_conn_t *c)`
+|処理内容 a|相手の公開メモリの大きさ(`off` の上限)を返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const bfm_conn_t *` !`c` !調べる接続(NULL 可)
+!===
+|戻り値 a|相手の公開メモリの大きさ(バイト)。`c` が NULL なら 0。
+|前提条件 a|特になし。
+|注意事項 a|特になし。
+|===
+
+.bfm_remote_size() のフロー図
+image::flow_src_bfm_ops__bfm_remote_size.drawio.svg[bfm_remote_size() のフロー図]
+
+.bfm_remote_size() の関係図
+image::call_src_bfm_ops__bfm_remote_size.drawio.svg[bfm_remote_size() の関係図]
+
+[[src_bfm_ops__bfm_last_syndrome]]
+=== `bfm_last_syndrome()`
+[cols="1,5",options="autowidth"]
+.bfm_last_syndrome()
+|===
+|関数名 |`bfm_last_syndrome`(`src/bfm_ops.c` 417 行目)
+|宣言 |`uint8_t bfm_last_syndrome(const bfm_conn_t *c)`
+|処理内容 a|直前のエラー完了の syndrome を返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const bfm_conn_t *` !`c` !調べる接続(NULL 可)
+!===
+|戻り値 a|直前のエラー完了の syndrome(0 = なし)。`c` が NULL なら 0。
+|前提条件 a|特になし。
+|注意事項 a|値は `bfm_ops_attach()` で 0 に戻る。
+|===
+
+.bfm_last_syndrome() のフロー図
+image::flow_src_bfm_ops__bfm_last_syndrome.drawio.svg[bfm_last_syndrome() のフロー図]
+
+.bfm_last_syndrome() の関係図
+image::call_src_bfm_ops__bfm_last_syndrome.drawio.svg[bfm_last_syndrome() の関係図]
+
+[[src_bfm_ops__bfm_strerror]]
+=== `bfm_strerror()`
+[cols="1,5",options="autowidth"]
+.bfm_strerror()
+|===
+|関数名 |`bfm_strerror`(`src/bfm_ops.c` 422 行目)
+|宣言 |`const char *bfm_strerror(int rc)`
+|処理内容 a|ライブラリの戻り値を、表示用の説明の文字列に直す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`int` !`rc` !ライブラリの戻り値(`BFM_OK` / `BFM_E_*`)
+!===
+|戻り値 a|説明の文字列(静的な文字列)。知らない値は `"?"`。
+|前提条件 a|特になし。
+|注意事項 a|特になし。
+|===
+
+.bfm_strerror() のフロー図
+image::flow_src_bfm_ops__bfm_strerror.drawio.svg[bfm_strerror() のフロー図]
+
+.bfm_strerror() の関係図
+image::call_src_bfm_ops__bfm_strerror.drawio.svg[bfm_strerror() の関係図]
+
+== `port/linux_vfio/port_linux.c`
+
+移植層の Linux 版(x86-64 Linux + VFIO の試験環境)。装置を VFIO で掴み、DMA 領域と公開メモリを `g_bfm_dma_base` / `g_bfm_mr_base` の仮想アドレスにそのまま張って、同じ値を IOVA にして `VFIO_IOMMU_MAP_DMA` する(VxWorks の「論理アドレス = 物理アドレス」を真似る)。BAR0 は VFIO の fd ではなく sysfs の `resource0` から UC で張り、BlueFlame に使う UAR のページだけを、窓を「前 / そのページ / 後」の mmap に張り直してから `resource0_wc` で write-combining に張り替える。UC の窓を作っている mmap の一覧を静的配列 `s_seg`(最大 `SEG_MAX` = 32 個)で持つ。
+
+[[port_linux_vfio_port_linux__bfm_port_log]]
+=== `bfm_port_log()`
+[cols="1,5",options="autowidth"]
+.bfm_port_log()
+|===
+|関数名 |`bfm_port_log`(`port/linux_vfio/port_linux.c` 52 行目)
+|宣言 |`void bfm_port_log(const char *fmt, ...)`
+|処理内容 a|`printf` と同じ書式で標準出力に表示し、すぐに `fflush` する。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const char *` !`fmt` !`printf` と同じ書式の文字列
+!`...` !`...` !書式に対応する値
+!===
+|戻り値 a|なし
+|前提条件 a|特になし。
+|注意事項 a|特になし。
+|===
+
+.bfm_port_log() のフロー図
+image::flow_port_linux_vfio_port_linux__bfm_port_log.drawio.svg[bfm_port_log() のフロー図]
+
+.bfm_port_log() の関係図
+image::call_port_linux_vfio_port_linux__bfm_port_log.drawio.svg[bfm_port_log() の関係図]
+
+[[port_linux_vfio_port_linux__bfm_port_time_ns]]
+=== `bfm_port_time_ns()`
+[cols="1,5",options="autowidth"]
+.bfm_port_time_ns()
+|===
+|関数名 |`bfm_port_time_ns`(`port/linux_vfio/port_linux.c` 61 行目)
+|宣言 |`uint64_t bfm_port_time_ns(void)`
+|処理内容 a|`clock_gettime(CLOCK_MONOTONIC)` で単調に増える時刻をナノ秒で返す。
+|引数 |なし
+|戻り値 a|時刻(ナノ秒)。
+|前提条件 a|特になし。
+|注意事項 a|時間切れの判定に使う。
+|===
+
+.bfm_port_time_ns() のフロー図
+image::flow_port_linux_vfio_port_linux__bfm_port_time_ns.drawio.svg[bfm_port_time_ns() のフロー図]
+
+.bfm_port_time_ns() の関係図
+image::call_port_linux_vfio_port_linux__bfm_port_time_ns.drawio.svg[bfm_port_time_ns() の関係図]
+
+[[port_linux_vfio_port_linux__bfm_port_delay_us]]
+=== `bfm_port_delay_us()`
+[cols="1,5",options="autowidth"]
+.bfm_port_delay_us()
+|===
+|関数名 |`bfm_port_delay_us`(`port/linux_vfio/port_linux.c` 68 行目)
+|宣言 |`void bfm_port_delay_us(uint32_t us)`
+|処理内容 a|`nanosleep` で `us` マイクロ秒待つ。シグナルで起こされたら残りの時間を眠り直す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`us` !待つ時間(マイクロ秒)
+!===
+|戻り値 a|なし
+|前提条件 a|特になし。
+|注意事項 a|`EINTR` 以外の失敗では、残りを待たずに戻る。
+|===
+
+.bfm_port_delay_us() のフロー図
+image::flow_port_linux_vfio_port_linux__bfm_port_delay_us.drawio.svg[bfm_port_delay_us() のフロー図]
+
+.bfm_port_delay_us() の関係図
+image::call_port_linux_vfio_port_linux__bfm_port_delay_us.drawio.svg[bfm_port_delay_us() の関係図]
+
+[[port_linux_vfio_port_linux__bfm_port_cache_flush]]
+=== `bfm_port_cache_flush()`
+[cols="1,5",options="autowidth"]
+.bfm_port_cache_flush()
+|===
+|関数名 |`bfm_port_cache_flush`(`port/linux_vfio/port_linux.c` 76 行目)
+|宣言 |`void bfm_port_cache_flush(const volatile void *p, size_t len)`
+|処理内容 a|CPU が書いたものを NIC が読む前のキャッシュの操作。x86 は NIC と CPU のキャッシュが一貫しているので何もしない。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const volatile void *` !`p` !範囲の先頭(使わない)
+!`size_t` !`len` !範囲の大きさ(バイト。使わない)
+!===
+|戻り値 a|なし
+|前提条件 a|特になし。
+|注意事項 a|特になし。
+|===
+
+.bfm_port_cache_flush() のフロー図
+image::flow_port_linux_vfio_port_linux__bfm_port_cache_flush.drawio.svg[bfm_port_cache_flush() のフロー図]
+
+.bfm_port_cache_flush() の関係図
+image::call_port_linux_vfio_port_linux__bfm_port_cache_flush.drawio.svg[bfm_port_cache_flush() の関係図]
+
+[[port_linux_vfio_port_linux__bfm_port_cache_inval]]
+=== `bfm_port_cache_inval()`
+[cols="1,5",options="autowidth"]
+.bfm_port_cache_inval()
+|===
+|関数名 |`bfm_port_cache_inval`(`port/linux_vfio/port_linux.c` 77 行目)
+|宣言 |`void bfm_port_cache_inval(const volatile void *p, size_t len)`
+|処理内容 a|NIC が書いたものを CPU が読む前のキャッシュの操作。x86 は NIC と CPU のキャッシュが一貫しているので何もしない。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const volatile void *` !`p` !範囲の先頭(使わない)
+!`size_t` !`len` !範囲の大きさ(バイト。使わない)
+!===
+|戻り値 a|なし
+|前提条件 a|特になし。
+|注意事項 a|特になし。
+|===
+
+.bfm_port_cache_inval() のフロー図
+image::flow_port_linux_vfio_port_linux__bfm_port_cache_inval.drawio.svg[bfm_port_cache_inval() のフロー図]
+
+.bfm_port_cache_inval() の関係図
+image::call_port_linux_vfio_port_linux__bfm_port_cache_inval.drawio.svg[bfm_port_cache_inval() の関係図]
+
+[[port_linux_vfio_port_linux__vfio_open_device]]
+=== `vfio_open_device()`
+[cols="1,5",options="autowidth"]
+.vfio_open_device()
+|===
+|関数名 |`vfio_open_device`(`port/linux_vfio/port_linux.c` 83 行目)
+|宣言 |`static int vfio_open_device(const char *bdf)`
+|処理内容 a|PCI アドレス `bdf` の装置を VFIO で掴む。sysfs の `iommu_group` からグループ番号を読み、`/dev/vfio/vfio`(コンテナ)と `/dev/vfio/<グループ>` を開いて Type1 IOMMU を設定し、装置の fd を取る。あわせて設定空間と BAR0 の領域の位置(`s_cfg_off`・`s_bar0_vfio_off`)と BAR0 の大きさ(`s_bar0_size`)を読む。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const char *` !`bdf` !装置の PCI アドレス(`"0000:01:00.0"` の形)
+!===
+|戻り値 a|0: 成功。-1: 失敗(多くの場合、理由を表示する)。
+|前提条件 a|装置(と同じ IOMMU グループの装置全部)を vfio-pci に結びつけてあること。IOMMU が有効なこと。
+|注意事項 a|* 失敗しても、それまでに開いた fd(`s_container` / `s_group` / `s_device`)は閉じない。呼び出し側(`bfm_port_init()`)が `bfm_port_fini()` で閉じる。
+* 領域の情報(`VFIO_DEVICE_GET_REGION_INFO`)が取れないときは表示せずに -1 を返す。
+|===
+
+.vfio_open_device() のフロー図
+image::flow_port_linux_vfio_port_linux__vfio_open_device.drawio.svg[vfio_open_device() のフロー図]
+
+.vfio_open_device() の関係図
+image::call_port_linux_vfio_port_linux__vfio_open_device.drawio.svg[vfio_open_device() の関係図]
+
+[[port_linux_vfio_port_linux__map_region]]
+=== `map_region()`
+[cols="1,5",options="autowidth"]
+.map_region()
+|===
+|関数名 |`map_region`(`port/linux_vfio/port_linux.c` 137 行目)
+|宣言 |`static void *map_region(uint64_t va, uint64_t size, const char *what)`
+|処理内容 a|仮想アドレス `va` の位置に `size` バイトの無名メモリを張り(`va` と `size` が 2MiB の境界・倍数なら hugepage を先に試す)、同じ値を IOVA にして `VFIO_IOMMU_MAP_DMA` で NIC から見えるようにする。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint64_t` !`va` !張る位置(仮想アドレス = IOVA)
+!`uint64_t` !`size` !大きさ(バイト)
+!`const char *` !`what` !表示に使う名前(「DMA 領域」など)
+!===
+|戻り値 a|張った先頭(= `va`)。失敗したら NULL(理由を表示する)。
+|前提条件 a|`vfio_open_device()` でコンテナ(`s_container`)を設定してあること。
+|注意事項 a|* `MAP_FIXED_NOREPLACE` で張るので、`va` の位置に既に何か張られていると失敗する(表示で `g_bfm_*_base` を変えるよう促す)。
+* `MAP_POPULATE` で張るときに実体を確保する。
+* 失敗したときは自分で張ったメモリを外してから戻る。
+|===
+
+.map_region() のフロー図
+image::flow_port_linux_vfio_port_linux__map_region.drawio.svg[map_region() のフロー図]
+
+.map_region() の関係図
+image::call_port_linux_vfio_port_linux__map_region.drawio.svg[map_region() の関係図]
+
+[[port_linux_vfio_port_linux__bfm_port_init]]
+=== `bfm_port_init()`
+[cols="1,5",options="autowidth"]
+.bfm_port_init()
+|===
+|関数名 |`bfm_port_init`(`port/linux_vfio/port_linux.c` 165 行目)
+|宣言 |`int bfm_port_init(void)`
+|処理内容 a|移植層を立ち上げる。`g_bfm_linux_pci_bdf` の装置を VFIO で掴み(`vfio_open_device()`)、DMA 領域と公開メモリを `g_bfm_dma_base` / `g_bfm_mr_base` に張って IOVA に対応づける(`map_region()`)。`g_bfm_cpu_awake` が 0 でなければ `/dev/cpu_dma_latency` に 0 を書いて fd を開いたままにし、CPU を深い C-state に入れない。
+|引数 |なし
+|戻り値 a|0: 成功。-1: 失敗(取ったものは `bfm_port_fini()` で返してある)。
+|前提条件 a|`g_bfm_linux_pci_bdf`・`g_bfm_dma_base` / `g_bfm_dma_size`・`g_bfm_mr_base` / `g_bfm_mr_size` を設定してあること。装置を vfio-pci に結びつけてあること。
+|注意事項 a|* `g_bfm_linux_pci_bdf` が NULL のときは、理由を表示して -1 を返す(まだ何も取っていないので `bfm_port_fini()` は呼ばない)。
+* `/dev/cpu_dma_latency` に書けないときは注意を表示するだけで、成功として続ける(相手からの read / atomic が遅くなりうる)。
+|===
+
+.bfm_port_init() のフロー図
+image::flow_port_linux_vfio_port_linux__bfm_port_init.drawio.svg[bfm_port_init() のフロー図]
+
+.bfm_port_init() の関係図
+image::call_port_linux_vfio_port_linux__bfm_port_init.drawio.svg[bfm_port_init() の関係図]
+
+[[port_linux_vfio_port_linux__bfm_port_fini]]
+=== `bfm_port_fini()`
+[cols="1,5",options="autowidth"]
+.bfm_port_fini()
+|===
+|関数名 |`bfm_port_fini`(`port/linux_vfio/port_linux.c` 195 行目)
+|宣言 |`void bfm_port_fini(void)`
+|処理内容 a|移植層が取ったものを返す。BAR0 を張っていれば外し、VFIO の装置・グループ・コンテナの fd を閉じ(IOMMU の対応づけもここで外れる)、DMA 領域と公開メモリを外し、`/dev/cpu_dma_latency` を閉じる。
+|引数 |なし
+|戻り値 a|なし
+|前提条件 a|Bus Master を落としてあること(NIC がメモリへ DMA しないこと)。
+|注意事項 a|取っていないものは飛ばすので、立ち上げの途中で失敗したときにも呼べる。何度呼んでもよい。
+|===
+
+.bfm_port_fini() のフロー図
+image::flow_port_linux_vfio_port_linux__bfm_port_fini.drawio.svg[bfm_port_fini() のフロー図]
+
+.bfm_port_fini() の関係図
+image::call_port_linux_vfio_port_linux__bfm_port_fini.drawio.svg[bfm_port_fini() の関係図]
+
+[[port_linux_vfio_port_linux__bfm_port_pci_read32]]
+=== `bfm_port_pci_read32()`
+[cols="1,5",options="autowidth"]
+.bfm_port_pci_read32()
+|===
+|関数名 |`bfm_port_pci_read32`(`port/linux_vfio/port_linux.c` 209 行目)
+|宣言 |`uint32_t bfm_port_pci_read32(uint32_t off)`
+|処理内容 a|PCIe の設定空間の `off` から 32bit を読む。VFIO の装置の fd の設定空間の領域を `pread` する。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`off` !設定空間の中の位置(4 の倍数)
+!===
+|戻り値 a|読んだ値。読めなかったら `0xffffffff`(理由を表示する)。
+|前提条件 a|`bfm_port_init()` が成功していること。
+|注意事項 a|特になし。
+|===
+
+.bfm_port_pci_read32() のフロー図
+image::flow_port_linux_vfio_port_linux__bfm_port_pci_read32.drawio.svg[bfm_port_pci_read32() のフロー図]
+
+.bfm_port_pci_read32() の関係図
+image::call_port_linux_vfio_port_linux__bfm_port_pci_read32.drawio.svg[bfm_port_pci_read32() の関係図]
+
+[[port_linux_vfio_port_linux__bfm_port_pci_write32]]
+=== `bfm_port_pci_write32()`
+[cols="1,5",options="autowidth"]
+.bfm_port_pci_write32()
+|===
+|関数名 |`bfm_port_pci_write32`(`port/linux_vfio/port_linux.c` 217 行目)
+|宣言 |`void bfm_port_pci_write32(uint32_t off, uint32_t val)`
+|処理内容 a|PCIe の設定空間の `off` へ 32bit を書く。VFIO の装置の fd の設定空間の領域へ `pwrite` する。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`off` !設定空間の中の位置(4 の倍数)
+!`uint32_t` !`val` !書く値
+!===
+|戻り値 a|なし
+|前提条件 a|`bfm_port_init()` が成功していること。
+|注意事項 a|書けなかったときは表示するだけで、呼び出し側には知らせない。
+|===
+
+.bfm_port_pci_write32() のフロー図
+image::flow_port_linux_vfio_port_linux__bfm_port_pci_write32.drawio.svg[bfm_port_pci_write32() のフロー図]
+
+.bfm_port_pci_write32() の関係図
+image::call_port_linux_vfio_port_linux__bfm_port_pci_write32.drawio.svg[bfm_port_pci_write32() の関係図]
+
+[[port_linux_vfio_port_linux__bar_map_uc]]
+=== `bar_map_uc()`
+[cols="1,5",options="autowidth"]
+.bar_map_uc()
+|===
+|関数名 |`bar_map_uc`(`port/linux_vfio/port_linux.c` 228 行目)
+|宣言 |`static void *bar_map_uc(void *va, uint64_t off, uint64_t len, int fixed)`
+|処理内容 a|BAR0 の `[off, off+len)` を UC で `va` に張る。`s_bar0_sysfs` が 0 でなければ sysfs の `resource0` を `O_SYNC` で開いて張り、0 なら VFIO の装置の fd の BAR0 の領域から張る。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`void *` !`va` !張る位置(`fixed` が 0 なら NULL でよい)
+!`uint64_t` !`off` !BAR0 の中の位置
+!`uint64_t` !`len` !大きさ(バイト)
+!`int` !`fixed` !0 以外なら `MAP_FIXED` で `va` に張る(既にある対応づけを置き換える)
+!===
+|戻り値 a|張った先頭。失敗したら `MAP_FAILED`。
+|前提条件 a|`vfio_open_device()` が成功していること(VFIO から張るとき)。`g_bfm_linux_pci_bdf` を設定してあること(sysfs から張るとき)。
+|注意事項 a|失敗しても表示しない。
+|===
+
+.bar_map_uc() のフロー図
+image::flow_port_linux_vfio_port_linux__bar_map_uc.drawio.svg[bar_map_uc() のフロー図]
+
+.bar_map_uc() の関係図
+image::call_port_linux_vfio_port_linux__bar_map_uc.drawio.svg[bar_map_uc() の関係図]
+
+[[port_linux_vfio_port_linux__bfm_port_bar0_map]]
+=== `bfm_port_bar0_map()`
+[cols="1,5",options="autowidth"]
+.bfm_port_bar0_map()
+|===
+|関数名 |`bfm_port_bar0_map`(`port/linux_vfio/port_linux.c` 246 行目)
+|宣言 |`volatile uint8_t *bfm_port_bar0_map(uint64_t bar_phys, uint64_t bar_size)`
+|処理内容 a|BAR0 全体(VFIO から読んだ大きさ `s_bar0_size`)を UC で張って先頭を返す。まず sysfs の `resource0` から張り、だめなら VFIO の fd から張る(このときは BlueFlame を使えない)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint64_t` !`bar_phys` !設定空間から読んだ BAR0 の値(Linux では使わない)
+!`uint64_t` !`bar_size` !設定空間から測った BAR0 の大きさ(VFIO の値と比べるだけ)
+!===
+|戻り値 a|BAR0 の先頭。張れなかったら NULL。
+|前提条件 a|`bfm_port_init()` が成功していること。
+|注意事項 a|* `bar_size` が 0 でなく VFIO の大きさと違うときは注意を表示するが、VFIO の大きさで張る。
+* VFIO の fd から張ったときは `s_bar0_sysfs` が 0 になり、`bfm_port_bar0_wc()` は NULL を返す(VFIO の fd から張ると BAR 全体が UC で登録され、後から一部を WC にできないため)。
+|===
+
+.bfm_port_bar0_map() のフロー図
+image::flow_port_linux_vfio_port_linux__bfm_port_bar0_map.drawio.svg[bfm_port_bar0_map() のフロー図]
+
+.bfm_port_bar0_map() の関係図
+image::call_port_linux_vfio_port_linux__bfm_port_bar0_map.drawio.svg[bfm_port_bar0_map() の関係図]
+
+[[port_linux_vfio_port_linux__bfm_port_bar0_unmap]]
+=== `bfm_port_bar0_unmap()`
+[cols="1,5",options="autowidth"]
+.bfm_port_bar0_unmap()
+|===
+|関数名 |`bfm_port_bar0_unmap`(`port/linux_vfio/port_linux.c` 264 行目)
+|宣言 |`void bfm_port_bar0_unmap(void)`
+|処理内容 a|BAR0 の窓を外し、UC の窓の mmap の一覧を空にする。
+|引数 |なし
+|戻り値 a|なし
+|前提条件 a|Bus Master を落としてあること。
+|注意事項 a|WC に張り替えたページや、張り直して分かれた mmap も、BAR0 の範囲全体を 1 回の `munmap` で外す。
+|===
+
+.bfm_port_bar0_unmap() のフロー図
+image::flow_port_linux_vfio_port_linux__bfm_port_bar0_unmap.drawio.svg[bfm_port_bar0_unmap() のフロー図]
+
+.bfm_port_bar0_unmap() の関係図
+image::call_port_linux_vfio_port_linux__bfm_port_bar0_unmap.drawio.svg[bfm_port_bar0_unmap() の関係図]
+
+[[port_linux_vfio_port_linux__seg_add]]
+=== `seg_add()`
+[cols="1,5",options="autowidth"]
+.seg_add()
+|===
+|関数名 |`seg_add`(`port/linux_vfio/port_linux.c` 272 行目)
+|宣言 |`static void seg_add(uint64_t off, uint64_t len)`
+|処理内容 a|UC で張った BAR0 の区間 `[off, off+len)` を、UC の mmap の一覧 `s_seg` に足す。一覧が満杯なら足さない。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint64_t` !`off` !BAR0 の中の位置
+!`uint64_t` !`len` !大きさ(バイト)
+!===
+|戻り値 a|なし
+|前提条件 a|その区間が UC の 1 つの mmap として張られていること。
+|注意事項 a|一覧が満杯(`s_nseg >= SEG_MAX`)のときは表示せずに足さない。その区間は以後 `bfm_port_bar0_wc()` で WC に張り替えられなくなるだけ。
+|===
+
+.seg_add() のフロー図
+image::flow_port_linux_vfio_port_linux__seg_add.drawio.svg[seg_add() のフロー図]
+
+.seg_add() の関係図
+image::call_port_linux_vfio_port_linux__seg_add.drawio.svg[seg_add() の関係図]
+
+[[port_linux_vfio_port_linux__bfm_port_bar0_wc]]
+=== `bfm_port_bar0_wc()`
+[cols="1,5",options="autowidth"]
+.bfm_port_bar0_wc()
+|===
+|関数名 |`bfm_port_bar0_wc`(`port/linux_vfio/port_linux.c` 285 行目)
+|宣言 |`volatile uint8_t *bfm_port_bar0_wc(uint64_t off, uint64_t len)`
+|処理内容 a|BAR0 の `[off, off+len)`(UAR の 1 ページ)を、同じ仮想アドレスのまま write-combining に張り替えて先頭を返す。その範囲を含む UC の mmap を探し、範囲の前と後を UC で張り直して元の mmap をその範囲だけに縮め、その範囲を外してから sysfs の `resource0_wc` で張る。失敗したらその範囲を UC に戻して NULL を返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint64_t` !`off` !BAR0 の中の位置(ページの境界)
+!`uint64_t` !`len` !大きさ(バイト。1 ページ)
+!===
+|戻り値 a|WC で張った先頭(= BAR0 の窓の `off` の位置)。BlueFlame を使えないときは NULL。
+|前提条件 a|`bfm_port_bar0_map()` が sysfs から張れていること。
+|注意事項 a|* x86 の PAT は同じ物理ページに別の型を許さず、登録は mmap のページが全部外れるまで残るので、元の mmap を張り直して範囲だけに縮めてから外す。
+* 返った後は、`bfm_port_bar0_map()` の窓のそのページも WC になっている。
+* 一覧 `s_seg` が満杯に近い(残り 2 個未満)ときや、範囲を含む mmap が一覧に無いときは NULL を返す。
+* 範囲の前・後の張り直しが失敗したときは、表示せずに NULL を返す(BAR0 は全部 UC のままなので、一覧は変えない。前を張り直した後に後で失敗したときも、張り直した前の部分はそのまま残る)。
+* 範囲の `munmap` に失敗したときは、表示せずに NULL を返す。範囲は UC のまま残っているので、一覧に `[off, off+len)` を足す(`seg_add()`)。
+* `resource0_wc` で張れなかったときは、UC に張り直せたら一覧に `[off, off+len)` を足す。張り直せなかったときは一覧に足さない(その範囲は以後 WC に張り替えられない)。
+|===
+
+.bfm_port_bar0_wc() のフロー図
+image::flow_port_linux_vfio_port_linux__bfm_port_bar0_wc.drawio.svg[bfm_port_bar0_wc() のフロー図]
+
+.bfm_port_bar0_wc() の関係図
+image::call_port_linux_vfio_port_linux__bfm_port_bar0_wc.drawio.svg[bfm_port_bar0_wc() の関係図]
+
+[[port_linux_vfio_port_linux__bfm_port_bar0_wc_release]]
+=== `bfm_port_bar0_wc_release()`
+[cols="1,5",options="autowidth"]
+.bfm_port_bar0_wc_release()
+|===
+|関数名 |`bfm_port_bar0_wc_release`(`port/linux_vfio/port_linux.c` 324 行目)
+|宣言 |`void bfm_port_bar0_wc_release(uint64_t off, uint64_t len)`
+|処理内容 a|`bfm_port_bar0_wc()` で WC に張り替えた BAR0 の `[off, off+len)` を外し、同じ仮想アドレスに UC で張り直して、UC の mmap の一覧に足す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint64_t` !`off` !BAR0 の中の位置(`bfm_port_bar0_wc()` に渡したもの)
+!`uint64_t` !`len` !大きさ(バイト。`bfm_port_bar0_wc()` に渡したもの)
+!===
+|戻り値 a|なし
+|前提条件 a|`bfm_port_bar0_wc()` がその範囲で成功していること。
+|注意事項 a|* BAR0 を張っていないとき、範囲が BAR0 を超えるときは何もしない。
+* `munmap` や張り直しに失敗したときは、表示せずに一覧に足さない。一覧が満杯のときも足さない(`seg_add()`)。
+|===
+
+.bfm_port_bar0_wc_release() のフロー図
+image::flow_port_linux_vfio_port_linux__bfm_port_bar0_wc_release.drawio.svg[bfm_port_bar0_wc_release() のフロー図]
+
+.bfm_port_bar0_wc_release() の関係図
+image::call_port_linux_vfio_port_linux__bfm_port_bar0_wc_release.drawio.svg[bfm_port_bar0_wc_release() の関係図]
+
+== `port/vxworks/port_vxworks.c`
+
+移植層の VxWorks 版(論理アドレス = 物理アドレス)。**この版は未検証(VxWorks の機材で動かしていない)。** 使う VxWorks の API は `printf`・`tickGet`・`sysClkRateGet`・`taskDelay`・`cacheFlush`・`cacheInvalidate` だけ(`BFM_VX_PCI_LIB` を定義したときは `pciConfigInLong` / `pciConfigOutLong` も)。DMA 領域・公開メモリ・BAR0 を論理 = 物理で張るのは BSP 側の役目で、この版はアドレスをそのまま返す。PCIe の設定空間は既定では ECAM(`g_bfm_pcie_ecam_base`)を直接読み書きし、`BFM_VX_PCI_LIB` を定義してビルドすると pciConfigLib を使う。`BFM_VX_CACHE_OPS` を定義してビルドすると、キャッシュの操作に `cacheFlush` / `cacheInvalidate` を使う。BlueFlame には、BSP が用意した BAR0 全体の write-combining の別名(`g_bfm_bar0_wc_va`)を使う。
+
+[[port_vxworks_port_vxworks__bfm_port_log]]
+=== `bfm_port_log()`
+[cols="1,5",options="autowidth"]
+.bfm_port_log()
+|===
+|関数名 |`bfm_port_log`(`port/vxworks/port_vxworks.c` 33 行目)
+|宣言 |`void bfm_port_log(const char *fmt, ...)`
+|処理内容 a|`printf` と同じ書式で表示する(`vprintf`)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const char *` !`fmt` !`printf` と同じ書式の文字列
+!`...` !`...` !書式に対応する値
+!===
+|戻り値 a|なし
+|前提条件 a|特になし。
+|注意事項 a|VxWorks の実機で未検証。
+|===
+
+.bfm_port_log() のフロー図
+image::flow_port_vxworks_port_vxworks__bfm_port_log.drawio.svg[bfm_port_log() のフロー図]
+
+.bfm_port_log() の関係図
+image::call_port_vxworks_port_vxworks__bfm_port_log.drawio.svg[bfm_port_log() の関係図]
+
+[[port_vxworks_port_vxworks__bfm_port_time_ns]]
+=== `bfm_port_time_ns()`
+[cols="1,5",options="autowidth"]
+.bfm_port_time_ns()
+|===
+|関数名 |`bfm_port_time_ns`(`port/vxworks/port_vxworks.c` 45 行目)
+|宣言 |`uint64_t bfm_port_time_ns(void)`
+|処理内容 a|`tickGet()` の tick の数を 64bit に伸ばし、1 tick のナノ秒(`10^9 / sysClkRateGet()`)を掛けて時刻を返す。`tickGet()` の下位 32bit が前に呼んだときより小さくなったら一周したとみなし、上位(静的変数 `s_high`)に 2^32 を足す。
+|引数 |なし
+|戻り値 a|時刻(ナノ秒)。分解能は 1 tick。
+|前提条件 a|`tickGet()` の下位 32bit が一周する間(1000Hz で約 50 日)に 1 回以上呼ばれること。呼ぶのは `bfm_init()` と同じタスクだけであること(静的変数 `s_last` / `s_high` を排他なしで書き換える)。
+|注意事項 a|* 時間切れの判定にしか使わない前提で、分解能は 1 tick。
+* `tickGet()` が 32bit の版で一周して 0 に戻っても、時刻が戻らないようにしている。一周の間に一度も呼ばれないと、その一周ぶんは数えない。
+* `sysClkRateGet()` が 0 を返したときは 60Hz として計算する。
+* VxWorks の実機で未検証。
+|===
+
+.bfm_port_time_ns() のフロー図
+image::flow_port_vxworks_port_vxworks__bfm_port_time_ns.drawio.svg[bfm_port_time_ns() のフロー図]
+
+.bfm_port_time_ns() の関係図
+image::call_port_vxworks_port_vxworks__bfm_port_time_ns.drawio.svg[bfm_port_time_ns() の関係図]
+
+[[port_vxworks_port_vxworks__bfm_port_delay_us]]
+=== `bfm_port_delay_us()`
+[cols="1,5",options="autowidth"]
+.bfm_port_delay_us()
+|===
+|関数名 |`bfm_port_delay_us`(`port/vxworks/port_vxworks.c` 56 行目)
+|宣言 |`void bfm_port_delay_us(uint32_t us)`
+|処理内容 a|`us` マイクロ秒を tick の数に切り上げて `taskDelay` で待つ。最低 1 tick 待つ。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`us` !待つ時間(マイクロ秒)
+!===
+|戻り値 a|なし
+|前提条件 a|タスクから呼ぶこと(`taskDelay` を使う)。
+|注意事項 a|* 分解能は 1 tick なので、短い待ちでも 1 tick 待つ。
+* `taskDelay` の戻り値は見ない。
+* VxWorks の実機で未検証。
+|===
+
+.bfm_port_delay_us() のフロー図
+image::flow_port_vxworks_port_vxworks__bfm_port_delay_us.drawio.svg[bfm_port_delay_us() のフロー図]
+
+.bfm_port_delay_us() の関係図
+image::call_port_vxworks_port_vxworks__bfm_port_delay_us.drawio.svg[bfm_port_delay_us() の関係図]
+
+[[port_vxworks_port_vxworks__bfm_port_cache_flush]]
+=== `bfm_port_cache_flush()`
+[cols="1,5",options="autowidth"]
+.bfm_port_cache_flush()
+|===
+|関数名 |`bfm_port_cache_flush`(`port/vxworks/port_vxworks.c` 64 行目)
+|宣言 |`void bfm_port_cache_flush(const volatile void *p, size_t len)`
+|処理内容 a|CPU が書いたものを NIC が読む前のキャッシュの操作。`BFM_VX_CACHE_OPS` を定義してビルドしたときは `cacheFlush(DATA_CACHE, p, len)` を呼び、定義していなければ何もしない。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const volatile void *` !`p` !範囲の先頭
+!`size_t` !`len` !範囲の大きさ(バイト)
+!===
+|戻り値 a|なし
+|前提条件 a|`BFM_VX_CACHE_OPS` を定義しないときは、DMA 領域と公開メモリを NIC とキャッシュが一貫する属性(キャッシュしない属性など)で張ってあること。
+|注意事項 a|* `cacheFlush` の戻り値は見ない。
+* VxWorks の実機で未検証。
+|===
+
+.bfm_port_cache_flush() のフロー図
+image::flow_port_vxworks_port_vxworks__bfm_port_cache_flush.drawio.svg[bfm_port_cache_flush() のフロー図]
+
+.bfm_port_cache_flush() の関係図
+image::call_port_vxworks_port_vxworks__bfm_port_cache_flush.drawio.svg[bfm_port_cache_flush() の関係図]
+
+[[port_vxworks_port_vxworks__bfm_port_cache_inval]]
+=== `bfm_port_cache_inval()`
+[cols="1,5",options="autowidth"]
+.bfm_port_cache_inval()
+|===
+|関数名 |`bfm_port_cache_inval`(`port/vxworks/port_vxworks.c` 74 行目)
+|宣言 |`void bfm_port_cache_inval(const volatile void *p, size_t len)`
+|処理内容 a|NIC が書いたものを CPU が読む前のキャッシュの操作。`BFM_VX_CACHE_OPS` を定義してビルドしたときは `cacheInvalidate(DATA_CACHE, p, len)` を呼び、定義していなければ何もしない。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const volatile void *` !`p` !範囲の先頭
+!`size_t` !`len` !範囲の大きさ(バイト)
+!===
+|戻り値 a|なし
+|前提条件 a|`BFM_VX_CACHE_OPS` を定義しないときは、DMA 領域と公開メモリを NIC とキャッシュが一貫する属性(キャッシュしない属性など)で張ってあること。
+|注意事項 a|* `cacheInvalidate` の戻り値は見ない。
+* VxWorks の実機で未検証。
+|===
+
+.bfm_port_cache_inval() のフロー図
+image::flow_port_vxworks_port_vxworks__bfm_port_cache_inval.drawio.svg[bfm_port_cache_inval() のフロー図]
+
+.bfm_port_cache_inval() の関係図
+image::call_port_vxworks_port_vxworks__bfm_port_cache_inval.drawio.svg[bfm_port_cache_inval() の関係図]
+
+[[port_vxworks_port_vxworks__bfm_port_init]]
+=== `bfm_port_init()`
+[cols="1,5",options="autowidth"]
+.bfm_port_init()
+|===
+|関数名 |`bfm_port_init`(`port/vxworks/port_vxworks.c` 84 行目)
+|宣言 |`int bfm_port_init(void)`
+|処理内容 a|移植層を立ち上げる。`BFM_VX_PCI_LIB` を定義せずにビルドしたときは、ECAM の位置 `g_bfm_pcie_ecam_base` が設定されているかだけを確かめる。DMA 領域・公開メモリは BSP が論理 = 物理で張ってある前提で、ここでは何もしない。
+|引数 |なし
+|戻り値 a|0: 成功。-1: `BFM_VX_PCI_LIB` なしでビルドし、`g_bfm_pcie_ecam_base` が 0(理由を表示する)。
+|前提条件 a|`g_bfm_dma_*` と `g_bfm_mr_*` の物理メモリが OS に使われず、論理 = 物理で張られていること(BSP の役目)。`BFM_VX_PCI_LIB` なしなら `g_bfm_pcie_ecam_base` を設定してあること。
+|注意事項 a|* `g_bfm_cpu_awake` はこの版では何もしない(深い C-state は BIOS / BSP で止める)。
+* VxWorks の実機で未検証。
+|===
+
+.bfm_port_init() のフロー図
+image::flow_port_vxworks_port_vxworks__bfm_port_init.drawio.svg[bfm_port_init() のフロー図]
+
+.bfm_port_init() の関係図
+image::call_port_vxworks_port_vxworks__bfm_port_init.drawio.svg[bfm_port_init() の関係図]
+
+[[port_vxworks_port_vxworks__bfm_port_fini]]
+=== `bfm_port_fini()`
+[cols="1,5",options="autowidth"]
+.bfm_port_fini()
+|===
+|関数名 |`bfm_port_fini`(`port/vxworks/port_vxworks.c` 95 行目)
+|宣言 |`void bfm_port_fini(void)`
+|処理内容 a|移植層が取ったものを返す。この版は何も取らないので何もしない。
+|引数 |なし
+|戻り値 a|なし
+|前提条件 a|特になし。
+|注意事項 a|VxWorks の実機で未検証。
+|===
+
+.bfm_port_fini() のフロー図
+image::flow_port_vxworks_port_vxworks__bfm_port_fini.drawio.svg[bfm_port_fini() のフロー図]
+
+.bfm_port_fini() の関係図
+image::call_port_vxworks_port_vxworks__bfm_port_fini.drawio.svg[bfm_port_fini() の関係図]
+
+[[port_vxworks_port_vxworks__ecam]]
+=== `ecam()`
+[cols="1,5",options="autowidth"]
+.ecam()
+|===
+|関数名 |`ecam`(`port/vxworks/port_vxworks.c` 100 行目)
+|宣言 |`static volatile uint32_t *ecam(uint32_t off)`
+|処理内容 a|設定空間の `off` に対応する ECAM のアドレスを計算して返す(`g_bfm_pcie_ecam_base` + bus << 20 + dev << 15 + func << 12 + (`off` の下位 12 ビットを 4 の倍数に揃えたもの))。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`off` !設定空間の中の位置
+!===
+|戻り値 a|ECAM の 32bit の位置(論理 = 物理のポインタ)。
+|前提条件 a|`g_bfm_pcie_ecam_base`・`g_bfm_pci_bus` / `g_bfm_pci_dev` / `g_bfm_pci_func` を設定してあること。ECAM が論理 = 物理で張られていること。
+|注意事項 a|* `BFM_VX_PCI_LIB` を定義せずにビルドしたときだけ作られる。
+* `off` は `0xffc` で切るので、4KiB を超える位置や 4 の倍数でない位置は丸められる。
+* VxWorks の実機で未検証。
+|===
+
+.ecam() のフロー図
+image::flow_port_vxworks_port_vxworks__ecam.drawio.svg[ecam() のフロー図]
+
+.ecam() の関係図
+image::call_port_vxworks_port_vxworks__ecam.drawio.svg[ecam() の関係図]
+
+[[port_vxworks_port_vxworks__bfm_port_pci_read32]]
+=== `bfm_port_pci_read32()`
+[cols="1,5",options="autowidth"]
+.bfm_port_pci_read32()
+|===
+|関数名 |`bfm_port_pci_read32`(`port/vxworks/port_vxworks.c` 109 行目)
+|宣言 |`uint32_t bfm_port_pci_read32(uint32_t off)`
+|処理内容 a|PCIe の設定空間の `off` から 32bit を読む。`BFM_VX_PCI_LIB` を定義してビルドしたときは `pciConfigInLong` で読み、定義していなければ ECAM を直接読む(設定空間はリトルエンディアンなので、ビッグエンディアンの CPU では入れ替える)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`off` !設定空間の中の位置(4 の倍数)
+!===
+|戻り値 a|読んだ値。
+|前提条件 a|`bfm_port_init()` が成功していること。
+|注意事項 a|* `pciConfigInLong` の戻り値は見ない(読めなければ初期値の `0xffffffff` のまま返るかは pciConfigLib の動きによる)。
+* VxWorks の実機で未検証。
+|===
+
+.bfm_port_pci_read32() のフロー図
+image::flow_port_vxworks_port_vxworks__bfm_port_pci_read32.drawio.svg[bfm_port_pci_read32() のフロー図]
+
+.bfm_port_pci_read32() の関係図
+image::call_port_vxworks_port_vxworks__bfm_port_pci_read32.drawio.svg[bfm_port_pci_read32() の関係図]
+
+[[port_vxworks_port_vxworks__bfm_port_pci_write32]]
+=== `bfm_port_pci_write32()`
+[cols="1,5",options="autowidth"]
+.bfm_port_pci_write32()
+|===
+|関数名 |`bfm_port_pci_write32`(`port/vxworks/port_vxworks.c` 121 行目)
+|宣言 |`void bfm_port_pci_write32(uint32_t off, uint32_t val)`
+|処理内容 a|PCIe の設定空間の `off` へ 32bit を書く。`BFM_VX_PCI_LIB` を定義してビルドしたときは `pciConfigOutLong` で書き、定義していなければ ECAM へ直接書いて(ビッグエンディアンの CPU では入れ替えて)`bfm_mb()` で順序を保つ。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`off` !設定空間の中の位置(4 の倍数)
+!`uint32_t` !`val` !書く値
+!===
+|戻り値 a|なし
+|前提条件 a|`bfm_port_init()` が成功していること。
+|注意事項 a|* `pciConfigOutLong` の戻り値は見ない。
+* VxWorks の実機で未検証。
+|===
+
+.bfm_port_pci_write32() のフロー図
+image::flow_port_vxworks_port_vxworks__bfm_port_pci_write32.drawio.svg[bfm_port_pci_write32() のフロー図]
+
+.bfm_port_pci_write32() の関係図
+image::call_port_vxworks_port_vxworks__bfm_port_pci_write32.drawio.svg[bfm_port_pci_write32() の関係図]
+
+[[port_vxworks_port_vxworks__bfm_port_bar0_map]]
+=== `bfm_port_bar0_map()`
+[cols="1,5",options="autowidth"]
+.bfm_port_bar0_map()
+|===
+|関数名 |`bfm_port_bar0_map`(`port/vxworks/port_vxworks.c` 133 行目)
+|宣言 |`volatile uint8_t *bfm_port_bar0_map(uint64_t bar_phys, uint64_t bar_size)`
+|処理内容 a|BAR0 の先頭を返す。論理 = 物理なので、設定空間から読んだ BAR0 の値をそのままポインタにする。`bar_size` は `bfm_port_bar0_wc()` の範囲の検査のために静的変数 `s_bar_size` に覚えておく。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint64_t` !`bar_phys` !設定空間から読んだ BAR0 の値(物理アドレス)
+!`uint64_t` !`bar_size` !BAR0 の大きさ(`bfm_port_bar0_wc()` の範囲の検査に使う)
+!===
+|戻り値 a|`bar_phys` をポインタにしたもの。NULL は返さない(`bar_phys` が 0 のときを除く)。
+|前提条件 a|BAR0(`g_bfm_bar0_addr` から BAR0 の大きさぶん)が論理 = 物理・キャッシュしない属性で張られていること(BSP の役目)。
+|注意事項 a|張られているかは確かめない。VxWorks の実機で未検証。
+|===
+
+.bfm_port_bar0_map() のフロー図
+image::flow_port_vxworks_port_vxworks__bfm_port_bar0_map.drawio.svg[bfm_port_bar0_map() のフロー図]
+
+.bfm_port_bar0_map() の関係図
+image::call_port_vxworks_port_vxworks__bfm_port_bar0_map.drawio.svg[bfm_port_bar0_map() の関係図]
+
+[[port_vxworks_port_vxworks__bfm_port_bar0_unmap]]
+=== `bfm_port_bar0_unmap()`
+[cols="1,5",options="autowidth"]
+.bfm_port_bar0_unmap()
+|===
+|関数名 |`bfm_port_bar0_unmap`(`port/vxworks/port_vxworks.c` 139 行目)
+|宣言 |`void bfm_port_bar0_unmap(void)`
+|処理内容 a|BAR0 の窓を外す。この版は張っていないので、覚えておいた BAR0 の大きさ `s_bar_size` を 0 に戻すだけ。
+|引数 |なし
+|戻り値 a|なし
+|前提条件 a|特になし。
+|注意事項 a|* 呼んだ後は `bfm_port_bar0_wc()` が範囲の外として NULL を返す(`len` が 0 でなければ)。
+* VxWorks の実機で未検証。
+|===
+
+.bfm_port_bar0_unmap() のフロー図
+image::flow_port_vxworks_port_vxworks__bfm_port_bar0_unmap.drawio.svg[bfm_port_bar0_unmap() のフロー図]
+
+.bfm_port_bar0_unmap() の関係図
+image::call_port_vxworks_port_vxworks__bfm_port_bar0_unmap.drawio.svg[bfm_port_bar0_unmap() の関係図]
+
+[[port_vxworks_port_vxworks__bfm_port_bar0_wc]]
+=== `bfm_port_bar0_wc()`
+[cols="1,5",options="autowidth"]
+.bfm_port_bar0_wc()
+|===
+|関数名 |`bfm_port_bar0_wc`(`port/vxworks/port_vxworks.c` 144 行目)
+|宣言 |`volatile uint8_t *bfm_port_bar0_wc(uint64_t off, uint64_t len)`
+|処理内容 a|BAR0 の `[off, off+len)` を write-combining で触れるアドレスを返す。範囲が BAR0(`bfm_port_bar0_map()` で覚えた大きさ `s_bar_size`)の中にあることを確かめ、BSP が用意した BAR0 全体の WC の別名 `g_bfm_bar0_wc_va` に `off` を足す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint64_t` !`off` !BAR0 の中の位置
+!`uint64_t` !`len` !大きさ(バイト。範囲の検査に使う)
+!===
+|戻り値 a|`g_bfm_bar0_wc_va + off`。`g_bfm_bar0_wc_va` が 0 なら NULL(BlueFlame を使わない)。範囲が BAR0 の外なら NULL(理由を表示する)。
+|前提条件 a|`bfm_port_bar0_map()` を呼んであること(呼んでいないと BAR0 の大きさが 0 で、`len` が 0 でなければ範囲の外になる)。BlueFlame を使うなら、BSP が BAR0 全体を write-combining で張った別名を用意し、その先頭を `g_bfm_bar0_wc_va` に入れてあること。
+|注意事項 a|* 範囲の検査は `off > s_bar_size` または `len > s_bar_size - off` で行う(足し算のあふれを避ける書き方)。
+* Linux 版と違い、`bfm_port_bar0_map()` の窓(UC)は UC のまま残る。
+* VxWorks の実機で未検証。
+|===
+
+.bfm_port_bar0_wc() のフロー図
+image::flow_port_vxworks_port_vxworks__bfm_port_bar0_wc.drawio.svg[bfm_port_bar0_wc() のフロー図]
+
+.bfm_port_bar0_wc() の関係図
+image::call_port_vxworks_port_vxworks__bfm_port_bar0_wc.drawio.svg[bfm_port_bar0_wc() の関係図]
+
+[[port_vxworks_port_vxworks__bfm_port_bar0_wc_release]]
+=== `bfm_port_bar0_wc_release()`
+[cols="1,5",options="autowidth"]
+.bfm_port_bar0_wc_release()
+|===
+|関数名 |`bfm_port_bar0_wc_release`(`port/vxworks/port_vxworks.c` 155 行目)
+|宣言 |`void bfm_port_bar0_wc_release(uint64_t off, uint64_t len)`
+|処理内容 a|`bfm_port_bar0_wc()` で得た WC の範囲を返す。この版は張り替えていないので何もしない。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint64_t` !`off` !BAR0 の中の位置(使わない)
+!`uint64_t` !`len` !大きさ(バイト。使わない)
+!===
+|戻り値 a|なし
+|前提条件 a|特になし。
+|注意事項 a|VxWorks の実機で未検証。
+|===
+
+.bfm_port_bar0_wc_release() のフロー図
+image::flow_port_vxworks_port_vxworks__bfm_port_bar0_wc_release.drawio.svg[bfm_port_bar0_wc_release() のフロー図]
+
+.bfm_port_bar0_wc_release() の関係図
+image::call_port_vxworks_port_vxworks__bfm_port_bar0_wc_release.drawio.svg[bfm_port_bar0_wc_release() の関係図]
+
+== `test/bfm_test.c`
+
+試験プログラム `bfmem_test`(Linux + VFIO)。動きはコマンドの引数で選ぶ。
+
+* `server`: 受け側。公開メモリを決まった模様で埋めて接続を待ち、Ctrl-\(SIGQUIT)か切断のときにデータ領域の hash を表示する。
+* `client <IP> <MAC>`: 掛け側。相手の公開メモリへ read / write / write_post / atomic を一通り出して手元の模型と突き合わせ、遅延と速さを測る。
+* `bench <IP> <MAC>`: write / read を 4B〜256KiB、多重度 1・4・8・16 で流し、IOPS・MB/s・平均遅延を表示する。
+* `info`: 立ち上げて HCA の能力を表示するだけ。
+
+公開メモリの取り決め(server と `tools/bfm_peer.c` で同じ)は、先頭 64KiB がデータ領域(`(i * 7 + 3) & 0xff` で埋める)、その後ろ 4KiB が 8 バイトの atomic 語 512 個(0 で埋める)。
+
+[[test_bfm_test__on_sig]]
+=== `on_sig()`
+[cols="1,5",options="autowidth"]
+.on_sig()
+|===
+|関数名 |`on_sig`(`test/bfm_test.c` 35 行目)
+|宣言 |`static void on_sig(int s)`
+|処理内容 a|シグナルの受け口。server のとき(`g_server` が 0 以外)の SIGQUIT なら `g_dump` を、それ以外なら `g_stop` を 1 にする。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`int` !`s` !受けたシグナルの番号
+!===
+|戻り値 a|なし
+|前提条件 a|特になし。
+|注意事項 a|* 旗を立てるだけで、表示や停止は `run_server()` などのループが旗を見て行う。
+* server 以外(client / bench / info)では SIGQUIT も止める合図として扱う(後片付けをしてから終わる)。
+* `g_server` は `main()` が `bfm_init()` の前に決める。
+|===
+
+.on_sig() のフロー図
+image::flow_test_bfm_test__on_sig.drawio.svg[on_sig() のフロー図]
+
+.on_sig() の関係図
+image::call_test_bfm_test__on_sig.drawio.svg[on_sig() の関係図]
+
+[[test_bfm_test__now_ns]]
+=== `now_ns()`
+[cols="1,5",options="autowidth"]
+.now_ns()
+|===
+|関数名 |`now_ns`(`test/bfm_test.c` 41 行目)
+|宣言 |`static uint64_t now_ns(void)`
+|処理内容 a|`CLOCK_MONOTONIC` の今の時刻をナノ秒で返す。
+|引数 |なし
+|戻り値 a|今の時刻(ナノ秒)。
+|前提条件 a|特になし。
+|注意事項 a|特になし。
+|===
+
+.now_ns() のフロー図
+image::flow_test_bfm_test__now_ns.drawio.svg[now_ns() のフロー図]
+
+.now_ns() の関係図
+image::call_test_bfm_test__now_ns.drawio.svg[now_ns() の関係図]
+
+[[test_bfm_test__pattern]]
+=== `pattern()`
+[cols="1,5",options="autowidth"]
+.pattern()
+|===
+|関数名 |`pattern`(`test/bfm_test.c` 48 行目)
+|宣言 |`static uint8_t pattern(uint32_t i)`
+|処理内容 a|データ領域の i バイトめの初期値 `(i * 7 + 3) & 0xff` を返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`i` !データ領域の中の位置(バイト)
+!===
+|戻り値 a|その位置の初期値(1 バイト)。
+|前提条件 a|特になし。
+|注意事項 a|server と `tools/bfm_peer.c` の埋め方と同じ式であること。
+|===
+
+.pattern() のフロー図
+image::flow_test_bfm_test__pattern.drawio.svg[pattern() のフロー図]
+
+.pattern() の関係図
+image::call_test_bfm_test__pattern.drawio.svg[pattern() の関係図]
+
+[[test_bfm_test__fnv1a]]
+=== `fnv1a()`
+[cols="1,5",options="autowidth"]
+.fnv1a()
+|===
+|関数名 |`fnv1a`(`test/bfm_test.c` 53 行目)
+|宣言 |`static uint64_t fnv1a(const volatile uint8_t *p, uint32_t n)`
+|処理内容 a|p から n バイトの FNV-1a 64 の hash を計算する。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const volatile uint8_t *` !`p` !hash を取る領域の先頭
+!`uint32_t` !`n` !バイト数
+!===
+|戻り値 a|FNV-1a 64 の hash。
+|前提条件 a|p から n バイトが読めること。
+|注意事項 a|server(`dump_area()`)と client(模型)で同じ値になることを見るために使う。
+|===
+
+.fnv1a() のフロー図
+image::flow_test_bfm_test__fnv1a.drawio.svg[fnv1a() のフロー図]
+
+.fnv1a() の関係図
+image::call_test_bfm_test__fnv1a.drawio.svg[fnv1a() の関係図]
+
+[[test_bfm_test__parse_ip]]
+=== `parse_ip()`
+[cols="1,5",options="autowidth"]
+.parse_ip()
+|===
+|関数名 |`parse_ip`(`test/bfm_test.c` 63 行目)
+|宣言 |`static int parse_ip(const char *s, uint32_t *out)`
+|処理内容 a|`a.b.c.d` 形式の IPv4 アドレスの文字列を、`a` を最上位の 8 ビットとする 32 ビットの値に直す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const char *` !`s` !IPv4 アドレスの文字列
+!`uint32_t *` !`out` !直した値の書き込み先
+!===
+|戻り値 a|0: 直せた。-1: 4 つの数が読めない、または 255 を超える数がある。
+|前提条件 a|特になし。
+|注意事項 a|失敗したときは `*out` を書き換えない。
+|===
+
+.parse_ip() のフロー図
+image::flow_test_bfm_test__parse_ip.drawio.svg[parse_ip() のフロー図]
+
+.parse_ip() の関係図
+image::call_test_bfm_test__parse_ip.drawio.svg[parse_ip() の関係図]
+
+[[test_bfm_test__parse_mac]]
+=== `parse_mac()`
+[cols="1,5",options="autowidth"]
+.parse_mac()
+|===
+|関数名 |`parse_mac`(`test/bfm_test.c` 71 行目)
+|宣言 |`static int parse_mac(const char *s, uint8_t mac[6])`
+|処理内容 a|`xx:xx:xx:xx:xx:xx` 形式の MAC アドレスの文字列を 6 バイトに直す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const char *` !`s` !MAC アドレスの文字列
+!`uint8_t [6]` !`mac` !直した 6 バイトの書き込み先
+!===
+|戻り値 a|0: 直せた。-1: 6 つの数が読めない。
+|前提条件 a|特になし。
+|注意事項 a|各数が 255 を超えるかは見ない(下位 8 ビットを使う)。
+|===
+
+.parse_mac() のフロー図
+image::flow_test_bfm_test__parse_mac.drawio.svg[parse_mac() のフロー図]
+
+.parse_mac() の関係図
+image::call_test_bfm_test__parse_mac.drawio.svg[parse_mac() の関係図]
+
+[[test_bfm_test__usage]]
+=== `usage()`
+[cols="1,5",options="autowidth"]
+.usage()
+|===
+|関数名 |`usage`(`test/bfm_test.c` 79 行目)
+|宣言 |`static void usage(void)`
+|処理内容 a|使い方(オプションと、server / client / bench / info の書き方)を表示する。
+|引数 |なし
+|戻り値 a|なし
+|前提条件 a|特になし。
+|注意事項 a|特になし。
+|===
+
+.usage() のフロー図
+image::flow_test_bfm_test__usage.drawio.svg[usage() のフロー図]
+
+.usage() の関係図
+image::call_test_bfm_test__usage.drawio.svg[usage() の関係図]
+
+[[test_bfm_test__fill_area]]
+=== `fill_area()`
+[cols="1,5",options="autowidth"]
+.fill_area()
+|===
+|関数名 |`fill_area`(`test/bfm_test.c` 95 行目)
+|宣言 |`static void fill_area(void)`
+|処理内容 a|自分の公開メモリ(`g_bfm_mr_base`)のデータ領域 64KiB を `pattern()` の値で埋め、その後ろの atomic 語 512 個(4KiB)を 0 で埋める。
+|引数 |なし
+|戻り値 a|なし
+|前提条件 a|`bfm_init()` が済んでいて、公開メモリが `AREA_BYTES`(68KiB)以上あること(`run_server()` が確かめる)。
+|注意事項 a|接続を待つたびに呼ぶので、前の接続で書かれた中身は消える。
+|===
+
+.fill_area() のフロー図
+image::flow_test_bfm_test__fill_area.drawio.svg[fill_area() のフロー図]
+
+.fill_area() の関係図
+image::call_test_bfm_test__fill_area.drawio.svg[fill_area() の関係図]
+
+[[test_bfm_test__dump_area]]
+=== `dump_area()`
+[cols="1,5",options="autowidth"]
+.dump_area()
+|===
+|関数名 |`dump_area`(`test/bfm_test.c` 102 行目)
+|宣言 |`static void dump_area(const char *why)`
+|処理内容 a|自分の公開メモリのデータ領域 64KiB の hash と、atomic 語 0〜2 の中身(8 バイトの並びとリトルエンディアンとしての値)を表示する。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const char *` !`why` !表示の理由(「要求」「切断」)
+!===
+|戻り値 a|なし
+|前提条件 a|`bfm_init()` が済んでいること。
+|注意事項 a|client が最後に表示する模型の hash と同じ値になるはず。
+|===
+
+.dump_area() のフロー図
+image::flow_test_bfm_test__dump_area.drawio.svg[dump_area() のフロー図]
+
+.dump_area() の関係図
+image::call_test_bfm_test__dump_area.drawio.svg[dump_area() の関係図]
+
+[[test_bfm_test__run_server]]
+=== `run_server()`
+[cols="1,5",options="autowidth"]
+.run_server()
+|===
+|関数名 |`run_server`(`test/bfm_test.c` 115 行目)
+|宣言 |`static int run_server(uint16_t port)`
+|処理内容 a|受け側の本体。公開メモリを埋めて接続を待ち、接続の間は `bfm_poll()` を 1ms ごとに呼び続ける。切断されたら hash を表示して接続を返し、また埋めて待つ。`g_stop` が立つまで繰り返す。`g_dump` が立てば hash を表示する。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint16_t` !`port` !待つ接続の番号
+!===
+|戻り値 a|0: `g_stop` で終わった。1: 公開メモリが `AREA_BYTES` より小さい。
+|前提条件 a|`bfm_init()` が済んでいること。
+|注意事項 a|* 接続の待ちは 500ms ごとに区切り、その間に `g_stop` / `g_dump` を見る。
+* 接続の間に `g_stop` が立つと、hash を表示して接続を返してから終わる。
+|===
+
+.run_server() のフロー図
+image::flow_test_bfm_test__run_server.drawio.svg[run_server() のフロー図]
+
+.run_server() の関係図
+image::call_test_bfm_test__run_server.drawio.svg[run_server() の関係図]
+
+[[test_bfm_test__check]]
+=== `check()`
+[cols="1,5",options="autowidth"]
+.check()
+|===
+|関数名 |`check`(`test/bfm_test.c` 147 行目)
+|宣言 |`static void check(const char *what, int ok)`
+|処理内容 a|検査の名前と結果(OK / NG)を表示し、NG なら `g_ng` を 1 増やす。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const char *` !`what` !検査の名前
+!`int` !`ok` !0 以外なら合格
+!===
+|戻り値 a|なし
+|前提条件 a|特になし。
+|注意事項 a|特になし。
+|===
+
+.check() のフロー図
+image::flow_test_bfm_test__check.drawio.svg[check() のフロー図]
+
+.check() の関係図
+image::call_test_bfm_test__check.drawio.svg[check() の関係図]
+
+[[test_bfm_test__cmp_u32]]
+=== `cmp_u32()`
+[cols="1,5",options="autowidth"]
+.cmp_u32()
+|===
+|関数名 |`cmp_u32`(`test/bfm_test.c` 153 行目)
+|宣言 |`static int cmp_u32(const void *a, const void *b)`
+|処理内容 a|`qsort()` の比較関数。2 つの `uint32_t` を比べる。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const void *` !`a` !比べる値 1 つめへのポインタ
+!`const void *` !`b` !比べる値 2 つめへのポインタ
+!===
+|戻り値 a|`*a > *b` なら 1、`*a < *b` なら -1、等しければ 0。
+|前提条件 a|a と b が `uint32_t` を指していること。
+|注意事項 a|特になし。
+|===
+
+.cmp_u32() のフロー図
+image::flow_test_bfm_test__cmp_u32.drawio.svg[cmp_u32() のフロー図]
+
+.cmp_u32() の関係図
+image::call_test_bfm_test__cmp_u32.drawio.svg[cmp_u32() の関係図]
+
+[[test_bfm_test__op_write8]]
+=== `op_write8()`
+[cols="1,5",options="autowidth"]
+.op_write8()
+|===
+|関数名 |`op_write8`(`test/bfm_test.c` 163 行目)
+|宣言 |`static int op_write8(bfm_conn_t *c, uint32_t i)`
+|処理内容 a|相手のデータ領域の `(i & 63) * 64` へ `g_src` の先頭 8 バイトを `bfm_write()` で書く(遅延の測定用)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_conn_t *` !`c` !接続
+!`uint32_t` !`i` !何回めか(書く位置を決める)
+!===
+|戻り値 a|`bfm_write()` の戻り値。
+|前提条件 a|c が使える接続であること。
+|注意事項 a|書く位置は 64 か所を 64 バイトおきに回る。
+|===
+
+.op_write8() のフロー図
+image::flow_test_bfm_test__op_write8.drawio.svg[op_write8() のフロー図]
+
+.op_write8() の関係図
+image::call_test_bfm_test__op_write8.drawio.svg[op_write8() の関係図]
+
+[[test_bfm_test__op_write64]]
+=== `op_write64()`
+[cols="1,5",options="autowidth"]
+.op_write64()
+|===
+|関数名 |`op_write64`(`test/bfm_test.c` 164 行目)
+|宣言 |`static int op_write64(bfm_conn_t *c, uint32_t i)`
+|処理内容 a|相手のデータ領域の `(i & 63) * 64` へ `g_src` の先頭 64 バイトを `bfm_write()` で書く(遅延の測定用)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_conn_t *` !`c` !接続
+!`uint32_t` !`i` !何回めか(書く位置を決める)
+!===
+|戻り値 a|`bfm_write()` の戻り値。
+|前提条件 a|c が使える接続であること。
+|注意事項 a|書く位置は 64 か所を 64 バイトおきに回る。
+|===
+
+.op_write64() のフロー図
+image::flow_test_bfm_test__op_write64.drawio.svg[op_write64() のフロー図]
+
+.op_write64() の関係図
+image::call_test_bfm_test__op_write64.drawio.svg[op_write64() の関係図]
+
+[[test_bfm_test__op_read8]]
+=== `op_read8()`
+[cols="1,5",options="autowidth"]
+.op_read8()
+|===
+|関数名 |`op_read8`(`test/bfm_test.c` 165 行目)
+|宣言 |`static int op_read8(bfm_conn_t *c, uint32_t i)`
+|処理内容 a|相手のデータ領域の `(i & 63) * 64` から 8 バイトを `bfm_read()` で手元の一時領域へ読む(遅延の測定用)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_conn_t *` !`c` !接続
+!`uint32_t` !`i` !何回めか(読む位置を決める)
+!===
+|戻り値 a|`bfm_read()` の戻り値。
+|前提条件 a|c が使える接続であること。
+|注意事項 a|読んだ中身は捨てる。
+|===
+
+.op_read8() のフロー図
+image::flow_test_bfm_test__op_read8.drawio.svg[op_read8() のフロー図]
+
+.op_read8() の関係図
+image::call_test_bfm_test__op_read8.drawio.svg[op_read8() の関係図]
+
+[[test_bfm_test__op_read64]]
+=== `op_read64()`
+[cols="1,5",options="autowidth"]
+.op_read64()
+|===
+|関数名 |`op_read64`(`test/bfm_test.c` 166 行目)
+|宣言 |`static int op_read64(bfm_conn_t *c, uint32_t i)`
+|処理内容 a|相手のデータ領域の `(i & 63) * 64` から 64 バイトを `bfm_read()` で手元の一時領域へ読む(遅延の測定用)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_conn_t *` !`c` !接続
+!`uint32_t` !`i` !何回めか(読む位置を決める)
+!===
+|戻り値 a|`bfm_read()` の戻り値。
+|前提条件 a|c が使える接続であること。
+|注意事項 a|読んだ中身は捨てる。
+|===
+
+.op_read64() のフロー図
+image::flow_test_bfm_test__op_read64.drawio.svg[op_read64() のフロー図]
+
+.op_read64() の関係図
+image::call_test_bfm_test__op_read64.drawio.svg[op_read64() の関係図]
+
+[[test_bfm_test__op_faa]]
+=== `op_faa()`
+[cols="1,5",options="autowidth"]
+.op_faa()
+|===
+|関数名 |`op_faa`(`test/bfm_test.c` 167 行目)
+|宣言 |`static int op_faa(bfm_conn_t *c, uint32_t i)`
+|処理内容 a|相手の atomic 語 100〜163 のうち `100 + (i & 63)` 番めへ `bfm_faa()` で 1 を足す(遅延の測定用)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_conn_t *` !`c` !接続
+!`uint32_t` !`i` !何回めか(語を決める)
+!===
+|戻り値 a|`bfm_faa()` の戻り値。
+|前提条件 a|c が使える接続であること。
+|注意事項 a|元の値は捨てる。検査 [4] で使う語 0・1 には触らない。
+|===
+
+.op_faa() のフロー図
+image::flow_test_bfm_test__op_faa.drawio.svg[op_faa() のフロー図]
+
+.op_faa() の関係図
+image::call_test_bfm_test__op_faa.drawio.svg[op_faa() の関係図]
+
+[[test_bfm_test__op_cas]]
+=== `op_cas()`
+[cols="1,5",options="autowidth"]
+.op_cas()
+|===
+|関数名 |`op_cas`(`test/bfm_test.c` 168 行目)
+|宣言 |`static int op_cas(bfm_conn_t *c, uint32_t i)`
+|処理内容 a|相手の atomic 語 200〜263 のうち `200 + (i & 63)` 番めへ `bfm_cas()` で比較値 1・置き換え値 2 の CAS を出す(遅延の測定用)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_conn_t *` !`c` !接続
+!`uint32_t` !`i` !何回めか(語を決める)
+!===
+|戻り値 a|`bfm_cas()` の戻り値。
+|前提条件 a|c が使える接続であること。
+|注意事項 a|語は 0 で埋まっているので CAS は外れる(値は変わらない)。元の値は捨てる。
+|===
+
+.op_cas() のフロー図
+image::flow_test_bfm_test__op_cas.drawio.svg[op_cas() のフロー図]
+
+.op_cas() の関係図
+image::call_test_bfm_test__op_cas.drawio.svg[op_cas() の関係図]
+
+[[test_bfm_test__lat]]
+=== `lat()`
+[cols="1,5",options="autowidth"]
+.lat()
+|===
+|関数名 |`lat`(`test/bfm_test.c` 170 行目)
+|宣言 |`static void lat(bfm_conn_t *c, const char *name, op_fn fn, uint32_t n)`
+|処理内容 a|操作 fn を 1 個ずつ完了まで待つ形で n 回流し、1 回ごとの遅延の中央値・平均・最小・p99・p99.9 を表示する。先に `n / 10 + 100` 回を暖機として流す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_conn_t *` !`c` !接続
+!`const char *` !`name` !表示する操作の名前
+!`op_fn` !`fn` !流す操作(`op_write8` など)
+!`uint32_t` !`n` !測る回数
+!===
+|戻り値 a|なし
+|前提条件 a|c が使える接続であること。
+|注意事項 a|* n は `g_lat` の要素数(200000)に切り詰める。
+* 操作が 1 回でも失敗したら `g_ng` を 1 増やし、表示せずに戻る。
+* 測る間に `g_stop` が立つとループを抜け、測れた回数 m ぶんで並べ替えて表示する(1 回も測れなければ表示せずに戻る)。暖機の間は `g_stop` を見ない。
+|===
+
+.lat() のフロー図
+image::flow_test_bfm_test__lat.drawio.svg[lat() のフロー図]
+
+.lat() の関係図
+image::call_test_bfm_test__lat.drawio.svg[lat() の関係図]
+
+[[test_bfm_test__run_client]]
+=== `run_client()`
+[cols="1,5",options="autowidth"]
+.run_client()
+|===
+|関数名 |`run_client`(`test/bfm_test.c` 192 行目)
+|宣言 |`static int run_client(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t iters, int oob)`
+|処理内容 a|掛け側の本体。相手へ接続し、手元に公開メモリのデータ領域の模型を持って、次の検査をして結果を表示する。
+
+* [1] いろいろな長さ・半端な位置の read と 64KiB まとめての read
+* [2] inline に収まる長さと収まらない長さの write と読み戻し
+* [3] `bfm_write_post()` を 5000 回と `bfm_flush()` の後の読み戻し
+* [4] FAA と CAS の元の値の並び、相手のメモリの語の並び(エンディアン)
+* [5] データ領域全体の読み戻し
+* [6] 遅延(`lat()`)と `bfm_write_post()` の速さ、その後の読み戻し(ここまで NG が無いときだけ)
+* [7] 公開メモリの外の read を相手が断ること(oob のときだけ)
+
+最後に模型の hash を表示して接続を返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`ip` !相手の IPv4 アドレス
+!`const uint8_t [6]` !`mac` !相手の MAC アドレス
+!`uint16_t` !`port` !接続の番号
+!`uint32_t` !`iters` ![6] の遅延の測定の回数
+!`int` !`oob` !0 以外なら [7] を行う
+!===
+|戻り値 a|0: すべて OK。1: 接続できない、相手の公開メモリが小さい、または NG があった。
+|前提条件 a|`bfm_init()` が済んでいること。相手が server か `tools/bfm_peer.c` で、公開メモリを取り決めどおりに埋めていること。
+|注意事項 a|* [7] は接続の構造体の `rlen` を一時的に書き換えて手元の範囲検査をすり抜ける。相手が断ると接続はエラーになる。
+* [4] で相手の atomic 語 0・1 を書き換える。[6] の測定はデータ領域の 64 か所と atomic 語 100〜163・200〜263 に触る。
+* 検査が NG でも次の検査へ進む([6] だけは飛ばす)。
+|===
+
+.run_client() のフロー図
+image::flow_test_bfm_test__run_client.drawio.svg[run_client() のフロー図]
+
+.run_client() の関係図
+image::call_test_bfm_test__run_client.drawio.svg[run_client() の関係図]
+
+[[test_bfm_test__rdtsc]]
+=== `rdtsc()`
+[cols="1,5",options="autowidth"]
+.rdtsc()
+|===
+|関数名 |`rdtsc`(`test/bfm_test.c` 328 行目)
+|宣言 |`static uint64_t rdtsc(void)`
+|処理内容 a|`rdtsc` 命令で CPU のタイムスタンプカウンタを読む。
+|引数 |なし
+|戻り値 a|タイムスタンプカウンタの値(64 ビット)。
+|前提条件 a|x86 の CPU で動かすこと。
+|注意事項 a|ナノ秒への換算は `tsc_calibrate()` で求めた `g_tsc_per_ns` で行う。
+|===
+
+.rdtsc() のフロー図
+image::flow_test_bfm_test__rdtsc.drawio.svg[rdtsc() のフロー図]
+
+.rdtsc() の関係図
+image::call_test_bfm_test__rdtsc.drawio.svg[rdtsc() の関係図]
+
+[[test_bfm_test__tsc_calibrate]]
+=== `tsc_calibrate()`
+[cols="1,5",options="autowidth"]
+.tsc_calibrate()
+|===
+|関数名 |`tsc_calibrate`(`test/bfm_test.c` 335 行目)
+|宣言 |`static void tsc_calibrate(void)`
+|処理内容 a|200ms 眠る前後の `now_ns()` と `rdtsc()` の差から、1 ナノ秒あたりのカウンタの数 `g_tsc_per_ns` を求める。
+|引数 |なし
+|戻り値 a|なし
+|前提条件 a|特になし。
+|注意事項 a|200ms かかる。
+|===
+
+.tsc_calibrate() のフロー図
+image::flow_test_bfm_test__tsc_calibrate.drawio.svg[tsc_calibrate() のフロー図]
+
+.tsc_calibrate() の関係図
+image::call_test_bfm_test__tsc_calibrate.drawio.svg[tsc_calibrate() の関係図]
+
+[[test_bfm_test__bench_one]]
+=== `bench_one()`
+[cols="1,5",options="autowidth"]
+.bench_one()
+|===
+|関数名 |`bench_one`(`test/bfm_test.c` 347 行目)
+|宣言 |`static int bench_one(bfm_conn_t *c, int is_read, uint32_t size, uint32_t qd, uint32_t n)`
+|処理内容 a|write(is_read = 0)か read(is_read = 1)を size バイトで n 回、常に qd 個を出しておく形で流し、IOPS・MB/s・平均遅延を 1 行表示する。1 回ごとに完了通知を求め(完了は出した順に来る)、出してから完了を拾うまでを遅延とする。相手のアドレスは size ずつずらし、相手の公開メモリの中の最大 1024 か所を回る。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_conn_t *` !`c` !接続
+!`int` !`is_read` !0 なら write、1 なら read
+!`uint32_t` !`size` !1 回のバイト数(`BENCH_SIZE_MAX` 以下)
+!`uint32_t` !`qd` !同時に出しておく数(多重度、1 以上 `BENCH_QD_MAX` 以下)
+!`uint32_t` !`n` !流す回数
+!===
+|戻り値 a|0: 流し終えた。-1: 流せない組(下記)、出せない、エラー完了、または `g_stop` が立った。
+|前提条件 a|`tsc_calibrate()` が済んでいること。中継バッファが `qd * size` バイト以上あること(`main()` が bench のとき `g_bfm_stage_size` を `BENCH_QD_MAX * BENCH_SIZE_MAX` にする)。
+|注意事項 a|* 内部の関数 `bfm_ops_post_rw()` / `bfm_ops_poll1()` を直接使う。
+* k 番めの操作は中継バッファの `k * size` を使う(k は出した数を qd で割った余り)。
+* 相手の公開メモリが size より小さい(slots が 0)、qd が 0 か `BENCH_QD_MAX` より大きい、size が `BENCH_SIZE_MAX` より大きいときは、流せないと表示して -1 を返す。
+|===
+
+.bench_one() のフロー図
+image::flow_test_bfm_test__bench_one.drawio.svg[bench_one() のフロー図]
+
+.bench_one() の関係図
+image::call_test_bfm_test__bench_one.drawio.svg[bench_one() の関係図]
+
+[[test_bfm_test__run_bench]]
+=== `run_bench()`
+[cols="1,5",options="autowidth"]
+.run_bench()
+|===
+|関数名 |`run_bench`(`test/bfm_test.c` 384 行目)
+|宣言 |`static int run_bench(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t n)`
+|処理内容 a|bench の本体。相手へ接続し、write と read のそれぞれについて、大きさ 4・8・32・64・128・256・512・8192・65536・262144 バイトと多重度 1・4・8・16 の組を `bench_one()` で n 回ずつ流す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`ip` !相手の IPv4 アドレス
+!`const uint8_t [6]` !`mac` !相手の MAC アドレス
+!`uint16_t` !`port` !接続の番号
+!`uint32_t` !`n` !1 つの組で流す回数
+!===
+|戻り値 a|0: すべて流し終えた。1: 接続できない、または `bench_one()` が失敗した。
+|前提条件 a|`bfm_init()` が済んでいて、`g_bfm_stage_size` が `BENCH_QD_MAX * BENCH_SIZE_MAX` であること(`main()` が設定する)。
+|注意事項 a|* `bench_one()` が 1 回でも失敗したら残りの組を流さずに接続を返す。
+* 埋め込み(inline)でない write は中継バッファから送るので、流す前に中継バッファ全体を `0x5a ^ i` で埋めてキャッシュを書き戻しておく(内部の構造体の `stage` / `stage_size` を直接使う)。
+|===
+
+.run_bench() のフロー図
+image::flow_test_bfm_test__run_bench.drawio.svg[run_bench() のフロー図]
+
+.run_bench() の関係図
+image::call_test_bfm_test__run_bench.drawio.svg[run_bench() の関係図]
+
+[[test_bfm_test__main]]
+=== `main()`
+[cols="1,5",options="autowidth"]
+.main()
+|===
+|関数名 |`main`(`test/bfm_test.c` 411 行目)
+|宣言 |`int main(int argc, char **argv)`
+|処理内容 a|オプションを読んで設定の変数を決め、シグナルの受け口を登録し、ライブラリを立ち上げて、引数の動き(server / client / bench / info)を行い、ライブラリを止める。
+
+* `-d BDF`: `g_bfm_linux_pci_bdf`
+* `-i IP`: `g_bfm_local_ip`
+* `-p ポート`: 接続の番号(既定は `g_bfm_cm_port`)
+* `-m 経路MTU`: `g_bfm_path_mtu`
+* `-M ポートのMTU`: `g_bfm_port_mtu`
+* `-n 回数`: client の遅延の測定の回数(既定 20000)、bench の回数(既定 100000)
+* `-B` / `-S` / `-C`: `g_bfm_bf_enable` / `g_bfm_scatter_cqe` / `g_bfm_cpu_awake` を 0 にする
+* `-x`: client の検査 [7] を行う
+* `-v`: `g_bfm_verbose` を 1 にする
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`int` !`argc` !引数の数
+!`char **` !`argv` !引数
+!===
+|戻り値 a|0: 成功。1: 立ち上げの失敗、または server / client / bench が失敗を返した。2: 引数が正しくない。
+|前提条件 a|特になし。
+|注意事項 a|* `bfm_init()` の前に `g_server` を決める(server のときだけ SIGQUIT で hash を出し、それ以外では SIGQUIT も止める合図になる。`on_sig()`)。
+* bench のときは `bfm_init()` の前に `g_bfm_stage_size` を `BENCH_QD_MAX * BENCH_SIZE_MAX`(4MiB)にする。
+* client / bench で相手の IP と MAC が足りないときは、info の判定へ進み、使い方を表示して 2 を返す。
+* `-h` と知らないオプションは使い方を表示して 2 を返す。
+|===
+
+.main() のフロー図
+image::flow_test_bfm_test__main.drawio.svg[main() のフロー図]
+
+.main() の関係図
+image::call_test_bfm_test__main.drawio.svg[main() の関係図]
+
+== `tools/bfm_peer.c`
+
+bfmem の試験の相手(`bfm_peer`)。Linux のカーネルの mlx5 の上で librdmacm と libibverbs を使って動く。受け側(server)は公開メモリを登録して `bfm_test` の server と同じ模様で埋め、その先頭・rkey・大きさ・自分の MAC を REP の private data(bfmem の `bfm_cm.c` と同じ `BFM1` の形)で返し、`kill -QUIT` か切断でデータ領域の hash を表示する。掛け側(client)は `bfmem_test` の server へ繋ぎ、REQ の private data に自分の公開メモリと MAC を載せ、相手のメモリへ read / write / atomic を出して確かめ、遅延を測る。公開メモリは静的変数 `g_mem`(大きさ `g_mem_len`、既定 1MiB)で、[0, 64KiB) がデータ領域、[64KiB, +4KiB) が atomic 語の区画。
+
+[[tools_bfm_peer__on_sig]]
+=== `on_sig()`
+[cols="1,5",options="autowidth"]
+.on_sig()
+|===
+|関数名 |`on_sig`(`tools/bfm_peer.c` 46 行目)
+|宣言 |`static void on_sig(int s)`
+|処理内容 a|シグナルの処理。`SIGQUIT` なら hash の表示の要求(`g_dump = 1`)、それ以外なら止める要求(`g_stop = 1`)を立てる。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`int` !`s` !受けたシグナルの番号
+!===
+|戻り値 a|なし
+|前提条件 a|特になし。
+|注意事項 a|旗を立てるだけで、表示や停止は `run_server()` のイベントの待ちのループ(`g_dump` / `g_stop`)と `run_client()` の遅延の測定のループ(`g_stop`)が行う。`SA_RESTART` なしで登録するので、`rdma_get_cm_event()` は `EINTR` で戻る。
+|===
+
+.on_sig() のフロー図
+image::flow_tools_bfm_peer__on_sig.drawio.svg[on_sig() のフロー図]
+
+.on_sig() の関係図
+image::call_tools_bfm_peer__on_sig.drawio.svg[on_sig() の関係図]
+
+[[tools_bfm_peer__now_ns]]
+=== `now_ns()`
+[cols="1,5",options="autowidth"]
+.now_ns()
+|===
+|関数名 |`now_ns`(`tools/bfm_peer.c` 52 行目)
+|宣言 |`static uint64_t now_ns(void)`
+|処理内容 a|`CLOCK_MONOTONIC` の今の時刻をナノ秒で返す。
+|引数 |なし
+|戻り値 a|今の時刻(ナノ秒)。
+|前提条件 a|特になし。
+|注意事項 a|`clock_gettime()` の戻り値は見ない。
+|===
+
+.now_ns() のフロー図
+image::flow_tools_bfm_peer__now_ns.drawio.svg[now_ns() のフロー図]
+
+.now_ns() の関係図
+image::call_tools_bfm_peer__now_ns.drawio.svg[now_ns() の関係図]
+
+[[tools_bfm_peer__fnv1a]]
+=== `fnv1a()`
+[cols="1,5",options="autowidth"]
+.fnv1a()
+|===
+|関数名 |`fnv1a`(`tools/bfm_peer.c` 59 行目)
+|宣言 |`static uint64_t fnv1a(const uint8_t *p, size_t n)`
+|処理内容 a|バイト列の 64 ビットの FNV-1a の hash を求める。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const uint8_t *` !`p` !hash を求めるバイト列の先頭
+!`size_t` !`n` !バイト数
+!===
+|戻り値 a|64 ビットの hash の値。
+|前提条件 a|`p` から `n` バイトが読めること。
+|注意事項 a|受け側と `bfmem_test` の server が出す hash と、掛け側の模型の hash を比べるために使う。
+|===
+
+.fnv1a() のフロー図
+image::flow_tools_bfm_peer__fnv1a.drawio.svg[fnv1a() のフロー図]
+
+.fnv1a() の関係図
+image::call_tools_bfm_peer__fnv1a.drawio.svg[fnv1a() の関係図]
+
+[[tools_bfm_peer__fill]]
+=== `fill()`
+[cols="1,5",options="autowidth"]
+.fill()
+|===
+|関数名 |`fill`(`tools/bfm_peer.c` 69 行目)
+|宣言 |`static void fill(void)`
+|処理内容 a|公開メモリを初期の模様で埋める。データ領域 [0, 64KiB) の i バイトめを `(i*7+3) AND 0xff` にし、atomic 語の区画 [64KiB, +4KiB) を 0 にする。
+|引数 |なし
+|戻り値 a|なし
+|前提条件 a|`g_mem` が 64KiB + 4KiB 以上の領域を指していること(`main()` が確保する)。
+|注意事項 a|`bfm_test` の server と同じ取り決め。掛け側の確かめはこの模様を前提にする。
+|===
+
+.fill() のフロー図
+image::flow_tools_bfm_peer__fill.drawio.svg[fill() のフロー図]
+
+.fill() の関係図
+image::call_tools_bfm_peer__fill.drawio.svg[fill() の関係図]
+
+[[tools_bfm_peer__dump]]
+=== `dump()`
+[cols="1,5",options="autowidth"]
+.dump()
+|===
+|関数名 |`dump`(`tools/bfm_peer.c` 75 行目)
+|宣言 |`static void dump(const char *why)`
+|処理内容 a|データ領域の hash(`fnv1a()`)と、atomic 語の区画の先頭 3 語の値(ホスト順)を表示する。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const char *` !`why` !表示の理由(「要求」「切断」など。行の先頭に出す)
+!===
+|戻り値 a|なし
+|前提条件 a|`g_mem` が確保されていること。
+|注意事項 a|表示の後で標準出力を `fflush()` する。
+|===
+
+.dump() のフロー図
+image::flow_tools_bfm_peer__dump.drawio.svg[dump() のフロー図]
+
+.dump() の関係図
+image::call_tools_bfm_peer__dump.drawio.svg[dump() の関係図]
+
+[[tools_bfm_peer__find_mac]]
+=== `find_mac()`
+[cols="1,5",options="autowidth"]
+.find_mac()
+|===
+|関数名 |`find_mac`(`tools/bfm_peer.c` 87 行目)
+|宣言 |`static int find_mac(const struct sockaddr *addr)`
+|処理内容 a|IPv4 のアドレス `addr` を持つネットワークの IF を `getifaddrs()` で探し、その IF の MAC(`AF_PACKET` のアドレス)を `g_mac` に入れる。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const struct sockaddr *` !`addr` !探す IPv4 のアドレス(`struct sockaddr_in` として読む)
+!===
+|戻り値 a|0: MAC が見つかった。-1: `getifaddrs()` の失敗、またはそのアドレスを持つ IF か、その IF の MAC が見つからない。
+|前提条件 a|`addr` が `AF_INET` のアドレスであること(族は見ない)。
+|注意事項 a|* 同じアドレスを持つ IF が複数あれば、最後に見つかった IF を使う。
+* `0.0.0.0` はそれを持つ IF が無いので -1 になる(`run_server()` は `0.0.0.0` で待つとき、接続要求が来た自分のアドレスでこれを呼ぶ)。
+|===
+
+.find_mac() のフロー図
+image::flow_tools_bfm_peer__find_mac.drawio.svg[find_mac() のフロー図]
+
+.find_mac() の関係図
+image::call_tools_bfm_peer__find_mac.drawio.svg[find_mac() の関係図]
+
+[[tools_bfm_peer__put_priv]]
+=== `put_priv()`
+[cols="1,5",options="autowidth"]
+.put_priv()
+|===
+|関数名 |`put_priv`(`tools/bfm_peer.c` 110 行目)
+|宣言 |`static void put_priv(uint8_t *p, const struct ibv_mr *mr)`
+|処理内容 a|接続の private data(36 バイト、`BFM1` の形)を作る。先頭からマジック `0x42464d31`(ビッグエンディアン)、5 バイトめに版 1、7 バイトめに「MAC あり」1、8 バイトめから公開メモリの先頭(8 バイト)、16 バイトめから rkey(4 バイト)、20 バイトめから大きさ(8 バイト)をいずれもビッグエンディアンで、28 バイトめから `g_mac` の 6 バイトを置く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint8_t *` !`p` !書き込む先(`PRIV_LEN` = 36 バイト)
+!`const struct ibv_mr *` !`mr` !載せる公開メモリの MR
+!===
+|戻り値 a|なし
+|前提条件 a|`g_mac` に自分の MAC が入っていること(`find_mac()` の後)。
+|注意事項 a|書かないバイトは 0 にする。bfmem の `bfm_cm.c` と同じ形。
+|===
+
+.put_priv() のフロー図
+image::flow_tools_bfm_peer__put_priv.drawio.svg[put_priv() のフロー図]
+
+.put_priv() の関係図
+image::call_tools_bfm_peer__put_priv.drawio.svg[put_priv() の関係図]
+
+[[tools_bfm_peer__setup_qp]]
+=== `setup_qp()`
+[cols="1,5",options="autowidth"]
+.setup_qp()
+|===
+|関数名 |`setup_qp`(`tools/bfm_peer.c` 135 行目)
+|宣言 |`static int setup_qp(struct rdma_cm_id *id, peer_t *pr)`
+|処理内容 a|接続の id に PD・CQ(256 個)・公開メモリの MR(`g_mem`、ローカル書き・リモートの読み書き・atomic を許す)・手元の作業域(64KiB、4KiB 境界)とその MR を作り、RC の QP(送り 128・受け 1、SGE 1、インライン 64 バイト、全部の送りに完了を出す)を `rdma_create_qp()` で作る。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct rdma_cm_id *` !`id` !QP を付ける接続の id
+!`peer_t *` !`pr` !作ったものを入れる先
+!===
+|戻り値 a|0: 作れた。-1: PD・CQ・作業域・MR のどれかか、QP を作れない(理由を表示する)。
+|前提条件 a|`id` のデバイス(`id->verbs`)が決まっていること(受け側は接続要求の id、掛け側は経路の解決の後)。`g_mem` が確保されていること。`pr` が 0 で埋めてあること(PD か作業域が取れないとき、MR の欄は書かない)。
+|注意事項 a|* 失敗したとき、途中まで作ったものは返さず `pr` に残る。呼び出し側が `teardown()` で返す。
+* PD が取れなければ MR を登録しない。作業域が取れなければ作業域の MR を登録しない。
+|===
+
+.setup_qp() のフロー図
+image::flow_tools_bfm_peer__setup_qp.drawio.svg[setup_qp() のフロー図]
+
+.setup_qp() の関係図
+image::call_tools_bfm_peer__setup_qp.drawio.svg[setup_qp() の関係図]
+
+[[tools_bfm_peer__teardown]]
+=== `teardown()`
+[cols="1,5",options="autowidth"]
+.teardown()
+|===
+|関数名 |`teardown`(`tools/bfm_peer.c` 165 行目)
+|宣言 |`static void teardown(struct rdma_cm_id *id, peer_t *pr)`
+|処理内容 a|`setup_qp()` で作ったものを返す。QP・作業域の MR・公開メモリの MR・CQ・PD を作ってあれば返し、作業域を解放して `pr` を 0 で埋める。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct rdma_cm_id *` !`id` !QP を付けた接続の id
+!`peer_t *` !`pr` !返すものが入っている先
+!===
+|戻り値 a|なし
+|前提条件 a|`pr` が `setup_qp()` で埋めたもの(途中で失敗したものを含む)か、0 で埋めたものであること。
+|注意事項 a|* `id` そのものは壊さない(呼び出し側が、その id のイベントを全部 ack した後で `rdma_destroy_id()` する)。
+* 作っていないもの(QP の無い id、NULL の欄)は飛ばすので、`setup_qp()` が途中で失敗した後や、`setup_qp()` を呼ぶ前にも呼べる。
+|===
+
+.teardown() のフロー図
+image::flow_tools_bfm_peer__teardown.drawio.svg[teardown() のフロー図]
+
+.teardown() の関係図
+image::call_tools_bfm_peer__teardown.drawio.svg[teardown() の関係図]
+
+[[tools_bfm_peer__get_peer_priv]]
+=== `get_peer_priv()`
+[cols="1,5",options="autowidth"]
+.get_peer_priv()
+|===
+|関数名 |`get_peer_priv`(`tools/bfm_peer.c` 176 行目)
+|宣言 |`static int get_peer_priv(const void *data, uint8_t len, peer_t *pr)`
+|処理内容 a|相手から来た private data(`BFM1` の形)を読み、相手の公開メモリの先頭・rkey・大きさを `pr` の `raddr` / `rkey` / `rlen` に入れる。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const void *` !`data` !private data の先頭
+!`uint8_t` !`len` !private data のバイト数
+!`peer_t *` !`pr` !読んだ値を入れる先
+!===
+|戻り値 a|0: 読めた。-1: `data` が NULL、`len` が `PRIV_LEN` より短い、またはマジックが違う。
+|前提条件 a|特になし。
+|注意事項 a|版・「MAC あり」・MAC は読まない。
+|===
+
+.get_peer_priv() のフロー図
+image::flow_tools_bfm_peer__get_peer_priv.drawio.svg[get_peer_priv() のフロー図]
+
+.get_peer_priv() の関係図
+image::call_tools_bfm_peer__get_peer_priv.drawio.svg[get_peer_priv() の関係図]
+
+[[tools_bfm_peer__run_server]]
+=== `run_server()`
+[cols="1,5",options="autowidth"]
+.run_server()
+|===
+|関数名 |`run_server`(`tools/bfm_peer.c` 194 行目)
+|宣言 |`static int run_server(const char *bind_ip, uint16_t port)`
+|処理内容 a|受け側。`bind_ip`:`port` で RDMA CM の接続を待ち、接続要求が来たら公開メモリを初期の模様で埋め直し(`fill()`)、QP を作って(`setup_qp()`)、自分の公開メモリと MAC を REP の private data に載せて受ける(`rdma_accept()`)。同時に受ける接続は 1 本で、2 本目の要求は断る。今の接続が切断されたら hash を表示して QP などを返す。`SIGQUIT` で hash を表示し、`SIGINT` / `SIGTERM` で止まる。止まるときは残っている接続・待ち受けの id・イベントのチャネルを返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const char *` !`bind_ip` !待ち受ける IPv4 のアドレス(文字列)。`0.0.0.0` なら全部の IF で待つ
+!`uint16_t` !`port` !待ち受けるポート
+!===
+|戻り値 a|0: シグナルで止めた、または `rdma_get_cm_event()` が `EINTR` 以外で失敗した。1: イベントのチャネルを作れない、`bind_ip` が IPv4 のアドレスでない、そのアドレスを持つ IF か MAC が見つからない、または待ち受けに失敗した。
+|前提条件 a|`g_mem` が確保され、シグナルの処理(`on_sig()`)が登録されていること(`main()` が行う)。
+|注意事項 a|* `rdma_destroy_id()` は、その id のイベントを全部 ack した後で呼ぶ(先に呼ぶと ack を待って永久に止まる)。断った要求の id・受けられなかった id・切断された id は `drop` に覚えておき、ack の後で壊す。
+* `0.0.0.0` で待つときは、REP に載せる MAC(`g_mac`)を接続要求ごとに、その要求が来た自分のアドレスの IF で調べる(`find_mac()`)。分からなければその要求を断る。
+* 応答の資源の数(responder_resources)は自分の `max_qp_rd_atom` と相手の initiator_depth の小さい方、出す数(initiator_depth)は自分の `max_qp_init_rd_atom` と相手の responder_resources の小さい方にする。再送の回数は 7。
+* `setup_qp()` か `ibv_query_device()` が失敗したら、要求を断り、途中まで作ったものを `teardown()` で返す。
+* 切断のイベントは、今の接続(`cid`)の id のものだけを扱う。
+* チャネルを作れないときのほかは、失敗でも止めたときでも `out` で後片付けをする(接続が残っていれば `rdma_disconnect()`・`teardown()`・`rdma_destroy_id()`、待ち受けの id があれば壊し、チャネルを壊す)。
+|===
+
+.run_server() のフロー図
+image::flow_tools_bfm_peer__run_server.drawio.svg[run_server() のフロー図]
+
+.run_server() の関係図
+image::call_tools_bfm_peer__run_server.drawio.svg[run_server() の関係図]
+
+[[tools_bfm_peer__post_wait]]
+=== `post_wait()`
+[cols="1,5",options="autowidth"]
+.post_wait()
+|===
+|関数名 |`post_wait`(`tools/bfm_peer.c` 327 行目)
+|宣言 |`static int post_wait(struct rdma_cm_id *id, peer_t *pr, struct ibv_send_wr *wr)`
+|処理内容 a|送りの要求を 1 つ出し(`ibv_post_send()`)、その完了を CQ から待つ。完了の状態を `g_last_status` に残す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct rdma_cm_id *` !`id` !QP を持つ接続の id
+!`peer_t *` !`pr` !CQ を持つ相手の情報
+!`struct ibv_send_wr *` !`wr` !出す送りの要求
+!===
+|戻り値 a|0: 完了が成功。-1: 出せない、完了が `POST_WAIT_NS`(5 秒)のうちに来ない、CQ の読み出しの失敗、または完了がエラー(理由を表示する)。
+|前提条件 a|`setup_qp()` で QP と CQ を作り、接続していること。ほかに完了を待つ要求が無いこと。
+|注意事項 a|* 完了を待つ上限は `POST_WAIT_NS`(5 秒、相手の再送が尽きるより長く)。時刻(`now_ns()`)は CQ を 4096 回空読みするごとに見る。
+* `ibv_post_send()` で失敗したときは `g_last_status` を書き換えない。時間切れと CQ の読み出しの失敗は `IBV_WC_GENERAL_ERR` として残す。
+|===
+
+.post_wait() のフロー図
+image::flow_tools_bfm_peer__post_wait.drawio.svg[post_wait() のフロー図]
+
+.post_wait() の関係図
+image::call_tools_bfm_peer__post_wait.drawio.svg[post_wait() の関係図]
+
+[[tools_bfm_peer__op]]
+=== `op()`
+[cols="1,5",options="autowidth"]
+.op()
+|===
+|関数名 |`op`(`tools/bfm_peer.c` 353 行目)
+|宣言 |`static int op(struct rdma_cm_id *id, peer_t *pr, enum ibv_wr_opcode opc, uint64_t off, uint32_t len, uint64_t a, uint64_t b, int inl)`
+|処理内容 a|相手の公開メモリへの操作を 1 つ作って出し、完了を待つ(`post_wait()`)。手元の作業域の先頭 `len` バイトを SGE にし、atomic(CAS / FAA)なら `wr.atomic` に、それ以外(read / write)なら `wr.rdma` に相手のアドレス(`raddr + off`)と rkey を入れる。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct rdma_cm_id *` !`id` !QP を持つ接続の id
+!`peer_t *` !`pr` !相手の公開メモリの情報と手元の作業域
+!`enum ibv_wr_opcode` !`opc` !操作の種類(`IBV_WR_RDMA_READ` / `IBV_WR_RDMA_WRITE` / `IBV_WR_ATOMIC_CMP_AND_SWP` / `IBV_WR_ATOMIC_FETCH_AND_ADD`)
+!`uint64_t` !`off` !相手の公開メモリの中の位置(バイト)
+!`uint32_t` !`len` !バイト数(atomic は 8)
+!`uint64_t` !`a` !atomic の比べる値(CAS)か足す値(FAA)
+!`uint64_t` !`b` !CAS の書き込む値
+!`int` !`inl` !0 以外ならインラインで送る(`IBV_SEND_INLINE`)
+!===
+|戻り値 a|`post_wait()` の戻り値(0: 成功、-1: 失敗)。
+|前提条件 a|`get_peer_priv()` で相手の `raddr` / `rkey` を入れてあること。`len` が作業域(64KiB)以下であること。
+|注意事項 a|read と atomic の結果(atomic は元の値)は手元の作業域 `pr->lbuf` の先頭に入る。write は作業域の先頭から送る。
+|===
+
+.op() のフロー図
+image::flow_tools_bfm_peer__op.drawio.svg[op() のフロー図]
+
+.op() の関係図
+image::call_tools_bfm_peer__op.drawio.svg[op() の関係図]
+
+[[tools_bfm_peer__wait_event]]
+=== `wait_event()`
+[cols="1,5",options="autowidth"]
+.wait_event()
+|===
+|関数名 |`wait_event`(`tools/bfm_peer.c` 377 行目)
+|宣言 |`static int wait_event(struct rdma_event_channel *ch, enum rdma_cm_event_type want, peer_t *pr)`
+|処理内容 a|イベントのチャネルから次の RDMA CM のイベントを 1 つ待ち、それが `want` かを見て ack する。`want` が `RDMA_CM_EVENT_ESTABLISHED` のときは、ack の前に REP の private data を `get_peer_priv()` で読み、相手の公開メモリの情報を `pr` に入れる。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct rdma_event_channel *` !`ch` !イベントのチャネル
+!`enum rdma_cm_event_type` !`want` !待っているイベントの種類
+!`peer_t *` !`pr` !ESTABLISHED のとき相手の公開メモリの情報を入れる先
+!===
+|戻り値 a|0: 来たイベントが `want` だった(ESTABLISHED なら private data も読めた)。-1: `rdma_get_cm_event()` の失敗、違うイベントが来た、または ESTABLISHED の private data に相手の公開メモリの情報が無い(いずれも理由を表示する)。
+|前提条件 a|`ch` が作ってあること。
+|注意事項 a|* 来たイベントは、`want` でも違っても ack する(`rdma_get_cm_event()` が失敗したときは ack するものが無い)。
+* private data は ack すると読めなくなるので、ack の前に読む。
+* `run_client()` が、アドレスの解決・経路の解決・接続・切断の各段で使う。
+|===
+
+.wait_event() のフロー図
+image::flow_tools_bfm_peer__wait_event.drawio.svg[wait_event() のフロー図]
+
+.wait_event() の関係図
+image::call_tools_bfm_peer__wait_event.drawio.svg[wait_event() の関係図]
+
+[[tools_bfm_peer__run_client]]
+=== `run_client()`
+[cols="1,5",options="autowidth"]
+.run_client()
+|===
+|関数名 |`run_client`(`tools/bfm_peer.c` 397 行目)
+|宣言 |`static int run_client(const char *dst_ip, uint16_t port, unsigned iters, int oob)`
+|処理内容 a|掛け側。`dst_ip`:`port` の受け側へ RDMA CM で繋ぎ(REQ の private data に自分の公開メモリと MAC を載せる)、相手の公開メモリへ次の確かめと測定をする。
+
+* [1] 64KiB を read して初期の模様と比べる
+* [2] 1〜4000 バイトの write(64 バイト以下はインライン)と読み戻しを 300 回
+* [3] FAA を 1000 回、CAS で 0 → 1000 と進める(atomic の元の値のバイト順を最初の 0 でない値で決める)
+* 模型の hash を表示する
+* 遅延: write 8B・read 8B・FAA をそれぞれ `iters` 回出して平均を表示する
+* [4] `oob` が 0 以外なら、公開メモリのすぐ外を read して相手が `REM_ACCESS_ERR` で断ることを確かめる
+
+最後に(途中で失敗したときも)切断して QP・id・アドレスの情報・イベントのチャネルを返し、結果を表示する。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const char *` !`dst_ip` !相手の IP(文字列)
+!`uint16_t` !`port` !相手のポート
+!`unsigned` !`iters` !遅延の測定の回数(1 以上)
+!`int` !`oob` !0 以外なら公開メモリの外の read の試験([4])もする
+!===
+|戻り値 a|0: すべて OK。1: イベントのチャネルを作れない、接続までのどこかの失敗、相手の公開メモリが小さい、または確かめのどれかが NG。
+|前提条件 a|`g_mem` が確保されていること(`main()` が行う)。相手(bfmem)は ARP に答えないので、相手の MAC を近隣表へ入れておくこと。
+|注意事項 a|* 1 つの確かめが NG になると(`ng` が 0 でない)、後の確かめは行わない。遅延の測定と [4] も `ng` が 0 のときだけ行う。
+* 相手の公開メモリが 64KiB + 4KiB より小さいときは、確かめをせずに 1 を返す。
+* 遅延の測定は `g_stop` が立つと止め、測れた回数 m で平均を出す(m が 0 なら表示しない)。操作が失敗したらその種類の測定をやめ、残りの種類も測らない。
+* [4] は QP をエラーにするので最後に行う。
+* 遅延の write は atomic 語の区画の後半(`ATOM_OFF + 2048` から)へ出し、データ領域の hash を変えない。
+* イベントのチャネルを作れないときのほかは、失敗しても `out` へ進んで後片付けをする。接続できていれば(`connected`)`rdma_disconnect()` して切断のイベントを `wait_event()` で待ち(戻り値は見ない)、id があれば `teardown()` と `rdma_destroy_id()`、`ai` があれば `freeaddrinfo()`、最後にチャネルを壊して結果を表示する。
+* `ibv_query_device()` が失敗したときは atomic_cap を -1 と表示する。
+|===
+
+.run_client() のフロー図
+image::flow_tools_bfm_peer__run_client.drawio.svg[run_client() のフロー図]
+
+.run_client() の関係図
+image::call_tools_bfm_peer__run_client.drawio.svg[run_client() の関係図]
+
+[[tools_bfm_peer__main]]
+=== `main()`
+[cols="1,5",options="autowidth"]
+.main()
+|===
+|関数名 |`main`(`tools/bfm_peer.c` 550 行目)
+|宣言 |`int main(int argc, char **argv)`
+|処理内容 a|引数を読み、公開メモリ `g_mem` を確保し、`SIGQUIT` / `SIGINT` / `SIGTERM` に `on_sig()` を登録して、`-c` があれば掛け側(`run_client()`)、無ければ受け側(`run_server()`)を動かす。
+
+* `-a` 待ち受ける IP(既定 `0.0.0.0`)
+* `-c` 相手の IP(掛け側)
+* `-p` ポート(既定 18515)
+* `-s` 公開メモリのバイト数(既定 1MiB)
+* `-n` 遅延の測定の回数(既定 10000)
+* `-x` 公開メモリの外の read の試験もする
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`int` !`argc` !引数の数
+!`char **` !`argv` !引数の列
+!===
+|戻り値 a|`run_client()` / `run_server()` の戻り値。知らない選択肢か `-n 0` なら 2(使い方か理由を表示する)。公開メモリを確保できなければ 1。
+|前提条件 a|特になし。
+|注意事項 a|* 公開メモリは 64KiB + 4KiB より小さければその大きさに直し、4KiB の倍数に切り上げて 4KiB 境界で確保する(MR に登録するのは `g_mem_len` バイト)。
+* シグナルは `SA_RESTART` なしで登録する(`rdma_get_cm_event()` を `EINTR` で抜けるため)。
+* `-a` を省くと `0.0.0.0` で全部の IF で待つ(REP に載せる MAC は `run_server()` が接続要求ごとに調べる)。
+|===
+
+.main() のフロー図
+image::flow_tools_bfm_peer__main.drawio.svg[main() のフロー図]
+
+.main() の関係図
+image::call_tools_bfm_peer__main.drawio.svg[main() の関係図]
