@@ -1,0 +1,266 @@
+# 実機試験の段取り(ConnectX-4 Lx、OptiPlex ↔ Precision)
+
+試験の手順の正本はこの文書。結果は各段階の「記録」に書き足す。
+
+## 前提(2026-11-07 に読んだ状態)
+
+| | OptiPlex(`rpi5-rdma-target`)| Precision(`p5820`)|
+|---|---|---|
+| カード | ConnectX-4 Lx(0x1015)、カーネル 7.0.0-31 | ConnectX-4 Lx(0x1015)、カーネル 7.0.0-38 |
+| PF0 | `0000:01:00.0` `enp1s0f0np0` `b8:3f:d2:1c:eb:80` | `0000:b3:00.0` `ens1f0np0` `b8:ce:f6:73:bf:7e` |
+| PF1 | `0000:01:00.1` `enp1s0f1np1` `b8:3f:d2:1c:eb:81` | `0000:b3:00.1` `ens1f1np1` `b8:ce:f6:73:bf:7f` |
+| IOMMU グループ | 2 つの PF が**同じグループ 2**(両方を vfio-pci にする必要がある)| PF0 = 2、PF1 = 3(別々)|
+| ドライバ | 両方 mlx5_core。IPv4 は無し。リンクは両方 UP | 同左 |
+| 動いているもの | ganesha・SPDK・Mooncake・vfio_nvme なし | VM なし、vLLM なし |
+| ビルド | `/var/tmp/bfmem` で `make` が警告なしで通る | `/var/tmp/bfm/bfm_peer` が警告なしで通る |
+
+- 配線は vfio_nvme の記録(2026-10-09)では **OptiPlex PF1 ↔ Precision ens1f0np0**、**OptiPlex PF0 ↔ ens1f1np1**。今も同じかは段階 0 で確かめる。
+- ConnectX-4 には IPv4 が無いので、ssh は別の NIC を通っている。ConnectX-4 を vfio-pci にしても ssh は切れない。
+- IP は試験用: OptiPlex 側 `192.168.101.11`、Precision 側 `192.168.101.21`。どちらも再起動で消える設定だけを使う。
+- **同じカードの 2 ポートの間では試さない**(宛先が自分のカードだと RoCE がワイヤに出ない)。
+
+## 段階 0: 配線と相手の道具を Linux どうしで確かめる(両方 mlx5_core のまま)
+
+bfmem を入れる前に、配線と `bfm_peer` が正しいことと、Linux の libibverbs での遅延(比べる基準)を取る。
+OptiPlex にも librdmacm のヘッダがあるので、`bfm_peer` を OptiPlex でもビルドして掛け側にする。
+
+```bash
+# OptiPlex
+sudo ip addr add 192.168.101.11/24 dev enp1s0f1np1
+cd /var/tmp/bfmem && gcc -O2 -Wall -Wextra -o bfm_peer tools/bfm_peer.c -lrdmacm -libverbs
+
+# Precision
+sudo nmcli device set ens1f0np0 managed no
+sudo ip addr add 192.168.101.21/24 dev ens1f0np0
+ping -c 3 192.168.101.11
+/var/tmp/bfm/bfm_peer -a 192.168.101.21          # 受け側。終わったら pkill -x bfm_peer
+
+# OptiPlex
+/var/tmp/bfmem/bfm_peer -c 192.168.101.21 -x
+```
+
+- ping が通らなければ、配線が記録と違う。ポートの組を入れ替えて探し、正しい組をこの文書の「前提」に書き直す。
+- 合格: `[1]`〜`[4]` が全部 OK。掛け側の「模型の hash」と、受け側が切断のときに出す hash が同じ。
+- 遅延(write / read / FAA の平均)を記録する。段階 3 の bfmem の値と比べる基準。
+
+記録(2026-11-07): **合格。**
+- 配線は記録どおり OptiPlex PF1(`enp1s0f1np1`)↔ Precision `ens1f0np0`(ping 0.5ms)。
+- `[1]`〜`[4]` OK、hash は両側で `4d058e2c177f96e9`。atomic 語 0・1 は相手のメモリでホスト順の 1000。
+- Linux(libibverbs、qd=1、1 回ごとに完了を待つ、平均): write 8B 1,776 ns / read 8B 1,846 ns / FAA 1,761 ns。
+- **ConnectX-4 Lx の Linux では、atomic の元の値が掛け側へビッグエンディアンで返った**(`atomic_cap` は
+  IBV_ATOMIC_HCA = 1)。相手のメモリはホスト順で更新される。`bfm_peer` は最初これをホスト順と決めつけて NG を
+  出したので、最初の 0 でない値で並びを決めるように直した。
+
+## 段階 1: OptiPlex の ConnectX-4 を vfio-pci に結びつける
+
+グループ 2 に 2 つの PF が入っているので、**両方**を結びつけ直す(片方だけでは VFIO がグループを開けない)。
+OptiPlex の RoCE と Ethernet の netdev(`enp1s0f*`)は、戻すまで消える。
+
+```bash
+# OptiPlex
+sudo ip addr flush dev enp1s0f1np1
+sudo modprobe vfio-pci
+for f in 0000:01:00.0 0000:01:00.1; do
+  echo vfio-pci | sudo tee /sys/bus/pci/devices/$f/driver_override
+  echo $f | sudo tee /sys/bus/pci/devices/$f/driver/unbind
+  echo $f | sudo tee /sys/bus/pci/drivers_probe
+done
+ls -l /dev/vfio/                                    # 2 があること
+```
+
+## 段階 2: 立ち上げだけ(`info`)
+
+```bash
+# OptiPlex
+cd /var/tmp/bfmem
+sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -v info
+sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -v info      # 2 回目(止めて立ち上げ直せること)
+```
+
+見るもの(ここで、mlx5_ifc.h から位置を求めて実機では確かめていない欄を確かめる):
+
+| 表示 | 期待 | 確かめていること |
+|---|---|---|
+| `ConnectX-4 Lx`、BAR0 32MiB | | PCIe の設定 |
+| `MAC b8:3f:d2:1c:eb:81` | PF1 の MAC と同じ | vport の permanent_address の位置 |
+| `リンク UP` | | PAOS |
+| `bf=1 bf_buf=256` | log_bf_reg_size = 9 の半分 | 能力の `bf` / `log_bf_reg_size` の位置 |
+| `ts_format=0` | ConnectX-4 には qp_ts_format が無い | RoCE の能力の位置 |
+| `atomic ops=…` / `host_order` / `mode` | ops の下位 2 ビットが立つ | atomic の能力。host_order が 1 なら設定できた |
+| `FW ページ` | 約 2,500(vfio_nvme の実測)| ページの受け渡し |
+| エラーなしで「止めた」 | | TEARDOWN_HCA |
+
+WC が本当に効いているかは、動かしている間に PAT の一覧で見る
+(`sudo grep -i write-combining /sys/kernel/debug/x86/pat_memtype_list` に BAR0 の中のページが出ること)。
+
+記録(2026-11-07): **合格。** 2 回とも同じ結果で、止めて立ち上げ直せた(vfio-pci が開くたびにリセットする)。
+- BAR0 0xd8000000(32MiB)、PCIe Gen3 x8、MRRS 512。FW 14.32.1900。
+- MAC `b8:3f:d2:1c:eb:81` = PF1 の MAC(vport の permanent_address の位置は正しい)。リンク UP。
+- `bf=1`、`log_bf_reg_size` から窓 256 バイト(位置は正しい)。`ts_format=0`。read / atomic は 16 / 16。
+- atomic: ops 0xf(標準と拡張の CS / FA)、size_qp 0x3c(4〜32 バイト)、**ホスト順の設定ができた(host_order=1)**、atomic_mode 5(32B)。
+- FW のページ: boot 6、init 2,707、INIT_HCA の後の要求 1,238、計 3,951(16,384 の上限に余裕)。DMA 領域は 64.6MiB 使用 / 96MiB。
+
+## 段階 3: bfmem が掛け側、Precision の `bfm_peer` が受け側
+
+```bash
+# Precision(rdma_cm が REQ の宛先を経路で確かめるため。ib_cm が REP を送るときに MAC を近隣表で引くため)
+sudo ip route replace 192.168.101.11/32 dev ens1f0np0 src 192.168.101.21
+sudo ip neigh replace 192.168.101.11 lladdr b8:3f:d2:1c:eb:81 dev ens1f0np0 nud permanent
+/var/tmp/bfm/bfm_peer -a 192.168.101.21
+
+# OptiPlex
+cd /var/tmp/bfmem
+sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 client 192.168.101.21 b8:ce:f6:73:bf:7e
+sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -B client 192.168.101.21 b8:ce:f6:73:bf:7e   # BlueFlame なし
+sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -x client 192.168.101.21 b8:ce:f6:73:bf:7e   # 範囲外
+```
+
+- 合格: `[1]`〜`[6]` が全部 OK。最後の「模型の hash」と、`bfm_peer` が切断のときに出す hash が同じ。
+  `-x` の `[7]` が OK(相手が REMOTE_ACCESS で断り、こちらがそれを `BFM_E_REMOTE` として返す)。
+- `[4]` の「相手のメモリの並び」は Linux 側の設定で決まる(Linux の mlx5_core はホスト順に設定する)ので、
+  リトルエンディアンと出るはず。
+- `-B` と比べて、BlueFlame ありの write 8B が速いこと(vfio_nvme では約 320ns 縮んだ)。
+  段階 0 の Linux の値とも比べる。
+
+記録(2026-11-07): **合格**(通常 / `-S` / `-B` / `-x` の 4 通りとも NG 0、hash は両側で `e92cdeb4e6b0c81d`)。
+通るまでに 3 つ直した:
+1. **bfmem が掛け側でも、相手の Linux の近隣表に bfmem の MAC を固定で書く必要があった**(上の手順に足した)。
+   Linux の ib_cm は REP を送るときに相手の MAC を近隣表で引き、bfmem は ARP に答えないので STALE のまま止まる。
+2. **CA GUID に乱数を混ぜた**(`bfm_cm.c`)。MAC だけから作ると、立ち上げ直した後の FW が同じ順に QPN を配るので、
+   前の試みの残りと重なって REJ reason 10(stale connection)で断られ続けた。
+3. **CQE に入って返る atomic の元の値は、HCA の設定によらずビッグエンディアン**だった(メモリに書かせた値は設定どおり
+   ホスト順)。`atomic_result()` を直した。Linux の libibverbs でも同じ(段階 0)。
+   ほかに `bfm_peer` の受け側が切断の後に止まる不具合(`rdma_destroy_id()` をイベントの ack より先に呼んでいた)を直した。
+
+遅延(qd=1、中央値 / 平均、ns):
+
+| | bfmem | bfmem `-B`(BlueFlame なし)| bfmem `-S`(CQE なし)| Linux(段階 0、平均)|
+|---|---|---|---|---|
+| write 8B | 1,403 / 1,439 | 1,784 / 1,831 | 1,420 / 1,458 | 1,776 |
+| write 64B | 1,469 / 1,463 | 1,778 / 1,799 | 1,464 / 1,458 | |
+| read 8B | 1,707 / 1,722 | 2,031 / 2,048 | 1,814 / 1,829 | 1,846 |
+| read 64B | 1,901 / 1,939 | 2,219 / 2,232 | 1,899 / 1,938 | |
+| FAA | 1,701 / 1,721 | 2,031 / 2,058 | 1,802 / 1,824 | 1,761 |
+| CAS | 1,759 / 1,779 | 2,089 / 2,111 | 1,867 / 1,920 | |
+| write_post 8B | 11.40 Mops | **13.12 Mops** | 11.80 Mops | |
+
+- BlueFlame で 1 回ずつの操作は約 320〜380ns 縮む。CQE で応答を受けると read 8B / atomic が約 100ns 縮む。
+- **待たずに続けて出す write_post は BlueFlame なしのほうが速い**(WC の窓への 64 バイトの書き込みが CPU を食う。
+  rdma-core の mlx5 も BlueFlame は 1 個だけ出すときに限っている)。直すなら write_post だけ 8 バイトのドアベルにする。
+- `-x`: 相手(Linux)が範囲外を REMOTE_ACCESS(syndrome 0x13)で断り、bfmem はそれを `BFM_E_REMOTE` で返した。
+
+## 段階 4: Precision の `bfm_peer` が掛け側、bfmem が受け側
+
+bfmem が応答する側(相手から write / read / atomic を受ける)の試験。新しく書いた部分
+(公開メモリの範囲つき MKey、QP の `rae` / `atomic_mode`、atomic のホスト順の設定、REP)がここで効く。
+
+```bash
+# OptiPlex
+cd /var/tmp/bfmem
+sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 server
+
+# Precision(bfmem は ARP に答えないので、近隣表に MAC を書く)
+sudo ip neigh replace 192.168.101.11 lladdr b8:3f:d2:1c:eb:81 dev ens1f0np0 nud permanent
+/var/tmp/bfm/bfm_peer -c 192.168.101.11 -x
+```
+
+- 合格: `bfm_peer` の `[1]`〜`[4]` が全部 OK。
+  - `[3]` の FAA / CAS が OK = こちらの QP が相手からの atomic を受けている(`rae` / `atomic_mode`)。
+  - `[4]` が OK = **公開メモリの MKey が範囲の外を断っている**。NG なら PA の MKey が範囲を見ておらず、
+    相手が自分のメモリ全体を触れることになる。そのときは MTT の MKey に作り直す(要相談)。
+- bfmem の server が切断のときに出す hash が、`bfm_peer` の「模型の hash」と同じ。
+- server が出す atomic 語 0・1 が `LE として 1000`(語 0 は 1000、語 1 は 1000)なら、ホスト順の設定が効いている。
+  ビッグエンディアンで出たら、atomic の能力の設定が効いていない。
+
+記録(2026-11-07): **合格。**
+- `bfm_peer` の `[1]`〜`[4]` が全部 OK。hash は両側で `4d058e2c177f96e9`。
+- `[3]` OK = bfmem の QP が相手からの atomic を受けた(`rae` / `atomic_mode` = 5 が効いている)。
+- `[4]` OK = **公開メモリの MKey(PA モード、start / len つき)は範囲の外を断る**。bfmem 側には
+  WQ_ACCESS_ERROR(0x11)のイベントが来て、接続をエラーにした(相手が範囲外を触った接続を閉じる形で正しい)。
+- atomic 語 0・1 は bfmem のメモリで `e8 03 00 …` = ホスト順の 1000(ホスト順の設定が効いている)。
+- 遅延(Linux から bfmem へ、平均): write 8B 1,773 / read 8B 2,252 / FAA 2,199 ns
+  (Linux どうしでは 1,776 / 1,846 / 1,761。read と atomic で 400ns ほど遅いのは、Linux の掛け側から見た
+  bfmem の応答なので、bfmem の受け側の設定のどれか — 経路 MTU、log_rra_max、ack の遅延の名乗り — が効いている
+  可能性がある。未調査)。
+- 試験の手違い: 段階 4 の前に止めたつもりの `bfm_peer -c` が Precision に残り、ib_cm の REQ の再送で
+  bfmem の server に 2 本目の接続ができた。ssh 越しに流すときは、相手のプロセスが止まったことを確かめる。
+- WC: bfmem が動いている間の PAT の一覧で、BAR0 の中の 4 ページ(0xd8012000〜0xd8016000、接続の枠 4 つの UAR)
+  だけが write-combining、残りは uncached-minus だった。
+
+## 段階 5: 元に戻す
+
+```bash
+# OptiPlex
+for f in 0000:01:00.0 0000:01:00.1; do
+  echo $f | sudo tee /sys/bus/pci/devices/$f/driver/unbind
+  echo | sudo tee /sys/bus/pci/devices/$f/driver_override
+  echo $f | sudo tee /sys/bus/pci/drivers_probe
+done
+ip -br link | grep enp1s0f                          # mlx5_core に戻って netdev があること
+
+# Precision
+pkill -x bfm_peer
+sudo ip neigh del 192.168.101.11 dev ens1f0np0
+sudo ip route del 192.168.101.11/32 dev ens1f0np0
+sudo ip addr flush dev ens1f0np0
+sudo nmcli device set ens1f0np0 managed yes
+```
+
+記録(2026-11-07): 戻した。bfmem_test は SIGINT で止まり(TEARDOWN_HCA まで通った)、OptiPlex の 2 つの PF は
+mlx5_core に戻って netdev が出た。Precision の IP・経路・近隣表を消し、NetworkManager の管理に戻した。
+
+## うまくいかないとき見るもの
+
+- `-v` を付けて、どのコマンドで止まったか(`status` と `syndrome`)を見る。
+- OptiPlex の `sudo dmesg | grep -iE 'dmar|vfio'`(NIC が IOVA の外へ DMA した跡)。
+- Precision の `ethtool -S ens1f0np0 | grep -E 'vport_rdma'`(RoCE のパケットが届いているか)。
+- 接続で REP が来ない: Precision の経路(段階 3)、`bfm_peer` が動いているか、`rdma_cm` の REJ の理由。
+- OptiPlex の NIC が応答しなくなったら、bfmem_test を止める(vfio-pci が閉じるときにリセットする)。
+  それでも戻らなければ段階 5 で mlx5_core に戻す。最後の手段は OptiPlex の再起動。
+
+## 今回やらないこと
+
+- **bfmem どうし**(本番の形)。Precision の `0000:b3:00.0`(グループ 2 に単独)も vfio-pci にすれば試せる。
+  Precision は VM と GPU のホストなので、やるときは別に了承を取る。
+- ConnectX-7(機材が無い)、VxWorks(機材が無い)。
+
+## 調査: 相手からの read / atomic が遅い(2026-11-07)
+
+段階 4 で、Linux から bfmem への read / FAA(平均 2,252 / 2,199ns)が、Linux どうし(段階 0、1,846 / 1,761ns)より
+約 400ns 遅かった。write は同じ(1,773 / 1,776ns)。
+
+**原因: 受け側の CPU の深い C-state。** 受け側の NIC は read / atomic の応答のためにホストのメモリを読む。
+受け側の CPU が眠っている(パッケージの C-state)と、メモリ側が起きるまでその読み出しが待たされる。write は
+相手のメモリを読まないので効かない。bfmem のせいではなかった(下の 1)。
+
+切り分け(Precision の `bfm_peer -c` から OptiPlex へ、20,000 回の平均、ns。交互に流した):
+
+1. **Linux と bfmem を同じ機械(OptiPlex)で受け側にして比べる。** 段階 0 の比較は受け側が Precision(Xeon)、
+   段階 4 は OptiPlex(Core i3-8100)で、機械が違っていた。同じ機械なら差は無い(回ごとに ±100ns ばらつく)。
+
+   | 受け側 | read 8B | FAA |
+   |---|---|---|
+   | Linux(mlx5_core)| 2,184 / 2,317 / 2,143 | 2,138 / 2,161 / 2,121 |
+   | bfmem | 2,130 / 2,161(段階 4 は 2,252)| 2,105 / 2,127(段階 4 は 2,199)|
+
+2. **公開メモリを 2MiB の hugepage に載せる**(IOMMU の変換を減らす)→ **効かない**。
+   4KiB: read 2,140 / 2,162 / 2,153、hugepage(56 枚使用を確認): 2,269 / 2,258 / 2,175。作業域が小さく、変換は効いていない。
+
+3. **受け側で深い C-state を禁じる**(`/dev/cpu_dma_latency` に 0 を書いて保持)→ **効く**。
+
+   | | read 8B | FAA |
+   |---|---|---|
+   | 禁じない | 2,297 / 2,165 / 2,165 | 2,158 / 2,132 / 2,133 |
+   | 禁じる | 1,943 / 1,819 / 2,053 | 1,809 / 1,777 / 1,845 |
+
+**対策:** `g_bfm_cpu_awake`(既定 1)を足した。Linux の移植層は `bfm_init()` から `bfm_shutdown()` まで
+`/dev/cpu_dma_latency` に 0 を書いて保持する。VxWorks は BIOS / BSP で深い C-state を止める(README)。
+対策を入れた bfmem で、既定と `-C`(対策なし)を交互に流した:
+
+| bfmem の受け側 | read 8B | FAA |
+|---|---|---|
+| `-C`(対策なし)| 2,136 / 2,310 / 2,278 | 2,118 / 2,152 / 2,161 |
+| 既定(対策あり)| 1,788 / 2,043 / 1,863 | 1,761 / 1,836 / 1,929 |
+
+FAA は Linux どうし(受け側 Precision)の 1,761ns と同じところまで縮んだ。掛け側の bfmem は CQ を回り続けるので
+眠らず、掛け側の遅延(段階 3)には効かない。終わった後、OptiPlex は mlx5_core に戻し、hugepage は 0 に戻した。
