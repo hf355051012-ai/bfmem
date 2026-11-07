@@ -986,6 +986,106 @@ def a_esc(s):
     return str(s).replace("|", "\\|")
 
 
+def header_api(rel):
+    """ヘッダの関数の宣言を、直前のコメントと「---- 見出し ----」の組分けと一緒に取り出す。
+    戻り値: [(組の見出し, [(関数名, 説明), ...]), ...]。static inline の関数とマクロは入れない。
+    コメントの無い宣言(直前の宣言と組のもの)は説明を空にする(呼び出し側が記述から補う)。"""
+    lines = open(os.path.join(ROOT, rel), encoding="utf-8").read().split("\n")
+    groups, comment, decl, i, depth = [], None, None, 0, 0
+    while i < len(lines):
+        t = lines[i].strip()
+        code = re.sub(r"/\*.*?\*/", "", t)
+        if depth > 0 or (decl is None and "{" in code):
+            # 関数の本体(static inline など)は飛ばす
+            depth += code.count("{") - code.count("}")
+            comment = None
+            i += 1
+            continue
+        if t.startswith("/*"):
+            buf = [t]
+            while "*/" not in buf[-1] and i + 1 < len(lines):
+                i += 1
+                buf.append(lines[i].strip())
+            text = " ".join(x.strip("/* ").strip() for x in buf).strip()
+            m = re.match(r"^-{2,}\s*(.+?)\s*-{2,}$", text)
+            if m:
+                groups.append((m.group(1), []))
+                comment = None
+            else:
+                comment = text
+        elif decl is not None or (t and not t.startswith(("#", "static", "typedef", "}", "struct")) and "(" in t):
+            decl = (decl or "") + " " + t
+            if ";" in t:
+                m = re.search(r"(\w+)\s*\(", decl)
+                if m and groups:
+                    groups[-1][1].append((m.group(1), comment or ""))
+                decl, comment = None, None
+        elif not t:
+            comment = None if decl is None else comment
+        i += 1
+    return [g for g in groups if g[1]]
+
+
+def api_text(s):
+    """API の一覧の説明: 識別子と関数名を等幅にし、表の区切りを逃がす。すでに `...` の中はそのまま。"""
+    def mark(m):
+        w = m.group(0)
+        return "`%s`" % w if ("_" in w or w.endswith("()") or w.startswith("*")) else w
+    parts = s.split("`")
+    for k in range(0, len(parts), 2):          # 偶数番目 = 逆引用符の外
+        parts[k] = re.sub(r"\*?\b[A-Za-z_]\w*\*?(?:\(\))?", mark, parts[k])
+    return a_esc("`".join(parts))
+
+
+def api_section(allf, descs):
+    """仕様書の最初の章: API の一覧(アプリケーション向けと移植層)と、各関数の節へのリンク。"""
+    by = {}
+    for f in allf:
+        by.setdefault(f["name"], []).append(f)
+    summ = {}
+    for rel, d in descs.items():
+        for e in d.get("functions", []):
+            summ[(rel, e["func"])] = e["summary"]
+
+    def first_sentence(text):
+        t = re.split(r"(?<=。)", text.strip().split("\n")[0])[0]
+        return t
+
+    out = ["\n== API 一覧\n",
+           "\nbfmem の関数のうち、外から使うもの。関数名を押すと、その関数の仕様の節へ飛ぶ。\n"
+           "説明はヘッダ(`include/bfm.h` / `include/bfm_port.h`)のコメントから取っている。\n"]
+    # アプリケーション向け
+    out.append("\n=== アプリケーションが使う関数(`include/bfm.h`)\n\n"
+               "使い方の順: `bfm_init()` → `bfm_accept()` / `bfm_connect()` → `bfm_write()` など → "
+               "`bfm_disconnect()` → `bfm_shutdown()`。`bfm_poll()` はときどき呼ぶ。\n\n"
+               "[cols=\"3,7\",options=\"header\"]\n|===\n|関数 |説明\n")
+    for title, items in header_api("include/bfm.h"):
+        out.append("2+h|%s\n" % a_esc(title))
+        for name, text in items:
+            defs = [f for f in by.get(name, []) if f["file"].startswith("src/")]
+            link = "<<%s,`%s()`>>" % (fslug(defs[0]), name) if defs else "`%s()`" % name
+            if not text and defs:
+                text = first_sentence(summ.get((defs[0]["file"], name), ""))
+            out.append("|%s |%s\n" % (link, api_text(text)))
+    out.append("|===\n")
+    # 移植層
+    out.append("\n=== 移植層が実装する関数(`include/bfm_port.h`)\n\n"
+               "移植するときに作る関数。ライブラリの本体はこれだけを通して OS に触れる。"
+               "Linux 版(`port/linux_vfio/port_linux.c`)と VxWorks 版(`port/vxworks/port_vxworks.c`)の節へ飛べる。\n\n"
+               "[cols=\"3,1,1,6\",options=\"header\"]\n|===\n|関数 |Linux |VxWorks |説明\n")
+    for title, items in header_api("include/bfm_port.h"):
+        for name, text in items:
+            impls = []   # 実装ごとに別の列にする(1 つのセルに 2 つ並べると、アンカーの __ が強調の印と読まれる)
+            for rel in ("port/linux_vfio/port_linux.c", "port/vxworks/port_vxworks.c"):
+                fs = [f for f in by.get(name, []) if f["file"] == rel]
+                impls.append("<<%s,節へ>>" % fslug(fs[0]) if fs else "-")
+            if not text:
+                text = first_sentence(summ.get(("port/linux_vfio/port_linux.c", name), ""))
+            out.append("|`%s()` |%s |%s |%s\n" % (name, impls[0], impls[1], api_text(text)))
+    out.append("|===\n")
+    return "".join(out)
+
+
 def write_adoc(allf, descs):
     out = []
     out.append("""= bfmem 関数仕様書
@@ -1000,8 +1100,11 @@ def write_adoc(allf, descs):
 :toc-title: 目次
 
 bfmem(ConnectX の BlueFlame でノード間のメモリへ write / read / atomic を出すライブラリ)の、
-すべてのソースファイルの全関数の仕様。ソースファイルごとに章を、関数ごとに節を分ける。
-
+すべてのソースファイルの全関数の仕様。最初の章が API の一覧で、その後はソースファイルごとに章を、
+関数ごとに節を分ける。
+""")
+    out.append(api_section(allf, descs))
+    out.append("""
 == この文書の読み方
 
 * 各関数の節には、*表*(関数名・処理内容・引数・戻り値・前提条件・注意事項)、*フロー図*、*関係図* を置く。

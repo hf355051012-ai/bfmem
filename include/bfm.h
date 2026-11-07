@@ -14,7 +14,7 @@
  *   bfm_read(c, off, dst, len);
  *   bfm_cas(c, off, expect, desired, &old);
  *   bfm_faa(c, off, add, &old);
- *   bfm_poll();                         // ときどき呼ぶ(切断要求と FW のページ要求に答える)
+ *   bfm_poll();                         // ときどき呼ぶ(相手からの切断と FW のページ要求に答える)
  *   bfm_disconnect(c);
  *   bfm_shutdown();
  *
@@ -51,7 +51,7 @@ int  bfm_init(void);
 /* 全部の接続を畳み、FW を止め(TEARDOWN_HCA)、Bus Master を落とす。 */
 void bfm_shutdown(void);
 
-/* 切断要求(DREQ)と FW の非同期イベント(ページ要求など)を処理する。
+/* 相手からの切断の知らせ(BYE)と FW の非同期イベント(ページ要求など)を処理する。
  * データの経路では呼ばれないので、アプリケーションがときどき呼ぶこと。
  * 戻り値: 処理したイベントの数。 */
 int  bfm_poll(void);
@@ -66,7 +66,7 @@ bfm_conn_t *bfm_connect(uint32_t peer_ip, const uint8_t peer_mac[6], uint16_t po
 /* port 宛ての接続要求を待って受ける(timeout_ms = 0 なら待ち続ける)。 */
 bfm_conn_t *bfm_accept(uint16_t port, uint32_t timeout_ms);
 
-/* 相手へ DREQ を送って畳み、QP などを返す。c はこの後使えない。 */
+/* 相手へ切断の知らせ(BYE)を送って畳み、QP などを返す。c はこの後使えない。 */
 int  bfm_disconnect(bfm_conn_t *c);
 
 /* 1 = 使える。0 = エラーか相手から切断された(bfm_disconnect() で返すこと)。 */

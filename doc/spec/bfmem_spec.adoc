@@ -10,7 +10,64 @@
 :toc-title: 目次
 
 bfmem(ConnectX の BlueFlame でノード間のメモリへ write / read / atomic を出すライブラリ)の、
-すべてのソースファイルの全関数の仕様。ソースファイルごとに章を、関数ごとに節を分ける。
+すべてのソースファイルの全関数の仕様。最初の章が API の一覧で、その後はソースファイルごとに章を、
+関数ごとに節を分ける。
+
+== API 一覧
+
+bfmem の関数のうち、外から使うもの。関数名を押すと、その関数の仕様の節へ飛ぶ。
+説明はヘッダ(`include/bfm.h` / `include/bfm_port.h`)のコメントから取っている。
+
+=== アプリケーションが使う関数(`include/bfm.h`)
+
+使い方の順: `bfm_init()` → `bfm_accept()` / `bfm_connect()` → `bfm_write()` など → `bfm_disconnect()` → `bfm_shutdown()`。`bfm_poll()` はときどき呼ぶ。
+
+[cols="3,7",options="header"]
+|===
+|関数 |説明
+2+h|立ち上げ
+|<<src_bfm_core__bfm_init,`bfm_init()`>> |PCIe の設定(FLR・BAR0・Bus Master)と HCA の立ち上げ、RoCE の準備 (GID の登録・GSI QP)までを行う。
+|<<src_bfm_core__bfm_shutdown,`bfm_shutdown()`>> |全部の接続を畳み、FW を止め(`TEARDOWN_HCA`)、Bus Master を落とす。
+|<<src_bfm_core__bfm_poll,`bfm_poll()`>> |相手からの切断の知らせ(BYE)と FW の非同期イベント(ページ要求など)を処理する。 データの経路では呼ばれないので、アプリケーションがときどき呼ぶこと。 戻り値: 処理したイベントの数。
+2+h|接続
+|<<src_bfm_cm__bfm_connect,`bfm_connect()`>> |相手へ接続する。`peer_ip` が 0 なら `g_bfm_peer_ip` / `g_bfm_peer_mac` を、 port が 0 なら `g_bfm_cm_port` を使う。失敗なら NULL(理由は表示する)。
+|<<src_bfm_cm__bfm_accept,`bfm_accept()`>> |port 宛ての接続要求を待って受ける(`timeout_ms` = 0 なら待ち続ける)。
+|<<src_bfm_cm__bfm_disconnect,`bfm_disconnect()`>> |相手へ切断の知らせ(BYE)を送って畳み、QP などを返す。c はこの後使えない。
+|<<src_bfm_ops__bfm_is_up,`bfm_is_up()`>> |1 = 使える。0 = エラーか相手から切断された(`bfm_disconnect()` で返すこと)。
+|<<src_bfm_ops__bfm_remote_size,`bfm_remote_size()`>> |相手の公開メモリの大きさ(off の上限)。
+2+h|メモリ操作(相手の公開メモリ + off)
+|<<src_bfm_ops__bfm_write,`bfm_write()`>> |書いて、相手の NIC が受け取った(ACK が返った)ところで戻る。 `bfm_inline_max()` バイトまではデータを WQE に埋め込み、BlueFlame で 1 回の MMIO 書き込みにする。それより長いものは中継バッファから送る。
+|<<src_bfm_ops__bfm_write_post,`bfm_write_post()`>> |書いて、完了を待たずに戻る(len <= `bfm_inline_max()`)。後で `bfm_flush()` で待つ。 送る順に相手のメモリへ届く(RC の順序保証)。
+|<<src_bfm_ops__bfm_flush,`bfm_flush()`>> |`bfm_write_post()` で出したものが全部終わるまで待つ。
+|<<src_bfm_ops__bfm_read,`bfm_read()`>> |読む。32 バイトまでは応答が CQE に入るので、dst へ CPU で写す。
+|<<src_bfm_ops__bfm_cas,`bfm_cas()`>> |8 バイトの compare-and-swap。off は 8 の倍数。`*old` に元の値が入る (`*old` == expect なら置き換わった)。
+|<<src_bfm_ops__bfm_faa,`bfm_faa()`>> |8 バイトの fetch-and-add。off は 8 の倍数。`*old` に足す前の値が入る。
+2+h|情報
+|<<src_bfm_ops__bfm_inline_max,`bfm_inline_max()`>> |WQE に埋め込める write の最大バイト数。
+|<<src_bfm_ops__bfm_bf_active,`bfm_bf_active()`>> |1 = BlueFlame で WQE を送っている(WC の窓が取れた)。
+|<<src_bfm_ops__bfm_last_syndrome,`bfm_last_syndrome()`>> |直前のエラー完了の syndrome(0 = なし)。
+|<<src_bfm_ops__bfm_strerror,`bfm_strerror()`>> |戻り値の説明。
+|===
+
+=== 移植層が実装する関数(`include/bfm_port.h`)
+
+移植するときに作る関数。ライブラリの本体はこれだけを通して OS に触れる。Linux 版(`port/linux_vfio/port_linux.c`)と VxWorks 版(`port/vxworks/port_vxworks.c`)の節へ飛べる。
+
+[cols="3,1,1,6",options="header"]
+|===
+|関数 |Linux |VxWorks |説明
+|`bfm_port_init()` |<<port_linux_vfio_port_linux__bfm_port_init,節へ>> |<<port_vxworks_port_vxworks__bfm_port_init,節へ>> |装置を使えるようにし(Linux: VFIO で掴む)、DMA 領域と公開メモリ (`g_bfm_dma_*` / `g_bfm_mr_*`)を CPU と NIC の両方から同じアドレスで触れるようにする。 0 = 成功。
+|`bfm_port_fini()` |<<port_linux_vfio_port_linux__bfm_port_fini,節へ>> |<<port_vxworks_port_vxworks__bfm_port_fini,節へ>> |`bfm_port_init()` で取ったものを返す。呼ぶ前に Bus Master は落としてある。
+|`bfm_port_pci_read32()` |<<port_linux_vfio_port_linux__bfm_port_pci_read32,節へ>> |<<port_vxworks_port_vxworks__bfm_port_pci_read32,節へ>> |PCIe の設定空間の 32bit 読み書き(off は 4 の倍数)。
+|`bfm_port_pci_write32()` |<<port_linux_vfio_port_linux__bfm_port_pci_write32,節へ>> |<<port_vxworks_port_vxworks__bfm_port_pci_write32,節へ>> |PCIe の設定空間の `off` へ 32bit を書く。
+|`bfm_port_bar0_map()` |<<port_linux_vfio_port_linux__bfm_port_bar0_map,節へ>> |<<port_vxworks_port_vxworks__bfm_port_bar0_map,節へ>> |BAR0 を UC(キャッシュしない)で CPU から触れるようにして先頭を返す。 `bar_phys` は設定空間から読んだ BAR0 の値(Linux では使わない)。NULL = 失敗。
+|`bfm_port_bar0_unmap()` |<<port_linux_vfio_port_linux__bfm_port_bar0_unmap,節へ>> |<<port_vxworks_port_vxworks__bfm_port_bar0_unmap,節へ>> |BAR0 の窓を外し、UC の窓の mmap の一覧を空にする。
+|`bfm_port_bar0_wc()` |<<port_linux_vfio_port_linux__bfm_port_bar0_wc,節へ>> |<<port_vxworks_port_vxworks__bfm_port_bar0_wc,節へ>> |BAR0 の [off, off+len)(UAR の 1 ページ)を write-combining で触れるようにして 先頭を返す。BlueFlame の書き込み先。NULL = WC は使えない(BlueFlame を使わない)。 Linux は UC の窓のそのページを同じ仮想アドレスのまま WC に張り替えるので、 返った後は `bfm_port_bar0_map()` の窓のそのページも WC になっている。
+|`bfm_port_bar0_wc_release()` |<<port_linux_vfio_port_linux__bfm_port_bar0_wc_release,節へ>> |<<port_vxworks_port_vxworks__bfm_port_bar0_wc_release,節へ>> |`bfm_port_bar0_wc()` で WC に張り替えた BAR0 の `[off, off+len)` を外し、同じ仮想アドレスに UC で張り直して、UC の mmap の一覧に足す。
+|`bfm_port_time_ns()` |<<port_linux_vfio_port_linux__bfm_port_time_ns,節へ>> |<<port_vxworks_port_vxworks__bfm_port_time_ns,節へ>> |単調に増える時刻(ナノ秒)。分解能は粗くてよい(時間切れの判定に使う)。
+|`bfm_port_delay_us()` |<<port_linux_vfio_port_linux__bfm_port_delay_us,節へ>> |<<port_vxworks_port_vxworks__bfm_port_delay_us,節へ>> |待つ(マイクロ秒)。
+|`bfm_port_log()` |<<port_linux_vfio_port_linux__bfm_port_log,節へ>> |<<port_vxworks_port_vxworks__bfm_port_log,節へ>> |表示(printf と同じ書式)。
+|===
 
 == この文書の読み方
 
@@ -430,7 +487,7 @@ image::call_src_bfm_core__bfm_init.drawio.svg[bfm_init() の関係図]
 |引数 |なし
 |戻り値 a|なし
 |前提条件 a|`bfm_init()` と同じタスクから呼ぶこと。
-|注意事項 a|立ち上がっていなければ何もしない。接続が残っていれば `bfm_cm_fini()` が相手へ DREQ を送ってから畳む。
+|注意事項 a|立ち上がっていなければ何もしない。接続が残っていれば `bfm_cm_fini()` が相手へ BYE を送ってから畳む。
 |===
 
 .bfm_shutdown() のフロー図
@@ -446,7 +503,7 @@ image::call_src_bfm_core__bfm_shutdown.drawio.svg[bfm_shutdown() の関係図]
 |===
 |関数名 |`bfm_poll`(`src/bfm_core.c` 83 行目)
 |宣言 |`int bfm_poll(void)`
-|処理内容 a|非同期の処理を 1 回行う。EQ のイベント(FW のページ要求・リンクの変化・QP のエラー)を読み(`mlx5_eq_poll()`)、GSI に来た CM のメッセージ(相手からの DREQ・REQ の再送)を処理する(`bfm_cm_poll()`)。
+|処理内容 a|非同期の処理を 1 回行う。EQ のイベント(FW のページ要求・リンクの変化・QP のエラー)を読み(`mlx5_eq_poll()`)、GSI に来た接続のメッセージ(相手からの BYE・REQ の送り直し)を処理する(`bfm_cm_poll()`)。
 |引数 |なし
 |戻り値 a|処理したイベントとメッセージの数の合計。立ち上がっていなければ 0。
 |前提条件 a|`bfm_init()` と同じタスクから呼ぶこと(データ経路の関数とも同時に呼ばないこと)。
