@@ -54,11 +54,11 @@
     },
     {
       "func": "poll_one",
-      "summary": "CQ から CQE を 1 個読む。CQ の消費位置(`cq_cc`)の CQE の owner ビットと opcode を見て、新しい CQE が無ければ 0 を返す。あれば消費位置を進めて CQ の doorbell record に書く。署名の誤り(SIG_ERR)なら中身を接続に覚えて 0 を返す(WQE の完了ではない)。エラー完了なら syndrome を記録し、接続を `BFM_CS_ERROR` にする。正常な完了なら、CQE の WQE カウンタが指す WQE までを済んだ扱いにし(`sq_done` を進める)、応答データを CQE に抱えていればその CQE を `last_scat` に覚える。",
+      "summary": "CQ から CQE を 1 個読む。CQ の消費位置(`cq_cc`)の CQE の owner ビットと opcode を見て、新しい CQE が無ければ 0 を返す。あれば消費位置を進めて CQ の doorbell record に書く。署名の誤り(SIG_ERR)なら、CQE の MKey でどちらの面の誤りかを見分け、面ごとに数えて中身を覚え、2 を返す(WQE の完了ではない)。エラー完了なら syndrome を記録し、接続を `BFM_CS_ERROR` にする。正常な完了なら、CQE の WQE カウンタが指す WQE までを済んだ扱いにし(`sq_done` を進める)、応答データを CQE に抱えていればその CQE を `last_scat` に覚える。",
       "args": {"c": "完了を拾う接続"},
-      "ret": "1: 正常な完了を 1 個拾った。0: まだ CQE が無い。負: エラー完了(`map_syndrome()` の値。`BFM_E_REMOTE` / `BFM_E_RETRY` / `BFM_E_CQE`)。",
+      "ret": "1: 正常な完了を 1 個拾った。2: 署名の誤り(SIG_ERR)の CQE を拾った(WQE の完了ではない)。0: まだ CQE が無い。負: エラー完了(`map_syndrome()` の値。`BFM_E_REMOTE` / `BFM_E_RETRY` / `BFM_E_CQE`)。",
       "pre": "`c` の QP・CQ が作られ、`bfm_ops_attach()` 済みであること。",
-      "notes": "* CQE は投稿の順に来るので、正常な完了 1 個でその WQE までの全部(通知なしで出したものを含む)を済んだ扱いにする。\n* 済んだ位置は、CQE の WQE カウンタ(16 ビット)を `sq_done` の 32 ビットへ広げ、その WQE の大きさ(`wqe_bbs[]`)を足して求める。\n* エラー完了では `sq_done` を進めない。接続が `BFM_CS_UP` のときだけ表示して `BFM_CS_ERROR` にする(2 回目以降は表示しない)。\n* `last_scat` は CQ のリングの中を指すので、次の CQE を拾うまでに読むこと。\n* SIG_ERR の CQE(T10-DIF の検査の誤り)は、その WQE の普通の完了の前に来る。`sig_err` などに覚え、`bfm_dif.c` が見て消す(Linux の `mlx5_poll_one()` と同じ扱い)。",
+      "notes": "* CQE は投稿の順に来るので、正常な完了 1 個でその WQE までの全部(通知なしで出したものを含む)を済んだ扱いにする。\n* 済んだ位置は、CQE の WQE カウンタ(16 ビット)を `sq_done` の 32 ビットへ広げ、その WQE の大きさ(`wqe_bbs[]`)を足して求める。\n* エラー完了では `sq_done` を進めない。接続が `BFM_CS_UP` のときだけ表示して `BFM_CS_ERROR` にする(2 回目以降は表示しない)。\n* `last_scat` は CQ のリングの中を指すので、次の CQE を拾うまでに読むこと。\n* SIG_ERR の CQE(T10-DIF の検査の誤り)は、その WQE の普通の完了の前に来る。CQE の MKey(byte 36、下位 8 ビットの key を除いて比べる)が `c->sig_mkey[1]` なら面 1、そうでなければ面 0 として `c->sig[]` に覚え、`bfm_dif.c` が見て消す(Linux の `mlx5_poll_one()` と同じ扱い)。同じ面に何個来ても、中身は最初の 1 個のもの。",
       "flow": [
         {"do": "cqe = CQ のリングの (cq_cc & (CQ_N - 1)) 番目(64 バイト)"},
         {"do": "op_own = cqe[63]"},
@@ -66,9 +66,10 @@
         {"do": "bfm_rmb()。opcode = op_own >> 4、cnt = CQE の WQE カウンタ(byte 60、BE)"},
         {"do": "cq_cc++。cq_dbr[0] = cq_cc の下位 24 ビット(BE)"},
         {"if": "opcode == MLX5_CQE_SIG_ERR ?", "then": [
-          {"do": "sig_err = 1。sig_exp_ts・sig_act_ts・sig_exp_ref・sig_act_ref(byte 16〜31)、sig_synd(byte 32)、sig_off(byte 40)を覚える"},
+          {"do": "mkey = CQE の byte 36(BE)。si = (mkey と c->sig_mkey[1] の上位 24 ビットが同じ) ? 1 : 0、r = &c->sig[si]"},
+          {"if": "r->hits++ == 0 ?", "then": [{"do": "r に exp_ts・act_ts・exp_ref・act_ref(byte 16〜31)、synd(byte 32)、off(byte 40)を覚える"}]},
           {"do": "BFM_DBG で中身を表示"},
-          {"return": "0"}
+          {"return": "2"}
         ]},
         {"if": "opcode が MLX5_CQE_REQ_ERR / MLX5_CQE_RESP_ERR ?", "then": [
           {"do": "last_synd = cqe[55]、last_vsynd = cqe[54]"},
@@ -234,7 +235,7 @@
     },
     {
       "func": "bfm_ops_attach",
-      "summary": "接続ができた後に、データ経路の状態を初期化する。QP の番号を 8 ビットずらした値(`qpn8`)を求め、済んだ位置を今の SQ の位置に合わせ、通知なしの数・窓の面・記録した syndrome・`last_scat` を 0 にする。",
+      "summary": "接続ができた後に、データ経路の状態を初期化する。QP の番号を 8 ビットずらした値(`qpn8`)を求め、済んだ位置を今の SQ の位置に合わせ、通知なしの数・窓の面・記録した syndrome・`last_scat` を 0 にし、`bfm_dif_attach()` で T10-DIF の転送の状態も空にする。",
       "args": {"c": "接続ができた接続"},
       "ret": "`BFM_OK`(常に)。",
       "pre": "`c` の QP が作られ、`c->qp.qpn` と `c->qp.sq_pc` が正しいこと。",
@@ -242,6 +243,7 @@
       "flow": [
         {"do": "qpn8 = qp.qpn << 8。sq_done = qp.sq_pc"},
         {"do": "unsig = 0、bf_off = 0、last_synd = last_vsynd = 0、last_scat = NULL"},
+        {"call": "bfm_dif_attach(c) を呼ぶ"},
         {"return": "BFM_OK"}
       ]
     },
@@ -301,14 +303,14 @@
     },
     {
       "func": "bfm_ops_poll1",
-      "summary": "性能の試験用(試験プログラムの bench が使う)。完了を 1 個拾う(`poll_one()` をそのまま呼ぶ)。",
+      "summary": "性能の試験用(試験プログラムの bench が使う)。完了を 1 個拾う(`poll_one()` を呼び、署名の誤りの CQE は 0 として返す)。",
       "args": {"c": "完了を拾う接続"},
-      "ret": "1: 拾った。0: まだ無い。負: エラー完了(`poll_one()` の値)。",
+      "ret": "1: 拾った。0: まだ無い(署名の誤りの CQE を拾ったときも)。負: エラー完了(`poll_one()` の値)。",
       "pre": "`bfm_ops_post_rw()` で出した操作があること。",
       "notes": "特になし。",
       "flow": [
-        {"call": "poll_one(c) を呼ぶ"},
-        {"return": "poll_one() の値"}
+        {"call": "r = poll_one(c) を呼ぶ"},
+        {"return": "r == 2 ? 0 : r"}
       ]
     },
     {
@@ -337,15 +339,15 @@
       ]
     },
     {
-      "func": "bfm_ops_wait_all",
-      "summary": "出した WQE が全部終わるまで待つ(`wait_done(c, qp.sq_pc)`。`bfm_dif.c` から使う)。",
+      "func": "bfm_ops_reap",
+      "summary": "来ている CQE を全部拾う(待たない。`bfm_dif.c` から使う)。`poll_one()` が 0(まだ無い)か負(エラー完了)を返すまで呼び続ける。署名の誤りの CQE(2)も拾い続ける。",
       "args": {"c": "接続"},
-      "ret": "`wait_done()` の戻り値。",
-      "pre": "最後に出した WQE が完了通知を求めていること。",
-      "notes": "特になし。",
+      "ret": "`BFM_OK`: 拾い終わった。負: エラー完了(`poll_one()` の値)。",
+      "pre": "`bfm_ops_attach()` 済みであること。",
+      "notes": "拾った完了で `sq_done` が進む。どの操作が済んだかは、呼び出し側が `sq_done` で判断する。",
       "flow": [
-        {"call": "wait_done(c, qp.sq_pc) を呼ぶ"},
-        {"return": "wait_done() の戻り値"}
+        {"while": "(r = poll_one(c)) > 0 ?", "body": [{"do": "何もしない(条件の中で CQE を 1 個拾う)"}]},
+        {"return": "r < 0 ? r : BFM_OK"}
       ]
     },
     {
@@ -687,6 +689,8 @@
           {"case": "BFM_E_CQE", "body": [{"return": "\"エラー完了\""}]},
           {"case": "BFM_E_DIF", "body": [{"return": "\"T10-DIF の検査で誤り\""}]},
           {"case": "BFM_E_NOTSUP", "body": [{"return": "\"装置が対応していない\""}]},
+          {"case": "BFM_E_BUSY", "body": [{"return": "\"前の T10-DIF の転送が終わっていない\""}]},
+          {"case": "BFM_DIF_INPROGRESS", "body": [{"return": "\"T10-DIF の転送の途中\""}]},
           {"default": true, "body": [{"return": "\"?\""}]}
         ]}
       ]

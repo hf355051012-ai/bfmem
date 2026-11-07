@@ -641,6 +641,61 @@
       ]
     },
     {
+      "func": "dif_async_tests",
+      "summary": "[8] 起動と完了確認を分けた使い方を確かめる。\n\n* write INSERT を `bfm_dif_write_start()` で起動したまま、2 本目の起動(`bfm_dif_read_start()`)が `BFM_E_BUSY` になること、同じ接続の普通の `bfm_write()` / `bfm_read()`(64 バイト、DIF_AUX)が使えること、`bfm_dif_poll()` で最後まで進むこと(途中で `BFM_DIF_INPROGRESS` が 1 回以上返ること)、相手の R1 が期待値と同じこと、動いていなければ `bfm_dif_poll()` が `BFM_OK` を返すこと\n* 相手の R1 のブロック 280(3 つ目の分 = 面 0 の 2 回目)の app tag を壊し、read CHECK を `bfm_dif_read_start()` で起動して `bfm_dif_wait()` で誤り(ブロック 280、app tag)を受け取ること、誤りの前のブロック(0〜279)が dst に届いていること",
+      "args": {"c": "接続", "mode": "`BFM_DIF_SW` / `BFM_DIF_HW`"},
+      "ret": "なし(結果は `check()` が数える)",
+      "pre": "`dif_tests()` で `g_dplain` を作ってあること。",
+      "notes": "相手の R1 は、終わった後はブロック 280 の app tag が壊れたまま。",
+      "flow": [
+        {"do": "d を 0 で埋め、mode・check = ALL・app_tag = DIF_APP・ref_tag = DIF_REF・op = INSERT"},
+        {"call": "dif_make(g_dplain, g_dexp, DIF_APP, DIF_REF) を呼ぶ"},
+        {"call": "rc = bfm_dif_write_start(c, DIF_OFF, g_dplain, DIF_N, &d) を呼ぶ"},
+        {"call": "busy = bfm_dif_read_start(c, DIF_OFF, g_dout, DIF_N, &d) を呼ぶ"},
+        {"do": "pat を作り、back を 0 で埋める"},
+        {"call": "rw = bfm_write(c, DIF_AUX, pat, 64) を呼ぶ"},
+        {"call": "rr = bfm_read(c, DIF_AUX, back, 64) を呼ぶ"},
+        {"do": "inprog = 0"},
+        {"while": "(r = bfm_dif_poll(c, &e)) == BFM_DIF_INPROGRESS && !g_stop ?", "body": [{"do": "inprog++"}]},
+        {"call": "idle = bfm_dif_poll(c, &e) を呼ぶ"},
+        {"call": "check(起動・poll で完了, rc と r が BFM_OK・inprog > 0・bfm_read() で読んだ R1 == g_dexp) を呼ぶ"},
+        {"call": "check(2 本目の起動は BFM_E_BUSY, busy == BFM_E_BUSY) を呼ぶ"},
+        {"call": "check(途中で普通の write / read が使える, rw・rr が BFM_OK で pat == back) を呼ぶ"},
+        {"call": "check(動いていなければ BFM_OK, idle == BFM_OK) を呼ぶ"},
+        {"do": "bad = 280、d.op = CHECK、g_dout を 0 で埋める"},
+        {"call": "r2 = bfm_write(c, R1 のブロック 280 の app tag, {0xde, 0xad}, 2) を呼ぶ"},
+        {"if": "r2 == BFM_OK ?", "then": [{"call": "r2 = bfm_dif_read_start(c, DIF_OFF, g_dout, DIF_N, &d) を呼ぶ"}]},
+        {"if": "r2 == BFM_OK ?", "then": [{"call": "r2 = bfm_dif_wait(c, &e) を呼ぶ"}]},
+        {"call": "dif_expect_err(名前, r2, &e, 280, BFM_DIF_CHK_APP) を呼ぶ"},
+        {"call": "check(誤りの前のブロックが dst に届いている, g_dout の 280 ブロック == g_dexp) を呼ぶ"}
+      ]
+    },
+    {
+      "func": "dif_tput",
+      "summary": "DIF のスループットを測る。`DIF_N` ブロックずつの `bfm_dif_write()` / `bfm_dif_read()`(相手は R1)を `reps` 回続け、データ 512 バイト分で数えた MB/s と 1 回の時間を表示する。",
+      "args": {"c": "接続", "mode": "`BFM_DIF_SW` / `BFM_DIF_HW`", "op": "操作(`BFM_DIF_INSERT` なら送り元は `g_dplain`、それ以外は `g_dpi`)", "is_read": "1 = read、0 = write", "reps": "回数"},
+      "ret": "なし(失敗すれば表示して `g_ng` を 1 増やす)",
+      "pre": "read なら相手の R1 に正しい PI つきのブロックがあること(`run_dif()` は write INSERT を先に測る)。",
+      "notes": "1 回ずつ完了を待つ(1 回の中では 2 面を交互に使って分を重ねる)。",
+      "flow": [
+        {"do": "d を 0 で埋め、op・mode・check = ALL・app_tag = DIF_APP・ref_tag = DIF_REF"},
+        {"do": "src = (op == INSERT) ? g_dplain : g_dpi"},
+        {"call": "t0 = now_ns() を呼ぶ"},
+        {"do": "i = 0"},
+        {"while": "i < reps ?", "body": [
+          {"if": "is_read ?", "then": [{"call": "rc = bfm_dif_read(c, DIF_OFF, g_dout, DIF_N, &d, NULL) を呼ぶ"}], "else": [{"call": "rc = bfm_dif_write(c, DIF_OFF, src, DIF_N, &d, NULL) を呼ぶ"}]},
+          {"if": "rc != BFM_OK ?", "then": [
+            {"call": "bfm_strerror(rc) を呼んで失敗を表示"},
+            {"do": "g_ng++"},
+            {"return": ""}
+          ]},
+          {"do": "i++"}
+        ]},
+        {"call": "ns = now_ns() - t0 を呼ぶ"},
+        {"do": "DIF_N × 512 × reps / ns で MB/s を、ns / reps で 1 回の時間を表示"}
+      ]
+    },
+    {
       "func": "dif_lat",
       "summary": "DIF の操作 `op` を 8 ブロック(4KiB)ずつ 1 回ごとに完了を待つ形で `n` 回流し(先に 100 回を暖機)、遅延の中央値と p99 を表示する。相手のメモリは R1(520 バイトおき)を使う。",
       "args": {"c": "接続", "mode": "`BFM_DIF_SW` か `BFM_DIF_HW`", "op": "操作(`BFM_DIF_INSERT` / `CHECK` / `CHECK_DELETE` など)", "is_read": "1 = read、0 = write", "n": "測る回数"},
@@ -669,8 +724,8 @@
     },
     {
       "func": "run_dif",
-      "summary": "[8] T10-DIF の検査をまとめて行う。SW で `dif_tests()` を行い、オフロードを使えれば HW でも行う。使えなければ、`BFM_DIF_HW` が `BFM_E_NOTSUP` を返すことを確かめる。NG が無ければ、DIF の遅延(write INSERT・write CHECK・read CHECK・read CHECK_DELETE、4KiB)を SW と(使えれば)HW で測る。",
-      "args": {"c": "接続", "iters": "遅延の測定の回数(5000 まで)"},
+      "summary": "[8] T10-DIF の検査をまとめて行う。SW で `dif_tests()` と `dif_async_tests()`(起動と完了確認を分けた使い方)を行い、オフロードを使えれば HW でも行う。使えなければ、`BFM_DIF_HW` が `BFM_E_NOTSUP` を返すことを確かめる。NG が無ければ、DIF の遅延(write INSERT・write CHECK・read CHECK・read CHECK_DELETE、4KiB)と、同じ 4 通りの DIF_N ブロックずつのスループットを SW と(使えれば)HW で測る。",
+      "args": {"c": "接続", "iters": "遅延の測定の回数(5000 まで)。スループットはその半分の回数"},
       "ret": "なし",
       "pre": "c が使える接続であること。",
       "notes": "相手の公開メモリが小さければ飛ばす。",
@@ -682,8 +737,10 @@
         ]},
         {"call": "bfm_dif_hw_supported() を呼び、ブロック数とオフロードの有無を表示"},
         {"call": "dif_tests(c, BFM_DIF_SW) を呼ぶ"},
+        {"call": "dif_async_tests(c, BFM_DIF_SW) を呼ぶ"},
         {"if": "bfm_dif_hw_supported() ?", "then": [
-          {"call": "dif_tests(c, BFM_DIF_HW) を呼ぶ"}
+          {"call": "dif_tests(c, BFM_DIF_HW) を呼ぶ"},
+          {"call": "dif_async_tests(c, BFM_DIF_HW) を呼ぶ"}
         ], "else": [
           {"do": "d を 0 で埋め、d.mode = BFM_DIF_HW"},
           {"call": "check(\"BFM_DIF_HW は BFM_E_NOTSUP\", bfm_dif_write(c, DIF_OFF, g_dplain, 1, &d, NULL) == BFM_E_NOTSUP) を呼ぶ"}
@@ -693,6 +750,14 @@
         {"while": "mode <= BFM_DIF_HW ?", "body": [
           {"if": "mode == BFM_DIF_HW && !bfm_dif_hw_supported() ?", "then": [{"break": true}]},
           {"call": "dif_lat() を write INSERT・write CHECK・read CHECK・read CHECK_DELETE で呼ぶ"},
+          {"do": "mode++"}
+        ]},
+        {"do": "reps = max(n / 2, 1)"},
+        {"call": "dif_make(g_dplain, g_dpi, DIF_APP, DIF_REF) を呼ぶ"},
+        {"do": "mode = BFM_DIF_SW"},
+        {"while": "mode <= BFM_DIF_HW ?", "body": [
+          {"if": "mode == BFM_DIF_HW && !bfm_dif_hw_supported() ?", "then": [{"break": true}]},
+          {"call": "dif_tput() を write INSERT・write CHECK・read CHECK・read CHECK_DELETE で呼ぶ"},
           {"do": "mode++"}
         ]}
       ]

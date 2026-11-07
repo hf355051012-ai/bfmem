@@ -55,7 +55,8 @@ static const char *syndrome_str(uint8_t synd)
 }
 
 /*=================================================================
- * CQE を 1 個読む。1 = 正常な完了、0 = まだ無い、負 = エラー完了(接続をエラーにする)。
+ * CQE を 1 個読む。1 = 正常な完了、2 = 署名の誤り(SIG_ERR。WQE の完了ではない)、
+ * 0 = まだ無い、負 = エラー完了(接続をエラーにする)。
  * 正常なら、その WQE までを済んだ扱いにする(CQE は投稿の順に来る)。
  * ===============================================================*/
 static int poll_one(struct bfm_conn *c)
@@ -70,18 +71,23 @@ static int poll_one(struct bfm_conn *c)
     c->qp.cq_dbr[0] = bfm_cpu_to_be32(c->qp.cq_cc & 0xffffffu);
     if (opcode == MLX5_CQE_SIG_ERR) {
         /* 署名(T10-DIF)の誤り。WQE の完了ではない(その WQE の普通の完了が後で来る)。
-         * 中身を覚えておき、bfm_dif.c が見る(Linux の mlx5_poll_one() と同じ扱い)。 */
-        c->sig_err = 1;
-        c->sig_exp_ts = bfm_rd32be(cqe + 16);
-        c->sig_act_ts = bfm_rd32be(cqe + 20);
-        c->sig_exp_ref = bfm_rd32be(cqe + 24);
-        c->sig_act_ref = bfm_rd32be(cqe + 28);
-        c->sig_synd = bfm_rd16be(cqe + 32);
-        c->sig_off = bfm_rd64be(cqe + 40);
-        BFM_DBG("bfm: 接続 %d: SIG_ERR syndrome 0x%04x 位置 %llu ts %08x/%08x ref %08x/%08x\n", c->index,
-                c->sig_synd, (unsigned long long)c->sig_off, c->sig_exp_ts, c->sig_act_ts,
-                c->sig_exp_ref, c->sig_act_ref);
-        return 0;
+         * どの面の誤りかは CQE の MKey(バイト 36)で分かる(Linux の mlx5_poll_one() と同じ扱い)。
+         * 中身を面ごとに覚えておき、bfm_dif.c が見る。 */
+        const uint32_t mkey = bfm_rd32be(cqe + 36);
+        const unsigned si = (((mkey ^ c->sig_mkey[1]) & 0xffffff00u) == 0) ? 1u : 0u;
+        struct bfm_sig_rec *r = &c->sig[si];
+        if (r->hits++ == 0) {
+            r->exp_ts = bfm_rd32be(cqe + 16);
+            r->act_ts = bfm_rd32be(cqe + 20);
+            r->exp_ref = bfm_rd32be(cqe + 24);
+            r->act_ref = bfm_rd32be(cqe + 28);
+            r->synd = bfm_rd16be(cqe + 32);
+            r->off = bfm_rd64be(cqe + 40);
+        }
+        BFM_DBG("bfm: 接続 %d: SIG_ERR MKey 0x%08x syndrome 0x%04x 位置 %llu ts %08x/%08x ref %08x/%08x\n",
+                c->index, mkey, bfm_rd16be(cqe + 32), (unsigned long long)bfm_rd64be(cqe + 40),
+                bfm_rd32be(cqe + 16), bfm_rd32be(cqe + 20), bfm_rd32be(cqe + 24), bfm_rd32be(cqe + 28));
+        return 2;
     }
     if (opcode == MLX5_CQE_REQ_ERR || opcode == MLX5_CQE_RESP_ERR) {
         c->last_synd = cqe[55];
@@ -222,6 +228,7 @@ int bfm_ops_attach(struct bfm_conn *c)
     c->bf_off = 0;
     c->last_synd = c->last_vsynd = 0;
     c->last_scat = NULL;
+    bfm_dif_attach(c);
     return BFM_OK;
 }
 
@@ -265,10 +272,11 @@ int bfm_ops_post_rw(struct bfm_conn *c, int is_read, uint64_t off, uint32_t stag
     return post(c, w, 1u);
 }
 
-/* 完了を 1 個拾う。1 = 拾った、0 = まだ無い、負 = エラー完了。 */
+/* 完了を 1 個拾う。1 = 拾った、0 = まだ無い(署名の誤りの CQE も 0)、負 = エラー完了。 */
 int bfm_ops_poll1(struct bfm_conn *c)
 {
-    return poll_one(c);
+    const int r = poll_one(c);
+    return (r == 2) ? 0 : r;
 }
 
 /* ---------------------------------------------------------------------
@@ -288,10 +296,13 @@ int bfm_ops_post(struct bfm_conn *c, const uint64_t *w, uint32_t bbs)
     return post(c, w, bbs);
 }
 
-/* 出したものが全部終わるまで待つ。 */
-int bfm_ops_wait_all(struct bfm_conn *c)
+/* 来ている CQE を全部拾う(待たない)。BFM_OK か、エラー完了の負の値。 */
+int bfm_ops_reap(struct bfm_conn *c)
 {
-    return wait_done(c, c->qp.sq_pc);
+    int r;
+    while ((r = poll_one(c)) > 0) {
+    }
+    return (r < 0) ? r : BFM_OK;
 }
 
 /* 制御セグメントを組む(fm_ce_se = fence・通知・solicited、imm = UMR なら MKey)。 */
@@ -530,6 +541,8 @@ const char *bfm_strerror(int rc)
     case BFM_E_CQE:     return "エラー完了";
     case BFM_E_DIF:     return "T10-DIF の検査で誤り";
     case BFM_E_NOTSUP:  return "装置が対応していない";
+    case BFM_E_BUSY:    return "前の T10-DIF の転送が終わっていない";
+    case BFM_DIF_INPROGRESS: return "T10-DIF の転送の途中";
     default:            return "?";
     }
 }

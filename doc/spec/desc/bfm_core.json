@@ -4,11 +4,11 @@
   "functions": [
     {
       "func": "check_config",
-      "summary": "立ち上げの前に設定の変数を検査する。\n\n* DMA 領域と公開メモリの先頭・大きさが 4KiB の境界・倍数で、大きさが 0 でないこと\n* DMA 領域と公開メモリが重ならないこと\n* `g_bfm_local_ip` が 0 でないこと\n\nあわせて `g_bfm_stage_size` を 4KiB 以上に、`g_bfm_signal_every` を 1 以上に直す。",
+      "summary": "立ち上げの前に設定の変数を検査する。\n\n* DMA 領域と公開メモリの先頭・大きさが 4KiB の境界・倍数で、大きさが 0 でないこと\n* DMA 領域と公開メモリが重ならないこと\n* `g_bfm_local_ip` が 0 でないこと\n\nあわせて `g_bfm_stage_size` を 4KiB 以上に、`g_bfm_dif_buf_size` を 8KiB(2 面 × 4KiB)以上に、`g_bfm_signal_every` を 1 以上に直す。",
       "args": {},
       "ret": "`BFM_OK`: 使える設定。`BFM_E_PARAM`: 使えない設定(理由を表示する)。",
       "pre": "特になし。",
-      "notes": "`g_bfm_stage_size` と `g_bfm_signal_every` は、範囲外ならこの関数が書き換える(呼び出し側が入れた値が変わる)。",
+      "notes": "`g_bfm_stage_size`・`g_bfm_dif_buf_size`・`g_bfm_signal_every` は、範囲外ならこの関数が書き換える(呼び出し側が入れた値が変わる)。",
       "flow": [
         {"if": "DMA 領域・公開メモリの先頭と大きさが 4KiB の境界・倍数でない、または大きさが 0 ?", "then": [
           {"do": "BFM_LOG で理由を表示"},
@@ -23,6 +23,7 @@
           {"return": "BFM_E_PARAM"}
         ]},
         {"if": "g_bfm_stage_size < 4KiB ?", "then": [{"do": "g_bfm_stage_size = 4KiB"}]},
+        {"if": "g_bfm_dif_buf_size < 2 × 4KiB ?", "then": [{"do": "g_bfm_dif_buf_size = 2 × 4KiB"}]},
         {"if": "g_bfm_signal_every == 0 ?", "then": [{"do": "g_bfm_signal_every = 1"}]},
         {"return": "BFM_OK"}
       ]

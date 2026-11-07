@@ -57,8 +57,10 @@ bfm_cas32(c, off, expect, desired, &old32);   /* 4 バイト、off は 4 の倍�
 bfm_faa32(c, off, add, &old32);
 
 bfm_dif_t d = { .op = BFM_DIF_INSERT, .mode = BFM_DIF_SW, .app_tag = 0x1234, .ref_tag = lba };
-bfm_dif_write(c, off, src, nblocks, &d, &err); /* T10-DIF(下の「T10-DIF」)*/
+bfm_dif_write(c, off, src, nblocks, &d, &err); /* T10-DIF(下の「T10-DIF」)。終わるまで待つ */
 bfm_dif_read(c, off, dst, nblocks, &d, &err);
+bfm_dif_write_start(c, off, src, nblocks, &d); /* 起動だけして戻る */
+while (bfm_dif_poll(c, &err) == BFM_DIF_INPROGRESS) { /* ほかの仕事 */ }   /* か bfm_dif_wait(c, &err) */
 
 bfm_poll();                                   /* ときどき呼ぶ(切断要求・FW のページ要求)*/
 bfm_disconnect(c);
@@ -214,6 +216,22 @@ PI は guard(データの CRC16、多項式 0x8BB7)・app tag・ref tag(ブロ�
 - 出る側の app tag・ref tag は、入る側と同じ値ならバイトをそのまま写し、違えば新しい値を書く。guard は入る側にあれば写す
   (NIC のオフロードと同じ決め方。SW と HW で結果が同じになる)。
 
+**起動と完了確認**
+
+| 関数 | すること |
+|---|---|
+| `bfm_dif_write_start()` / `bfm_dif_read_start()` | 起動する。最初の分を出してすぐ戻る。戻り値は起動できたかどうかだけ(前の転送が終わっていなければ `BFM_E_BUSY`)|
+| `bfm_dif_poll()` | 待たずに進める(届いた分を検査し、空いた面で次の分を出す)。途中なら `BFM_DIF_INPROGRESS`(= 1)、終わったら結果を 1 回だけ返す |
+| `bfm_dif_wait()` | 終わるまで進めて結果を返す(`g_bfm_op_timeout_ms` の間まったく進まなければ `BFM_E_TIMEOUT`)|
+| `bfm_dif_write()` / `bfm_dif_read()` | 起動して `bfm_dif_wait()` で待つのと同じ |
+
+- 1 つの接続で同時に動かせる DIF の転送は 1 本。終わるまで `src` / `dst` を変えたり手放したりしない。
+- 転送が進むのは `bfm_dif_poll()` / `bfm_dif_wait()` の中だけ(割り込みは使わない)。終わるまでどちらかを呼び続ける。
+- 接続ごとに DIF 用の中継バッファ(`g_bfm_dif_buf_size`、既定 128KiB)を持ち、2 面(64KiB = 126 ブロックずつ)に分けて
+  交互に使う。片方を NIC が運ぶ間に、もう片方を CPU が用意・検査する。普通の write / read の中継バッファとは別なので、
+  DIF の転送の途中でも同じ接続で普通の操作を出してよい。
+- HW では面ごとに署名つき MKey と PSV を持ち、SIG_ERR の CQE に入っている MKey で、どちらの面の誤りかを見分ける。
+
 **モード(`mode`)**
 
 | | `BFM_DIF_SW`(オフロードなし)| `BFM_DIF_HW`(オフロードあり)|
@@ -225,11 +243,13 @@ PI は guard(データの CRC16、多項式 0x8BB7)・app tag・ref tag(ブロ�
 | 実機での確認 | ConnectX-4 Lx で確認(2026-11-07)| **未確認**(ConnectX-4 Lx に `sho` が無い)|
 
 - HW の作りは Linux の mlx5_ib の署名 MR(`IB_WR_REG_MR_INTEGRITY`、`set_sig_umr_wr()`・`mlx5_set_bsf()`・`set_psv_wr()`)と
-  `rdma_rw_ctx_signature_init()` に合わせた。接続ごとに署名つき MKey 1 個と PSV 2 個を `bfm_init()` で作る。
+  `rdma_rw_ctx_signature_init()` に合わせた。接続・面ごとに署名つき MKey 1 個と PSV 2 個を `bfm_init()` で作る。
   QP は `fre`(UMR を出せる)を立てて作る。UMR の fence は能力の `umr_fence` に従う。
-- どちらのモードも中継バッファ(`g_bfm_stage_size`、既定 64KiB = 126 ブロック)ずつ運ぶ。
-- 遅延(ConnectX-4 Lx、OptiPlex → Precision、4KiB = 8 ブロック、中央値): SW の write INSERT 5,470ns・
-  write CHECK 5,573ns・read CHECK 5,704ns・read CHECK_DELETE 5,482ns(CRC を 1 バイトずつ引いていたときは約 14,100ns)。
+- どちらのモードも、DIF 用の中継バッファの 1 面に入るブロック数ずつ運ぶ。
+- 遅延(ConnectX-4 Lx、OptiPlex → Precision、4KiB = 8 ブロック、中央値): SW の write INSERT 5,555ns・
+  write CHECK 5,606ns・read CHECK 5,622ns・read CHECK_DELETE 5,679ns(CRC を 1 バイトずつ引いていたときは約 14,100ns)。
+- スループット(同じ、300 ブロックずつ、データ 512 バイト分で数える): SW の write INSERT 1,666MB/s・write CHECK 1,689MB/s・
+  read CHECK 1,597MB/s・read CHECK_DELETE 1,609MB/s。出しておく分を 1 つにすると約 1,180MB/s で、2 面を交互に使って約 4 割速い。
 
 ### ConnectX-7 への備え(実機では未確認)
 
@@ -263,6 +283,7 @@ PI は guard(データの CRC16、多項式 0x8BB7)・app tag・ref tag(ブロ�
 | `g_bfm_mr_base` / `_size` | 公開メモリ |
 | `g_bfm_fw_pages_max` | FW に渡すページの上限 |
 | `g_bfm_stage_size` | 接続ごとの中継バッファ |
+| `g_bfm_dif_buf_size` | 接続ごとの T10-DIF 用の中継バッファ(2 面に分けて交互に使う。既定 128KiB)|
 | `g_bfm_local_ip` / `g_bfm_local_mac` | 自分の IPv4 / MAC(MAC が全部 0 なら NIC の固有の MAC)|
 | `g_bfm_peer_ip` / `g_bfm_peer_mac` | 既定の相手 |
 | `g_bfm_cm_port` | 接続の番号 |
@@ -335,7 +356,7 @@ sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 client 192.168.101.21 <�
 | [5] | データ領域を読み戻して模型と比べる |
 | [6] | 遅延(write / read 8・64 バイト、FAA、CAS、FAA32、CAS32)と write_post の速さ。測った後にもう一度読み戻して比べる |
 | 最後 | 模型の hash を出す(相手が切断のときに出す hash と同じであること)|
-| [8] | T10-DIF: 4 つの操作を write / read の両方(8 通り)で、相手のメモリ・手元の結果と独立に作った期待値を比べる。誤りの検出(guard・ref tag・app tag)。SW は常に、HW は使えるときだけ。使えなければ `BFM_E_NOTSUP` を確かめる。DIF の遅延 |
+| [8] | T10-DIF: 4 つの操作を write / read の両方(8 通り)で、相手のメモリ・手元の結果と独立に作った期待値を比べる。誤りの検出(guard・ref tag・app tag)。起動と完了確認を分けた使い方(途中の 2 本目の起動が `BFM_E_BUSY`、途中で普通の write / read、`bfm_dif_poll()` で完了、3 つ目の分の誤りを `bfm_dif_wait()` で受け取る)。SW は常に、HW は使えるときだけ。使えなければ `BFM_E_NOTSUP` を確かめる。DIF の遅延とスループット |
 | [7] | (`-x`)公開メモリの外を読むと相手の NIC が REMOTE_ACCESS で断る |
 
 ## 確かめたこと / まだのこと
@@ -357,7 +378,8 @@ sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 client 192.168.101.21 <�
   中継バッファで返る 4 バイトの元の値だけがビッグエンディアンで、最初は `-S` で NG になった。
   遅延は 8 バイトと同じ(中央値 FAA32 1,623ns / CAS32 1,662ns、8 バイトは 1,638 / 1,686ns)。
 - **T10-DIF のオフロードなし(SW)を両方向・通常 / `-S` / `-B` で通した**(2026-11-07)。4 つの操作の write / read と
-  誤りの検出が全部 OK。**オフロードあり(HW)は、ConnectX-4 Lx に署名オフロード(`sho`)が無いので試せていない。**
+  誤りの検出が全部 OK。起動と完了確認を分けた後も同じ 3 通りで全部 OK。
+  **オフロードあり(HW)は、ConnectX-4 Lx に署名オフロード(`sho`)が無いので試せていない。**
 - **相手からの read / atomic の遅延は、受け側の CPU の C-state で約 300ns 変わる。** `g_bfm_cpu_awake`(既定 1)で
   Linux では対策した(FAA 2,150 → 1,760〜1,930ns)。hugepage(IOMMU の変換を減らす)は効かなかった。
 - まだ: VxWorks、ConnectX-7、T10-DIF のオフロード(`BFM_DIF_HW`)。`write_post` は BlueFlame なしのほうが速い

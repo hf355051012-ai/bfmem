@@ -8,8 +8,8 @@
  *   read : RDMA READ -> 中継バッファ -> (検査・PI の付け外し)-> dst
  *
  * BFM_DIF_HW(オフロードあり): NIC の署名オフロード(Linux の IB_WR_REG_MR_INTEGRITY と同じ手順)。
- * 接続ごとに、署名つきの MKey 1 個と PSV 2 個(メモリ側・ワイヤ側)を bfm_init() で作っておく。
- * 中継バッファ(メモリ側の形)を、ブロックの形を書いた BSF つきで MKey に張り、その MKey を
+ * 接続・面ごとに、署名つきの MKey 1 個と PSV 2 個(メモリ側・ワイヤ側)を bfm_init() で作っておく。
+ * 中継バッファの面(メモリ側の形)を、ブロックの形を書いた BSF つきで MKey に張り、その MKey を
  * 手元のバッファとして RDMA を出すと、NIC が通る途中で PI を検査・付け替えする。
  *   1. (前に使っていれば)UMR で MKey を空きに戻す(Linux の LOCAL_INV)
  *   2. UMR: MKey に、中継バッファの位置(KLM か 520 バイトおきの strided block)と BSF を入れる
@@ -18,7 +18,11 @@
  * 検査で誤りがあると、その RDMA の完了の前に SIG_ERR の CQE が来る(bfm_ops.c の poll_one())。
  * 誤りを 1 回見たら、次の UMR で MKey の sigerr の印を反転させる(Linux の sigerr_count と同じ)。
  *
- * 1 回の RDMA で運ぶのは、中継バッファに入るブロック数まで(足りなければ繰り返す)。 */
+ * 起動(bfm_dif_write_start() / bfm_dif_read_start())と完了確認(bfm_dif_poll() / bfm_dif_wait())を
+ * 分けてある。DIF 用の中継バッファ(接続ごと)を 2 面に分け、1 回の RDMA で 1 面に入るブロック数ずつ
+ * 運ぶ。2 面までを同時に出しておき、片方を NIC が運ぶ間に、もう片方を CPU が用意・検査する。
+ * HW では面ごとに署名つき MKey と PSV を持ち、SIG_ERR の CQE の MKey でどちらの面の誤りかを見分ける。
+ * 転送が進むのは bfm_dif_poll() / bfm_dif_wait() の中だけ(割り込みは使わない)。 */
 #include "bfm_internal.h"
 
 #include <string.h>
@@ -152,51 +156,6 @@ static int sw_block(const struct plan *p, const uint8_t *in, uint8_t *out, uint3
     return BFM_OK;
 }
 
-/* 中継バッファと相手のメモリの間で len バイトを運ぶ(1 回、終わるまで待つ)。 */
-static int stage_rdma(struct bfm_conn *c, int is_read, uint64_t off, uint32_t len)
-{
-    uint64_t w[8];
-    bfm_ops_build_rdma(c, w, is_read, off, g_bfm.lkey, bfm_dma_addr(c->stage), len, 0);
-    const int rc = bfm_ops_post(c, w, 1u);
-    return (rc != BFM_OK) ? rc : bfm_ops_wait_all(c);
-}
-
-static int sw_write(struct bfm_conn *c, const struct plan *p, uint64_t off, const uint8_t *src,
-                    uint32_t n, bfm_dif_err_t *e)
-{
-    const uint32_t per = c->stage_size / BLK_PI;
-    uint8_t *st = (uint8_t *)(uintptr_t)c->stage;
-    for (uint32_t done = 0; done < n;) {
-        const uint32_t k = (n - done < per) ? n - done : per;
-        for (uint32_t i = 0; i < k; i++) {
-            const int rc = sw_block(p, src + (uint64_t)(done + i) * p->in_bs, st + i * p->out_bs, done + i, e);
-            if (rc != BFM_OK) return rc;
-        }
-        const int rc = stage_rdma(c, 0, off + (uint64_t)done * p->out_bs, k * p->out_bs);
-        if (rc != BFM_OK) return rc;
-        done += k;
-    }
-    return BFM_OK;
-}
-
-static int sw_read(struct bfm_conn *c, const struct plan *p, uint64_t off, uint8_t *dst, uint32_t n,
-                   bfm_dif_err_t *e)
-{
-    const uint32_t per = c->stage_size / BLK_PI;
-    const uint8_t *st = (const uint8_t *)(uintptr_t)c->stage;
-    for (uint32_t done = 0; done < n;) {
-        const uint32_t k = (n - done < per) ? n - done : per;
-        int rc = stage_rdma(c, 1, off + (uint64_t)done * p->in_bs, k * p->in_bs);
-        if (rc != BFM_OK) return rc;
-        for (uint32_t i = 0; i < k; i++) {
-            rc = sw_block(p, st + i * p->in_bs, dst + (uint64_t)(done + i) * p->out_bs, done + i, e);
-            if (rc != BFM_OK) return rc;
-        }
-        done += k;
-    }
-    return BFM_OK;
-}
-
 /* ---------------------------------------------------------------------
  * HW: 署名オフロード
  * ------------------------------------------------------------------- */
@@ -206,39 +165,8 @@ struct sig_res {
     uint32_t sigerr_count;           /* 次の UMR に入れる sigerr の印 = この値の下位 1 ビット */
     uint8_t  used;                   /* 張ったまま(次に張る前に空きに戻す)*/
 };
-static struct sig_res s_sig[BFM_MAX_CONN];
+static struct sig_res s_sig[BFM_MAX_CONN][BFM_DIF_SLOTS];   /* 接続・面ごと */
 static int s_hw;
-
-int bfm_dif_init(void)
-{
-    memset(s_sig, 0, sizeof(s_sig));
-    s_hw = 0;
-    if (!g_bfm.sho) {
-        BFM_DBG("bfm: 署名のオフロード(sho)が無い。T10-DIF は BFM_DIF_SW だけ\n");
-        return BFM_OK;
-    }
-    const uint8_t key8 = (uint8_t)(bfm_port_time_ns() >> 12);
-    for (unsigned i = 0; i < BFM_MAX_CONN; i++) {
-        uint32_t psv[2];
-        if (mlx5_create_psv2(&g_bfm, psv) != BFM_OK ||
-            mlx5_create_sig_mkey(&g_bfm, (uint8_t)(key8 + i), &s_sig[i].mkey) != BFM_OK) {
-            BFM_LOG("bfm: 注意: 署名の資源を作れない。T10-DIF は BFM_DIF_SW だけ\n");
-            return BFM_OK;                 /* 作った分は TEARDOWN_HCA で消える */
-        }
-        s_sig[i].psv_mem = psv[0];
-        s_sig[i].psv_wire = psv[1];
-        s_sig[i].sigerr_count = 1;         /* Linux と同じく、最初の UMR で sigerr の印を立てる */
-    }
-    s_hw = 1;
-    BFM_DBG("bfm: T10-DIF のオフロードを使える(接続 0: MKey 0x%08x PSV %u / %u)\n",
-            s_sig[0].mkey, s_sig[0].psv_mem, s_sig[0].psv_wire);
-    return BFM_OK;
-}
-
-int bfm_dif_hw_supported(void)
-{
-    return s_hw;
-}
 
 /* mkey_mask(Linux の sig_mkey_mask()): LEN PAGE_SIZE START_ADDR EN_RINVAL EN_SIGERR BSF_EN KEY
  * LR LW RR RW SMALL_FENCE FREE */
@@ -267,10 +195,10 @@ static void bsf_inl(uint8_t *p, uint16_t app, uint32_t ref)
  *   [128..191] 変換: メモリ側に PI が無ければ KLM 1 個、あれば 520 バイトおきの strided block
  *              (データ 512 と PI 8 の 2 項目)
  *   [192..255] BSF: basic・ext(0)・ワイヤ側の inline・メモリ側の inline
- * k はブロック数、mem_* / wire_* はそれぞれの側の PI の有無と最初のブロックの tag。
+ * k はブロック数、first は全体の中での最初のブロックの番号、va は中継バッファの面の先頭。
  * ===============================================================*/
 static void build_umr(struct bfm_conn *c, struct sig_res *s, uint64_t *w, const struct plan *p,
-                      int is_read, uint32_t k, uint32_t first)
+                      int is_read, uint32_t k, uint32_t first, uint64_t va)
 {
     const int mem_pi = is_read ? p->out_pi : p->in_pi;
     const int wire_pi = is_read ? p->in_pi : p->out_pi;
@@ -278,7 +206,6 @@ static void build_umr(struct bfm_conn *c, struct sig_res *s, uint64_t *w, const 
     const uint16_t wire_app = is_read ? p->in_app : p->out_app;
     const uint32_t mem_ref = (is_read ? p->out_ref : p->in_ref) + first;
     const uint32_t wire_ref = (is_read ? p->in_ref : p->out_ref) + first;
-    const uint64_t va = bfm_dma_addr(c->stage);
     uint8_t *b = (uint8_t *)w;
 
     memset(w, 0, 256);
@@ -364,25 +291,26 @@ static void build_psv(struct bfm_conn *c, uint64_t *w, uint32_t psv, int pi, uin
 }
 
 /*=================================================================
- * HW: 中継バッファの k ブロック(メモリ側の形)と、相手のメモリ + off(ワイヤ側の形)の間で、
- * 署名オフロードを通して 1 回運ぶ。first は全体の中での最初のブロックの番号。
+ * HW: 中継バッファの面 si の k ブロック(メモリ側の形、先頭 va)と、相手のメモリ + off
+ * (ワイヤ側の形)の間で、署名オフロードを通して運ぶ WQE を出す(待たない)。
+ * first は全体の中での最初のブロックの番号。面ごとに署名つき MKey と PSV を持つので、
+ * 2 面を同時に出しておける。
  * ===============================================================*/
-static int hw_xfer(struct bfm_conn *c, const struct plan *p, int is_read, uint64_t off, uint32_t k,
-                   uint32_t first, bfm_dif_err_t *e)
+static int hw_post(struct bfm_conn *c, uint32_t si, const struct plan *p, int is_read, uint64_t off,
+                   uint32_t k, uint32_t first, uint64_t va)
 {
-    struct sig_res *s = &s_sig[c->index];
+    struct sig_res *s = &s_sig[c->index][si];
     uint64_t w[BFM_WQE_MAX / 8u];
     int rc;
     const int mem_pi = is_read ? p->out_pi : p->in_pi;
     const int wire_pi = is_read ? p->in_pi : p->out_pi;
 
-    c->sig_err = 0;
     if (s->used) {
         build_linv(c, s, w);
         if ((rc = bfm_ops_post(c, w, 2u)) != BFM_OK) return rc;
         s->used = 0;
     }
-    build_umr(c, s, w, p, is_read, k, first);
+    build_umr(c, s, w, p, is_read, k, first, va);
     if ((rc = bfm_ops_post(c, w, 4u)) != BFM_OK) return rc;
     s->used = 1;
     build_psv(c, w, s->psv_mem, mem_pi, is_read ? p->out_app : p->in_app,
@@ -394,50 +322,198 @@ static int hw_xfer(struct bfm_conn *c, const struct plan *p, int is_read, uint64
     /* 手元の長さは Linux の rdma_rw_ctx_signature_init() と同じ: データ + (両側に PI があれば PI) */
     const uint32_t len = k * BLK + ((mem_pi && wire_pi) ? k * PIB : 0u);
     bfm_ops_build_rdma(c, w, is_read, off, s->mkey, 0, len, MLX5_FENCE_SMALL);
-    if ((rc = bfm_ops_post(c, w, 1u)) != BFM_OK) return rc;
-    if ((rc = bfm_ops_wait_all(c)) != BFM_OK) return rc;
-    if (!c->sig_err) return BFM_OK;
-
-    /* 誤り。位置は署名つき MKey の中のバイトで来るので、PI つきのブロック(520)で割る(Linux の iSER と同じ)。 */
-    s->sigerr_count++;
-    c->sig_err = 0;
-    const uint32_t blk = first + (uint32_t)(c->sig_off / BLK_PI);
-    if (c->sig_synd & (1u << 13)) {
-        set_err(e, blk, BFM_DIF_CHK_GUARD, c->sig_exp_ts >> 16, c->sig_act_ts >> 16);
-    } else if (c->sig_synd & (1u << 11)) {
-        set_err(e, blk, BFM_DIF_CHK_REF, c->sig_exp_ref, c->sig_act_ref);
-    } else {
-        set_err(e, blk, BFM_DIF_CHK_APP, c->sig_exp_ts & 0xffffu, c->sig_act_ts & 0xffffu);
-    }
-    return BFM_E_DIF;
+    return bfm_ops_post(c, w, 1u);
 }
 
-static int hw_write(struct bfm_conn *c, const struct plan *p, uint64_t off, const uint8_t *src,
-                    uint32_t n, bfm_dif_err_t *e)
+/* SW: 中継バッファの面(先頭 va)と相手のメモリ + off の間で len バイトを運ぶ RDMA を出す(待たない)。 */
+static int sw_post(struct bfm_conn *c, int is_read, uint64_t off, uint64_t va, uint32_t len)
 {
-    const uint32_t per = c->stage_size / BLK_PI;
-    for (uint32_t done = 0; done < n;) {
-        const uint32_t k = (n - done < per) ? n - done : per;
-        memcpy((void *)(uintptr_t)c->stage, src + (uint64_t)done * p->in_bs, (size_t)k * p->in_bs);
-        const int rc = hw_xfer(c, p, 0, off + (uint64_t)done * p->out_bs, k, done, e);
+    uint64_t w[8];
+    bfm_ops_build_rdma(c, w, is_read, off, g_bfm.lkey, va, len, 0);
+    return bfm_ops_post(c, w, 1u);
+}
+
+/* ---------------------------------------------------------------------
+ * 転送の進め方(接続ごとに 1 本)
+ *
+ * 全体を「1 面に入るブロック数」ずつの分に切り、分 i を面 i % 2 で運ぶ。出しておく分は 2 つまで。
+ *   出す(issue()):     write は src から面へ用意して(SW は検査・PI の付け外し、HW は写すだけ)
+ *                       RDMA を出す。read は面へ読む RDMA を出す。
+ *   仕上げる(finish()): その分の RDMA が済んだら(CQE は出した順に来る)、HW は署名の誤りを見る。
+ *                       read は面から dst へ(SW は検査・PI の付け外し、HW は写すだけ)。
+ * 誤りを見つけたら、それ以上は出さず、出してある分が済むのを待ってから終わる。
+ * ------------------------------------------------------------------- */
+enum { JOB_IDLE = 0, JOB_RUN = 1, JOB_DONE = 2 };   /* DONE = 終わって、結果を受け取られていない */
+
+struct piece {
+    uint32_t first, k;               /* この分の最初のブロック(全体の番号)とブロック数 */
+    uint32_t end_pc;                 /* この分の最後の WQE の次の位置(sq_done がここまで来たら済み)*/
+};
+
+struct job {
+    uint8_t  state, is_read, hw;
+    struct plan p;
+    uint64_t off;
+    const uint8_t *src;
+    uint8_t *dst;
+    uint32_t n, per;                 /* 全体のブロック数、1 面に入るブロック数 */
+    uint32_t next;                   /* 次に出すブロック */
+    uint32_t issued, completed;      /* 出した分・仕上げた分の数(面 = 数 % BFM_DIF_SLOTS)*/
+    int      rc;                     /* 最初の失敗(BFM_OK でなければ、もう出さない)*/
+    bfm_dif_err_t err;
+    struct piece pc[BFM_DIF_SLOTS];
+};
+static struct job s_job[BFM_MAX_CONN];
+
+static inline uint8_t *slot_buf(const struct bfm_conn *c, uint32_t si)
+{
+    return (uint8_t *)(uintptr_t)(c->dif_buf + (uint64_t)si * c->dif_slot_size);
+}
+
+/* 次の分を用意して出す。 */
+static int issue(struct bfm_conn *c, struct job *j)
+{
+    const uint32_t si = j->issued % BFM_DIF_SLOTS;
+    struct piece *pc = &j->pc[si];
+    uint8_t *buf = slot_buf(c, si);
+    const struct plan *p = &j->p;
+    int rc;
+
+    pc->first = j->next;
+    pc->k = (j->n - j->next < j->per) ? j->n - j->next : j->per;
+    if (!j->is_read) {
+        const uint8_t *src = j->src + (uint64_t)pc->first * p->in_bs;
+        if (j->hw) {
+            memcpy(buf, src, (size_t)pc->k * p->in_bs);
+        } else {
+            for (uint32_t i = 0; i < pc->k; i++) {
+                rc = sw_block(p, src + (uint64_t)i * p->in_bs, buf + i * p->out_bs, pc->first + i, &j->err);
+                if (rc != BFM_OK) return rc;     /* この分は送らない */
+            }
+        }
+    }
+    const uint32_t remote_bs = j->is_read ? p->in_bs : p->out_bs;
+    const uint64_t roff = j->off + (uint64_t)pc->first * remote_bs;
+    rc = j->hw ? hw_post(c, si, p, j->is_read, roff, pc->k, pc->first, bfm_dma_addr(buf))
+               : sw_post(c, j->is_read, roff, bfm_dma_addr(buf), pc->k * remote_bs);
+    if (rc != BFM_OK) return rc;
+    pc->end_pc = c->qp.sq_pc;
+    j->next += pc->k;
+    j->issued++;
+    return BFM_OK;
+}
+
+/* 済んだ分を仕上げる。前に失敗していれば、署名の誤りの後始末だけをする。 */
+static int finish(struct bfm_conn *c, struct job *j)
+{
+    const uint32_t si = j->completed % BFM_DIF_SLOTS;
+    const struct piece *pc = &j->pc[si];
+    const uint8_t *buf = slot_buf(c, si);
+    const struct plan *p = &j->p;
+    int rc = BFM_OK;
+
+    j->completed++;
+    if (j->hw) {
+        uint32_t ok = pc->k;                   /* dst へ写してよいブロック数 */
+        struct bfm_sig_rec *r = &c->sig[si];
+        if (r->hits != 0) {
+            /* 誤りを見たら、次の UMR で MKey の sigerr の印を反転させる(Linux の sigerr_count と同じ)。
+             * 位置は署名つき MKey の中のバイトで来るので、PI つきのブロック(520)で割る(Linux の iSER と同じ)。 */
+            s_sig[c->index][si].sigerr_count += r->hits;
+            uint32_t b = (uint32_t)(r->off / BLK_PI);
+            if (b >= pc->k) b = pc->k - 1u;
+            ok = b;
+            if (j->rc == BFM_OK) {
+                if (r->synd & (1u << 13)) {
+                    set_err(&j->err, pc->first + b, BFM_DIF_CHK_GUARD, r->exp_ts >> 16, r->act_ts >> 16);
+                } else if (r->synd & (1u << 11)) {
+                    set_err(&j->err, pc->first + b, BFM_DIF_CHK_REF, r->exp_ref, r->act_ref);
+                } else {
+                    set_err(&j->err, pc->first + b, BFM_DIF_CHK_APP, r->exp_ts & 0xffffu, r->act_ts & 0xffffu);
+                }
+                rc = BFM_E_DIF;
+            }
+            memset(r, 0, sizeof(*r));
+        }
+        if (j->rc == BFM_OK && j->is_read && ok > 0)
+            memcpy(j->dst + (uint64_t)pc->first * p->out_bs, buf, (size_t)ok * p->out_bs);
+        return rc;
+    }
+    if (j->rc != BFM_OK || !j->is_read) return BFM_OK;
+    for (uint32_t i = 0; i < pc->k; i++) {
+        rc = sw_block(p, buf + i * p->in_bs, j->dst + (uint64_t)(pc->first + i) * p->out_bs,
+                      pc->first + i, &j->err);
         if (rc != BFM_OK) return rc;
-        done += k;
     }
     return BFM_OK;
 }
 
-static int hw_read(struct bfm_conn *c, const struct plan *p, uint64_t off, uint8_t *dst, uint32_t n,
-                   bfm_dif_err_t *e)
+/* 来ている完了を拾い、済んだ分を仕上げ、空いた面で次の分を出す。待たない。 */
+static void progress(struct bfm_conn *c, struct job *j)
 {
-    const uint32_t per = c->stage_size / BLK_PI;
-    for (uint32_t done = 0; done < n;) {
-        const uint32_t k = (n - done < per) ? n - done : per;
-        const int rc = hw_xfer(c, p, 1, off + (uint64_t)done * p->in_bs, k, done, e);
-        if (rc != BFM_OK) return rc;
-        memcpy(dst + (uint64_t)done * p->out_bs, (const void *)(uintptr_t)c->stage, (size_t)k * p->out_bs);
-        done += k;
+    int rc = bfm_ops_reap(c);
+    if (rc != BFM_OK || c->state != BFM_CS_UP) {
+        /* 接続がエラーになった。出してある分はもう済まない */
+        if (j->rc == BFM_OK) j->rc = (rc != BFM_OK) ? rc : BFM_E_STATE;
+        j->state = JOB_DONE;
+        return;
     }
+    while (j->completed < j->issued &&
+           (int32_t)(c->sq_done - j->pc[j->completed % BFM_DIF_SLOTS].end_pc) >= 0) {
+        rc = finish(c, j);
+        if (rc != BFM_OK && j->rc == BFM_OK) j->rc = rc;
+    }
+    while (j->rc == BFM_OK && j->next < j->n && j->issued - j->completed < BFM_DIF_SLOTS) {
+        rc = issue(c, j);
+        if (rc != BFM_OK) j->rc = rc;
+    }
+    if (j->completed == j->issued && (j->rc != BFM_OK || j->next == j->n)) j->state = JOB_DONE;
+}
+
+/* ---------------------------------------------------------------------
+ * 立ち上げ
+ * ------------------------------------------------------------------- */
+int bfm_dif_init(void)
+{
+    memset(s_sig, 0, sizeof(s_sig));
+    memset(s_job, 0, sizeof(s_job));
+    s_hw = 0;
+    if (!g_bfm.sho) {
+        BFM_DBG("bfm: 署名のオフロード(sho)が無い。T10-DIF は BFM_DIF_SW だけ\n");
+        return BFM_OK;
+    }
+    const uint8_t key8 = (uint8_t)(bfm_port_time_ns() >> 12);
+    for (unsigned i = 0; i < BFM_MAX_CONN; i++) {
+        for (unsigned si = 0; si < BFM_DIF_SLOTS; si++) {
+            struct sig_res *s = &s_sig[i][si];
+            uint32_t psv[2];
+            if (mlx5_create_psv2(&g_bfm, psv) != BFM_OK ||
+                mlx5_create_sig_mkey(&g_bfm, (uint8_t)(key8 + i * BFM_DIF_SLOTS + si), &s->mkey) != BFM_OK) {
+                BFM_LOG("bfm: 注意: 署名の資源を作れない。T10-DIF は BFM_DIF_SW だけ\n");
+                return BFM_OK;             /* 作った分は TEARDOWN_HCA で消える */
+            }
+            s->psv_mem = psv[0];
+            s->psv_wire = psv[1];
+            s->sigerr_count = 1;           /* Linux と同じく、最初の UMR で sigerr の印を立てる */
+        }
+    }
+    s_hw = 1;
+    BFM_DBG("bfm: T10-DIF のオフロードを使える(接続 0 の面 0: MKey 0x%08x PSV %u / %u)\n",
+            s_sig[0][0].mkey, s_sig[0][0].psv_mem, s_sig[0][0].psv_wire);
     return BFM_OK;
+}
+
+/* 接続ができたとき: 転送の状態を空にし、面ごとの署名つき MKey を poll_one() に教える。 */
+void bfm_dif_attach(struct bfm_conn *c)
+{
+    memset(&s_job[c->index], 0, sizeof(s_job[c->index]));
+    memset(c->sig, 0, sizeof(c->sig));
+    for (unsigned si = 0; si < BFM_DIF_SLOTS; si++) c->sig_mkey[si] = s_sig[c->index][si].mkey;
+}
+
+int bfm_dif_hw_supported(void)
+{
+    return s_hw;
 }
 
 /* ---------------------------------------------------------------------
@@ -453,27 +529,91 @@ static int prepare(struct bfm_conn *c, uint64_t off, const void *buf, uint32_t n
     if (rc != BFM_OK) return rc;
     if (d->mode != BFM_DIF_SW && d->mode != BFM_DIF_HW) return BFM_E_PARAM;
     if (d->mode == BFM_DIF_HW && !s_hw) return BFM_E_NOTSUP;
-    if (c != NULL && c->stage_size < BLK_PI) return BFM_E_PARAM;
     const uint32_t remote_bs = is_read ? p->in_bs : p->out_bs;
-    return bfm_ops_check_range(c, off, (uint64_t)n * remote_bs);
+    rc = bfm_ops_check_range(c, off, (uint64_t)n * remote_bs);
+    if (rc != BFM_OK) return rc;
+    return (c->dif_slot_size < BLK_PI) ? BFM_E_PARAM : BFM_OK;
+}
+
+/* 転送を起動する(最初の分を、2 面まで出す)。 */
+static int start(struct bfm_conn *c, uint64_t off, const void *buf, uint32_t n, const bfm_dif_t *d,
+                 int is_read)
+{
+    struct plan p;
+    const int rc = prepare(c, off, buf, n, d, is_read, &p);
+    if (rc != BFM_OK) return rc;
+    struct job *j = &s_job[c->index];
+    if (j->state != JOB_IDLE) return BFM_E_BUSY;
+    memset(j, 0, sizeof(*j));
+    j->p = p;
+    j->is_read = (uint8_t)is_read;
+    j->hw = (uint8_t)(d->mode == BFM_DIF_HW);
+    j->off = off;
+    j->src = (const uint8_t *)buf;
+    j->dst = (uint8_t *)(uintptr_t)buf;
+    j->n = n;
+    j->per = c->dif_slot_size / BLK_PI;
+    j->state = JOB_RUN;
+    progress(c, j);                    /* ここでの失敗も、結果として bfm_dif_poll() が返す */
+    return BFM_OK;
+}
+
+int bfm_dif_write_start(bfm_conn_t *c, uint64_t off, const void *src, uint32_t nblocks,
+                        const bfm_dif_t *dif)
+{
+    return start(c, off, src, nblocks, dif, 0);
+}
+
+int bfm_dif_read_start(bfm_conn_t *c, uint64_t off, void *dst, uint32_t nblocks,
+                       const bfm_dif_t *dif)
+{
+    return start(c, off, dst, nblocks, dif, 1);
+}
+
+int bfm_dif_poll(bfm_conn_t *c, bfm_dif_err_t *err)
+{
+    if (c == NULL) return BFM_E_PARAM;
+    struct job *j = &s_job[c->index];
+    if (j->state == JOB_RUN) progress(c, j);
+    if (j->state == JOB_RUN) return BFM_DIF_INPROGRESS;
+    if (j->state == JOB_IDLE) return BFM_OK;
+    j->state = JOB_IDLE;                 /* 結果を返すのは 1 回だけ */
+    if (j->rc == BFM_E_DIF && err != NULL) *err = j->err;
+    return j->rc;
+}
+
+int bfm_dif_wait(bfm_conn_t *c, bfm_dif_err_t *err)
+{
+    if (c == NULL) return BFM_E_PARAM;
+    uint64_t t0 = bfm_port_time_ns();
+    uint32_t last = c->sq_done, spins = 0;
+    for (;;) {
+        const int rc = bfm_dif_poll(c, err);
+        if (rc != BFM_DIF_INPROGRESS) return rc;
+        if ((++spins & 0xfffu) != 0) continue;
+        const uint64_t now = bfm_port_time_ns();
+        if (c->sq_done != last) {        /* 進んでいれば測り直す */
+            last = c->sq_done;
+            t0 = now;
+        } else if (now - t0 > (uint64_t)g_bfm_op_timeout_ms * 1000000u) {
+            BFM_LOG("bfm: 接続 %d: T10-DIF の転送が %u ms 進まない\n", c->index, g_bfm_op_timeout_ms);
+            c->state = BFM_CS_ERROR;
+            s_job[c->index].state = JOB_IDLE;
+            return BFM_E_TIMEOUT;
+        }
+    }
 }
 
 int bfm_dif_write(bfm_conn_t *c, uint64_t off, const void *src, uint32_t nblocks,
                   const bfm_dif_t *dif, bfm_dif_err_t *err)
 {
-    struct plan p;
-    const int rc = prepare(c, off, src, nblocks, dif, 0, &p);
-    if (rc != BFM_OK) return rc;
-    return (dif->mode == BFM_DIF_HW) ? hw_write(c, &p, off, (const uint8_t *)src, nblocks, err)
-                                     : sw_write(c, &p, off, (const uint8_t *)src, nblocks, err);
+    const int rc = bfm_dif_write_start(c, off, src, nblocks, dif);
+    return (rc != BFM_OK) ? rc : bfm_dif_wait(c, err);
 }
 
 int bfm_dif_read(bfm_conn_t *c, uint64_t off, void *dst, uint32_t nblocks,
                  const bfm_dif_t *dif, bfm_dif_err_t *err)
 {
-    struct plan p;
-    const int rc = prepare(c, off, dst, nblocks, dif, 1, &p);
-    if (rc != BFM_OK) return rc;
-    return (dif->mode == BFM_DIF_HW) ? hw_read(c, &p, off, (uint8_t *)dst, nblocks, err)
-                                     : sw_read(c, &p, off, (uint8_t *)dst, nblocks, err);
+    const int rc = bfm_dif_read_start(c, off, dst, nblocks, dif);
+    return (rc != BFM_OK) ? rc : bfm_dif_wait(c, err);
 }

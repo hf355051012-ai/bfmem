@@ -54,6 +54,7 @@ uint8_t  g_bfm_peer_mac[6]  = {0, 0, 0, 0, 0, 0};
 
 uint32_t g_bfm_fw_pages_max = 16384u;               /* 64MiB */
 uint32_t g_bfm_stage_size   = 65536u;
+uint32_t g_bfm_dif_buf_size = 131072u;              /* 2 面 x 64KiB */
 
 uint16_t g_bfm_cm_port      = 18515u;
 uint8_t  g_bfm_path_mtu     = 3u;                   /* 1024 */

@@ -203,6 +203,18 @@ typedef struct {
  * ------------------------------------------------------------------- */
 enum { BFM_CS_FREE = 0, BFM_CS_SETUP, BFM_CS_UP, BFM_CS_ERROR, BFM_CS_CLOSED };
 
+/* T10-DIF の中継バッファの面の数(片方を NIC が運ぶ間に、もう片方を CPU が用意する)。 */
+#define BFM_DIF_SLOTS 2u
+
+/* 署名の誤り(SIG_ERR の CQE)。同じ面に何個来ても、中身は最初の 1 個のもの。 */
+struct bfm_sig_rec {
+    uint32_t hits;                   /* 来た SIG_ERR の数(0 = 誤りなし)*/
+    uint16_t synd;                   /* bit13 guard / bit12 app tag / bit11 ref tag */
+    uint32_t exp_ts, act_ts;         /* guard << 16 | app tag(あるべき値 / 実際の値)*/
+    uint32_t exp_ref, act_ref;
+    uint64_t off;                    /* 誤りの位置(署名つき MKey の中のバイト)*/
+};
+
 struct bfm_conn {
     int state;
     int index;
@@ -223,12 +235,11 @@ struct bfm_conn {
     uint32_t stage_size;
     const volatile uint8_t *last_scat;  /* 直前の CQE が応答データを抱えていればその CQE */
 
-    /* 署名の誤り(SIG_ERR の CQE。poll_one() が入れ、bfm_dif.c が見て消す)*/
-    uint8_t  sig_err;
-    uint16_t sig_synd;               /* bit13 guard / bit12 app tag / bit11 ref tag */
-    uint32_t sig_exp_ts, sig_act_ts; /* guard << 16 | app tag(あるべき値 / 実際の値)*/
-    uint32_t sig_exp_ref, sig_act_ref;
-    uint64_t sig_off;                /* 誤りの位置(署名つき MKey の中のバイト)*/
+    /* T10-DIF(bfm_dif.c)。DIF 用の中継バッファは 2 面(BFM_DIF_SLOTS)に分けて交互に使う。 */
+    volatile uint8_t *dif_buf;       /* DIF 用の中継バッファ(DMA 領域。面 i は + i * dif_slot_size)*/
+    uint32_t dif_slot_size;          /* 1 面のバイト数 */
+    uint32_t sig_mkey[BFM_DIF_SLOTS];        /* 面ごとの署名つき MKey(bfm_dif_attach() が入れる)*/
+    struct bfm_sig_rec sig[BFM_DIF_SLOTS];   /* 面ごとの署名の誤り(poll_one() が入れ、bfm_dif.c が見て消す)*/
 
     /* 相手 */
     uint32_t peer_ip;
@@ -305,7 +316,7 @@ int  bfm_ops_poll1(struct bfm_conn *c);
 /* bfm_dif.c から使う。 */
 int  bfm_ops_check_range(const struct bfm_conn *c, uint64_t off, uint64_t len);
 int  bfm_ops_post(struct bfm_conn *c, const uint64_t *w, uint32_t bbs);
-int  bfm_ops_wait_all(struct bfm_conn *c);
+int  bfm_ops_reap(struct bfm_conn *c);
 void bfm_ops_ctrl(struct bfm_conn *c, uint64_t *w, uint32_t opcode, uint32_t ds, uint8_t fm_ce_se,
                   uint32_t imm);
 void bfm_ops_build_rdma(struct bfm_conn *c, uint64_t *w, int is_read, uint64_t off, uint32_t lkey,
@@ -313,5 +324,6 @@ void bfm_ops_build_rdma(struct bfm_conn *c, uint64_t *w, int is_read, uint64_t o
 
 /* bfm_dif.c */
 int  bfm_dif_init(void);
+void bfm_dif_attach(struct bfm_conn *c);   /* 接続ができたとき(bfm_ops_attach() から)*/
 
 #endif /* BFM_INTERNAL_H */

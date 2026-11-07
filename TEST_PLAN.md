@@ -341,3 +341,22 @@ sudo build/bfmem_test -d 0000:b3:00.0 -i 192.168.101.21 -n 10000 bench 192.168.1
   read CHECK 5,704ns / read CHECK_DELETE 5,482ns。CRC を 1 バイトずつ引いていた最初の版は約 14,100ns で、
   8 バイトずつ引く形(slice-by-8)にして縮んだ。
 - 終わった後、両方とも mlx5_core に戻した(Precision の `ens1f0np0` には 192.168.101.21 を付け直した)。
+
+記録(2026-11-07、T10-DIF の起動と完了確認を分けた後): **オフロードなし(SW)は合格。オフロードあり(HW)は試せない(`sho=0`)。**
+- 起動(`bfm_dif_write_start()` / `bfm_dif_read_start()`)と完了確認(`bfm_dif_poll()` / `bfm_dif_wait()`)を分け、
+  DIF 用の中継バッファ(2 面)を交互に使う形にした。
+- client の `[8]` を、OptiPlex → Precision で通常 / `-S`、Precision → OptiPlex で `-B` の 3 通り流して全部 OK、hash も一致
+  (e92cdeb4e6b0c81d)。前からある 4 つの操作 × write / read と誤りの検出に加えて、次を確かめた。
+  - write INSERT を起動したまま、2 本目の起動が `BFM_E_BUSY`(-11)、同じ接続の普通の write / read(64 バイト)が使える、
+    `bfm_dif_poll()` で最後まで進む(途中の `BFM_DIF_INPROGRESS` は 1,216 回)、動いていなければ `bfm_dif_poll()` は `BFM_OK`。
+  - 相手のブロック 280(3 つ目の分 = 面 0 の 2 回目)の app tag を壊した read CHECK で、`bfm_dif_wait()` が
+    ブロック 280・app tag を返し、ブロック 0〜279 は dst に届いていた。
+- 遅延(4KiB、中央値、OptiPlex → Precision): write INSERT 5,555ns / write CHECK 5,606ns / read CHECK 5,622ns /
+  read CHECK_DELETE 5,679ns(分ける前とほぼ同じ)。
+- スループット(300 ブロックずつ 2,500 回、データ 512 バイト分で数える):
+  - OptiPlex → Precision: write INSERT 1,666MB/s / write CHECK 1,689MB/s / read CHECK 1,597MB/s / read CHECK_DELETE 1,609MB/s
+    (`-S` でも同じ)。
+  - Precision → OptiPlex(`-B`): 1,831 / 1,812 / 1,821 / 1,834MB/s。
+  - 比べるため、OptiPlex の作業用のコピーだけ「出しておく分を 1 つ」に変えて測ると 1,188 / 1,182 / 1,158 / 1,162MB/s。
+    2 面を交互に使うと約 4 割速い(CRC の計算と転送が重なる)。
+- 終わった後、両方とも mlx5_core に戻した(Precision の `ens1f0np0` には 192.168.101.21 を付け直した)。

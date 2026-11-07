@@ -365,7 +365,9 @@ int bfm_cm_init(void)
         c->qp.cq_dbr = (volatile uint32_t *)bfm_mem_alloc(64u, 64u);
         c->stage_size = (g_bfm_stage_size + BFM_PAGE - 1u) & ~(BFM_PAGE - 1u);
         c->stage = (volatile uint8_t *)bfm_mem_alloc(c->stage_size, BFM_PAGE);
-        if (!c->qp.wq || !c->qp.dbr || !c->qp.cq || !c->qp.cq_dbr || !c->stage) {
+        c->dif_slot_size = (g_bfm_dif_buf_size / BFM_DIF_SLOTS + BFM_PAGE - 1u) & ~(BFM_PAGE - 1u);
+        c->dif_buf = (volatile uint8_t *)bfm_mem_alloc((uint64_t)c->dif_slot_size * BFM_DIF_SLOTS, BFM_PAGE);
+        if (!c->qp.wq || !c->qp.dbr || !c->qp.cq || !c->qp.cq_dbr || !c->stage || !c->dif_buf) {
             rc = BFM_E_NOMEM;
             goto fail;
         }

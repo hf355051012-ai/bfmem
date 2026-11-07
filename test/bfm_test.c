@@ -352,7 +352,8 @@ static int run_client(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t
  * 相手の公開メモリの DIF_OFF から(データ領域・atomic 語とは別の所)を使う。
  *   R1 = DIF_OFF          520 バイトおきの形(PI つき)
  *   R2 = DIF_OFF + 256KiB 512 バイトおきの形(PI なし)
- * ブロック数 DIF_N は中継バッファ(64KiB = 126 ブロック)を 3 回に分けて運ぶ数。
+ * ブロック数 DIF_N は、DIF 用の中継バッファの 1 面(64KiB = 126 ブロック)ずつ 3 つの分に分けて
+ * 運ぶ数(2 面を交互に使うので、3 つ目の分で面 0 を使い回す)。
  * PI は試験の側で独立に作り(CRC はビットごとの計算)、ライブラリの結果と突き合わせる。
  * SW は常に、HW は bfm_dif_hw_supported() のときだけ試す。
  * ------------------------------------------------------------------- */
@@ -517,6 +518,90 @@ static void dif_tests(bfm_conn_t *c, uint8_t mode)
 #undef DIF_CHECK
 }
 
+/* 起動と完了確認を分けた使い方(bfm_dif_*_start() / bfm_dif_poll() / bfm_dif_wait())。
+ *   - write INSERT を起動したまま、2 本目の起動が BFM_E_BUSY になること、途中で同じ接続の
+ *     普通の write / read が使えること、bfm_dif_poll() で最後まで進むこと
+ *   - read CHECK を起動し、bfm_dif_wait() で 3 つ目の分(2 面目を使い回す分)の誤りを受け取ること */
+#define DIF_AUX (DIF_R2 + DIF_N * BFM_DIF_BLOCK)   /* 普通の write / read に使う所(R2 の後ろ)*/
+
+static void dif_async_tests(bfm_conn_t *c, uint8_t mode)
+{
+    const char *m = (mode == BFM_DIF_HW) ? "HW" : "SW";
+    char name[128];
+    bfm_dif_t d;
+    bfm_dif_err_t e;
+    memset(&d, 0, sizeof(d));
+    memset(&e, 0, sizeof(e));
+    d.mode = mode;
+    d.check = BFM_DIF_CHK_ALL;
+    d.app_tag = DIF_APP;
+    d.ref_tag = DIF_REF;
+    d.op = BFM_DIF_INSERT;
+    dif_make(g_dplain, g_dexp, DIF_APP, DIF_REF);
+
+    const int rc = bfm_dif_write_start(c, DIF_OFF, g_dplain, DIF_N, &d);
+    const int busy = bfm_dif_read_start(c, DIF_OFF, g_dout, DIF_N, &d);
+    uint8_t pat[64], back[64];
+    for (unsigned i = 0; i < sizeof(pat); i++) pat[i] = (uint8_t)(0xa5u ^ i ^ mode);
+    memset(back, 0, sizeof(back));
+    const int rw = bfm_write(c, DIF_AUX, pat, sizeof(pat));
+    const int rr = bfm_read(c, DIF_AUX, back, sizeof(back));
+    uint32_t inprog = 0;
+    int r;
+    while ((r = bfm_dif_poll(c, &e)) == BFM_DIF_INPROGRESS && !g_stop) inprog++;
+    const int idle = bfm_dif_poll(c, &e);
+    snprintf(name, sizeof(name), "[8] %s: 分けた API: write INSERT を起動・poll で完了(途中 %u 回)", m, inprog);
+    check(name, rc == BFM_OK && r == BFM_OK && inprog > 0 &&
+                bfm_read(c, DIF_OFF, g_draw, DIF_N * DIF_BS) == BFM_OK && memcmp(g_draw, g_dexp, DIF_N * DIF_BS) == 0);
+    snprintf(name, sizeof(name), "[8] %s: 分けた API: 途中の 2 本目の起動は BFM_E_BUSY(rc=%d)", m, busy);
+    check(name, busy == BFM_E_BUSY);
+    snprintf(name, sizeof(name), "[8] %s: 分けた API: 途中で普通の write / read が使える", m);
+    check(name, rw == BFM_OK && rr == BFM_OK && memcmp(pat, back, sizeof(pat)) == 0);
+    snprintf(name, sizeof(name), "[8] %s: 分けた API: 動いていなければ bfm_dif_poll() は BFM_OK", m);
+    check(name, idle == BFM_OK);
+
+    /* 相手の R1 のブロック 280(3 つ目の分 = 面 0 の 2 回目)の app tag を壊し、read CHECK で見つける */
+    const uint32_t bad = 280u;
+    uint8_t tag[2] = {0xde, 0xad};
+    d.op = BFM_DIF_CHECK;
+    memset(g_dout, 0, sizeof(g_dout));
+    int r2 = bfm_write(c, DIF_OFF + (uint64_t)bad * DIF_BS + 514u, tag, 2);
+    if (r2 == BFM_OK) r2 = bfm_dif_read_start(c, DIF_OFF, g_dout, DIF_N, &d);
+    if (r2 == BFM_OK) r2 = bfm_dif_wait(c, &e);
+    snprintf(name, sizeof(name), "[8] %s: 分けた API: 3 つ目の分の app tag の誤りを bfm_dif_wait() で受け取る", m);
+    dif_expect_err(name, r2, &e, bad, BFM_DIF_CHK_APP);
+    snprintf(name, sizeof(name), "[8] %s: 分けた API: 誤りの前のブロック(0〜%u)は dst に届いている", m, bad - 1u);
+    check(name, memcmp(g_dout, g_dexp, (size_t)bad * DIF_BS) == 0);
+}
+
+/* DIF のスループット(DIF_N ブロックずつ、1 回ずつ完了を待つ。データ 512 バイト分で数える)。 */
+static void dif_tput(bfm_conn_t *c, uint8_t mode, uint8_t op, int is_read, uint32_t reps)
+{
+    bfm_dif_t d;
+    memset(&d, 0, sizeof(d));
+    d.op = op;
+    d.mode = mode;
+    d.check = BFM_DIF_CHK_ALL;
+    d.app_tag = DIF_APP;
+    d.ref_tag = DIF_REF;
+    const void *src = (op == BFM_DIF_INSERT) ? (const void *)g_dplain : (const void *)g_dpi;
+    const uint64_t t0 = now_ns();
+    for (uint32_t i = 0; i < reps; i++) {
+        const int rc = is_read ? bfm_dif_read(c, DIF_OFF, g_dout, DIF_N, &d, NULL)
+                               : bfm_dif_write(c, DIF_OFF, src, DIF_N, &d, NULL);
+        if (rc != BFM_OK) {
+            printf("client: DIF のスループット: %s(rc=%d)\n", bfm_strerror(rc), rc);
+            g_ng++;
+            return;
+        }
+    }
+    const double ns = (double)(now_ns() - t0);
+    static const char *ops[] = {"CHECK", "CHECK_SWAP", "INSERT", "CHECK_DELETE"};
+    printf("client: スループット DIF %s %-5s %-12s %u ブロック x%u: %.1f MB/s(1 回 %.1f us)\n",
+           mode == BFM_DIF_HW ? "HW" : "SW", is_read ? "read" : "write", ops[op], DIF_N, reps,
+           (double)DIF_N * BFM_DIF_BLOCK * reps / ns * 1000.0, ns / reps / 1000.0);
+}
+
 /* DIF の遅延(8 ブロック = 4KiB、1 回ずつ完了を待つ)を SW / HW で比べる。 */
 static void dif_lat(bfm_conn_t *c, uint8_t mode, uint8_t op, int is_read, uint32_t n)
 {
@@ -557,8 +642,10 @@ static void run_dif(bfm_conn_t *c, uint32_t iters)
     printf("client: [8] T10-DIF(%u ブロック)。オフロード %s\n", DIF_N,
            bfm_dif_hw_supported() ? "あり(SW と HW を試す)" : "なし(SW だけ)");
     dif_tests(c, BFM_DIF_SW);
+    dif_async_tests(c, BFM_DIF_SW);
     if (bfm_dif_hw_supported()) {
         dif_tests(c, BFM_DIF_HW);
+        dif_async_tests(c, BFM_DIF_HW);
     } else {
         bfm_dif_t d;
         memset(&d, 0, sizeof(d));
@@ -574,6 +661,16 @@ static void run_dif(bfm_conn_t *c, uint32_t iters)
         dif_lat(c, mode, BFM_DIF_CHECK, 0, n);
         dif_lat(c, mode, BFM_DIF_CHECK, 1, n);
         dif_lat(c, mode, BFM_DIF_CHECK_DELETE, 1, n);
+    }
+    /* スループット: 相手の R1 を作り直してから(write INSERT の後は R1 = g_dpi)*/
+    const uint32_t reps = n / 2u ? n / 2u : 1u;
+    dif_make(g_dplain, g_dpi, DIF_APP, DIF_REF);
+    for (uint8_t mode = BFM_DIF_SW; mode <= BFM_DIF_HW; mode++) {
+        if (mode == BFM_DIF_HW && !bfm_dif_hw_supported()) break;
+        dif_tput(c, mode, BFM_DIF_INSERT, 0, reps);
+        dif_tput(c, mode, BFM_DIF_CHECK, 0, reps);
+        dif_tput(c, mode, BFM_DIF_CHECK, 1, reps);
+        dif_tput(c, mode, BFM_DIF_CHECK_DELETE, 1, reps);
     }
 }
 

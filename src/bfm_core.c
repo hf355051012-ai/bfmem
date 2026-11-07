@@ -22,6 +22,7 @@ static int check_config(void)
         return BFM_E_PARAM;
     }
     if (g_bfm_stage_size < BFM_PAGE) g_bfm_stage_size = BFM_PAGE;
+    if (g_bfm_dif_buf_size < 2u * BFM_PAGE) g_bfm_dif_buf_size = 2u * BFM_PAGE;
     if (g_bfm_signal_every == 0) g_bfm_signal_every = 1;
     return BFM_OK;
 }

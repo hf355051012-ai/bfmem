@@ -43,6 +43,7 @@
 #define BFM_E_CQE       (-8)   /* そのほかのエラー完了 */
 #define BFM_E_DIF       (-9)   /* T10-DIF の検査で誤りを見つけた(bfm_dif_err_t に詳しく)*/
 #define BFM_E_NOTSUP    (-10)  /* 装置が対応していない(T10-DIF のオフロードなど)*/
+#define BFM_E_BUSY      (-11)  /* その接続の前の T10-DIF の転送が、まだ終わっていない */
 
 typedef struct bfm_conn bfm_conn_t;
 
@@ -127,7 +128,17 @@ int bfm_faa32(bfm_conn_t *c, uint64_t off, uint32_t add, uint32_t *old);
  *   BFM_DIF_HW  NIC の署名オフロード(署名つき MKey)。bfm_dif_hw_supported() が 1 のときだけ
  * 検査で誤りを見つけたら BFM_E_DIF を返し、*err に場所と中身を入れる。read では誤りの前の
  * ブロックまで dst に書いてある。write では、SW は誤りのある範囲を送らず、HW は送ってしまう
- * ことがある(誤りは送った後に分かる)。app tag の 0xffff を「検査しない」とみなす扱い(escape)はしない。 */
+ * ことがある(誤りは送った後に分かる)。app tag の 0xffff を「検査しない」とみなす扱い(escape)はしない。
+ *
+ * 起動と完了確認を分けて使える(1 つの接続で同時に動かせる DIF の転送は 1 本):
+ *   bfm_dif_write_start() / bfm_dif_read_start()  起動する(最初の分を出して、すぐ戻る)
+ *   bfm_dif_poll()  待たずに進める(次の分を出す・届いた分を検査する)。終わったら結果を返す
+ *   bfm_dif_wait()  終わるまで進める
+ * 転送は DIF 用の中継バッファ(g_bfm_dif_buf_size)を 2 面に分けて交互に使い、片方を NIC が
+ * 運ぶ間に、もう片方を CPU が用意・検査する。進むのは bfm_dif_poll() / bfm_dif_wait() の中だけ
+ * なので、終わるまでどちらかを呼び続けること。終わるまで src / dst を変えたり手放したりしない。
+ * 途中でも、同じ接続で普通の write / read / atomic を出してよい(中継バッファは別)。
+ * bfm_dif_write() / bfm_dif_read() は、起動して bfm_dif_wait() で待つのと同じ。 */
 #define BFM_DIF_BLOCK 512u
 #define BFM_DIF_PI    8u
 
@@ -156,16 +167,39 @@ typedef struct {
     uint32_t actual;        /* 実際の値 */
 } bfm_dif_err_t;
 
-/* src の nblocks ブロックを、形を変えて相手の公開メモリ + off へ書く。
+/* bfm_dif_poll() の戻り値: まだ終わっていない。 */
+#define BFM_DIF_INPROGRESS 1
+
+/* src の nblocks ブロックを、形を変えて相手の公開メモリ + off へ書く(終わるまで待つ)。
  * src の形は入る側(CHECK・SWAP・DELETE は 520 バイトおき、INSERT は 512 バイトおき)。
  * err は NULL でもよい。 */
 int bfm_dif_write(bfm_conn_t *c, uint64_t off, const void *src, uint32_t nblocks,
                   const bfm_dif_t *dif, bfm_dif_err_t *err);
 
-/* 相手の公開メモリ + off から nblocks ブロックを読み、形を変えて dst に置く。
+/* 相手の公開メモリ + off から nblocks ブロックを読み、形を変えて dst に置く(終わるまで待つ)。
  * dst の形は出る側(CHECK・SWAP・INSERT は 520 バイトおき、DELETE は 512 バイトおき)。 */
 int bfm_dif_read(bfm_conn_t *c, uint64_t off, void *dst, uint32_t nblocks,
                  const bfm_dif_t *dif, bfm_dif_err_t *err);
+
+/* bfm_dif_write() を起動だけして戻る。結果は bfm_dif_poll() / bfm_dif_wait() で受け取る。
+ * 戻り値は起動できたかどうかだけ(BFM_OK・BFM_E_PARAM・BFM_E_STATE・BFM_E_NOTSUP、
+ * 前の転送が終わっていなければ BFM_E_BUSY)。dif は戻った後に変えてよい。 */
+int bfm_dif_write_start(bfm_conn_t *c, uint64_t off, const void *src, uint32_t nblocks,
+                        const bfm_dif_t *dif);
+
+/* bfm_dif_read() を起動だけして戻る。戻り値は bfm_dif_write_start() と同じ。 */
+int bfm_dif_read_start(bfm_conn_t *c, uint64_t off, void *dst, uint32_t nblocks,
+                       const bfm_dif_t *dif);
+
+/* 起動した転送を、待たずに進める。
+ * 戻り値: BFM_DIF_INPROGRESS = まだ途中。BFM_OK = 全部済んだ。負 = 失敗(BFM_E_DIF なら *err に
+ * 場所と中身)。結果を返すのは 1 回だけで、その後は次の転送を起動できる。
+ * 動いている転送が無ければ BFM_OK。err は NULL でもよい。 */
+int bfm_dif_poll(bfm_conn_t *c, bfm_dif_err_t *err);
+
+/* 起動した転送が終わるまで進め、結果を返す(戻り値は bfm_dif_poll() の BFM_DIF_INPROGRESS 以外)。
+ * g_bfm_op_timeout_ms の間まったく進まなければ BFM_E_TIMEOUT(接続はエラーにする)。 */
+int bfm_dif_wait(bfm_conn_t *c, bfm_dif_err_t *err);
 
 /* 1 = BFM_DIF_HW が使える(装置に署名オフロード(sho)があり、資源を用意できた)。 */
 int bfm_dif_hw_supported(void);
