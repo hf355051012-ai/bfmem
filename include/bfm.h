@@ -36,7 +36,7 @@
 #define BFM_E_TIMEOUT   (-3)   /* 完了・応答が来ない */
 #define BFM_E_HW        (-4)   /* FW のコマンドが失敗した */
 #define BFM_E_NOMEM     (-5)   /* DMA 領域・接続の枠が足りない */
-#define BFM_E_REMOTE    (-6)   /* 相手が拒否した(rkey・範囲・権限、REJ)*/
+#define BFM_E_REMOTE    (-6)   /* 相手が拒否した(rkey・範囲・権限)*/
 #define BFM_E_RETRY     (-7)   /* 再送が尽きた(相手に届かない)*/
 #define BFM_E_CQE       (-8)   /* そのほかのエラー完了 */
 

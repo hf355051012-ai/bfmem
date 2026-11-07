@@ -61,7 +61,6 @@
       "notes": "* CQE は投稿の順に来るので、正常な完了 1 個でその WQE までの全部(通知なしで出したものを含む)を済んだ扱いにする。\n* 済んだ位置は、CQE の WQE カウンタ(16 ビット)を `sq_done` の 32 ビットへ広げ、その WQE の大きさ(`wqe_bbs[]`)を足して求める。\n* エラー完了では `sq_done` を進めない。接続が `BFM_CS_UP` のときだけ表示して `BFM_CS_ERROR` にする(2 回目以降は表示しない)。\n* `last_scat` は CQ のリングの中を指すので、次の CQE を拾うまでに読むこと。",
       "flow": [
         {"do": "cqe = CQ のリングの (cq_cc & (CQ_N - 1)) 番目(64 バイト)"},
-        {"call": "bfm_port_cache_inval(cqe, 64) を呼ぶ"},
         {"do": "op_own = cqe[63]"},
         {"if": "owner ビットが今の周回と合わない、または opcode == MLX5_CQE_INVALID ?", "then": [{"return": "0"}]},
         {"do": "bfm_rmb()。opcode = op_own >> 4、cnt = CQE の WQE カウンタ(byte 60、BE)"},
@@ -122,12 +121,10 @@
         {"do": "pc = sq_pc。b = 0"},
         {"while": "b < bbs ?", "body": [
           {"do": "w の b 番目の WQEBB(8 バイト x 8)をリングの (pc + b) & (SQ_N - 1) 番目へ写す"},
-          {"call": "bfm_port_cache_flush(dst, 64) を呼ぶ"},
           {"do": "b++"}
         ]},
         {"do": "wqe_bbs[pc & (SQ_N - 1)] = bbs。sq_pc = pc + bbs"},
         {"do": "bfm_dma_wmb()。dbr[1] = sq_pc の下位 16 ビット(BE)"},
-        {"call": "bfm_port_cache_flush(dbr, 8) を呼ぶ"},
         {"do": "bfm_dma_wmb()"},
         {"if": "c->bf != NULL かつ bbs x 64 <= g_bfm.bf_buf_size ?", "then": [
           {"do": "WQE 全体(bbs x 8 個の 8 バイト)を BlueFlame の窓 (bf + bf_off) へ書く"}
@@ -315,7 +312,7 @@
       "args": {"c": "書く接続", "off": "相手の公開メモリの先頭からのオフセット", "src": "書くデータ", "len": "長さ(バイト)"},
       "ret": "`BFM_OK`: 書けた。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗。そのほか `post()` / `wait_done()` の戻り値(`BFM_E_TIMEOUT`、エラー完了の値)。",
       "pre": "`bfm_connect()` / `bfm_accept()` で得た接続であること。同じ接続を複数のタスクから同時に使わないこと。",
-      "notes": "* 長いものを分けて送る途中で失敗すると、それまでの分は相手に書かれている。\n* 中継バッファへ写した後に `bfm_port_cache_flush()` でキャッシュを書き戻す。",
+      "notes": "* 長いものを分けて送る途中で失敗すると、それまでの分は相手に書かれている。",
       "flow": [
         {"call": "rc = check_range(c, off, len) を呼ぶ"},
         {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
@@ -330,7 +327,6 @@
         {"while": "len > 0 ?", "body": [
           {"do": "n = len と stage_size の小さいほう"},
           {"do": "中継バッファへ s から n バイト写す"},
-          {"call": "bfm_port_cache_flush(stage, n) を呼ぶ"},
           {"do": "w の先頭 64 バイトを 0 で埋める"},
           {"call": "build_ctrl(c, w, MLX5_OPCODE_RDMA_WRITE, 3, 1) を呼ぶ"},
           {"call": "build_raddr(c, w, off) を呼ぶ"},
@@ -390,7 +386,7 @@
       "args": {"c": "読む接続", "off": "相手の公開メモリの先頭からのオフセット", "dst": "読んだデータを置く先", "len": "長さ(バイト)"},
       "ret": "`BFM_OK`: 読めた。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗。そのほか `post()` / `wait_done()` の戻り値。",
       "pre": "`bfm_write()` と同じ。",
-      "notes": "* 途中で失敗すると、`dst` にはそれまでの分だけが入っている。\n* 中継バッファから写す前に `bfm_port_cache_inval()` でキャッシュを捨てる。",
+      "notes": "途中で失敗すると、`dst` にはそれまでの分だけが入っている。",
       "flow": [
         {"call": "rc = check_range(c, off, len) を呼ぶ"},
         {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
@@ -408,7 +404,6 @@
           {"if": "last_scat != NULL かつ n <= SCAT_MAX(32)?", "then": [
             {"do": "CQE(last_scat)から d へ n バイト写す"}
           ], "else": [
-            {"call": "bfm_port_cache_inval(stage, n) を呼ぶ"},
             {"do": "中継バッファから d へ n バイト写す"}
           ]},
           {"do": "d += n、off += n、len -= n"}
@@ -418,22 +413,17 @@
     },
     {
       "func": "atomic_result",
-      "summary": "atomic の元の値(8 バイト)を数にする。応答が CQE に入っていればそこから読み、ビッグエンディアンとして直す。そうでなければ中継バッファから読み、HCA がホスト順の設定(`g_bfm.atomic_host_order`)ならそのまま、そうでなければビッグエンディアンとして直す。",
+      "summary": "atomic の元の値(8 バイト)を数にする。応答が CQE に入っていればそこから `bfm_rd64be()` でビッグエンディアンとして読む。そうでなければ中継バッファの 8 バイトをそのまま(ホスト順として)読む。",
       "args": {"c": "atomic を終えた接続"},
       "ret": "atomic の元の値(ホスト順)。",
       "pre": "`c` の直前の完了が、この atomic の完了であること。",
-      "notes": "CQE に入って返った値は、HCA の設定によらずビッグエンディアン(ConnectX-4 Lx で確認)。メモリへ書かれた値は、HCA がホスト順の設定ならホスト順、そうでなければビッグエンディアン。",
+      "notes": "CQE に入って返った値は、HCA の設定によらずビッグエンディアン(ConnectX-4 Lx で確認)。中継バッファへ書かれた値は、HCA を atomic をホスト順で扱う設定にしてある(`setup_atomic_caps()`)のでホスト順。",
       "flow": [
         {"if": "last_scat != NULL ?", "then": [
-          {"do": "raw = CQE(last_scat)の先頭 8 バイト"},
-          {"return": "bfm_rd64be(raw)"}
+          {"return": "bfm_rd64be(last_scat)"}
         ]},
-        {"call": "bfm_port_cache_inval(stage, 8) を呼ぶ"},
-        {"do": "raw = 中継バッファの先頭 8 バイト"},
-        {"if": "g_bfm.atomic_host_order ?", "then": [
-          {"return": "raw をそのまま 64 ビットの値にしたもの"}
-        ]},
-        {"return": "bfm_rd64be(raw)"}
+        {"do": "v = 中継バッファの先頭 8 バイト(memcpy)"},
+        {"return": "v"}
       ]
     },
     {

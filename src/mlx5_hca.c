@@ -90,11 +90,10 @@ static int access_reg(bfm_dev_t *d, uint16_t reg, int read, uint8_t data[16], co
     return rc;
 }
 
-/* HOST_ENDIANNESS(Linux の set_hca_ctrl())。ビッグエンディアンの CPU なら 0x80。 */
+/* HOST_ENDIANNESS(Linux の set_hca_ctrl())。x86 はリトルエンディアンなので 0。 */
 static int set_host_endianness(bfm_dev_t *d)
 {
     uint8_t data[16] = {0};
-    data[0] = BFM_HOST_BIG_ENDIAN ? 0x80u : 0x00u;
     return access_reg(d, MLX5_REG_HOST_ENDIANNESS, 0, data, "ACCESS_REG(HOST_ENDIANNESS)");
 }
 
@@ -155,8 +154,8 @@ static int setup_general_caps(bfm_dev_t *d)
 }
 
 /*=================================================================
- * atomic の能力。対応していれば 8 バイトの atomic をホストのバイト順で扱う設定にする
- * (Linux の handle_hca_cap_atomic() と同じ)。QP の atomic_mode もここで決める
+ * atomic の能力。8 バイトの atomic をホストのバイト順で扱う設定にする(Linux の
+ * handle_hca_cap_atomic() と同じ。できない装置は断る)。QP の atomic_mode もここで決める
  * (Linux の get_atomic_mode() と同じ規則)。
  *   byte 8  bit7-6 atomic_req_8B_endianness_mode(0 = BE / 1 = ホスト順)
  *   byte 8  bit1   supported_atomic_req_8B_endianness_mode_1
@@ -165,22 +164,18 @@ static int setup_general_caps(bfm_dev_t *d)
  * ===============================================================*/
 static int setup_atomic_caps(bfm_dev_t *d)
 {
-    if (query_cap(d, MLX5_CAP_ATOMIC, "QUERY_HCA_CAP(atomic)") != BFM_OK) {
-        BFM_LOG("bfm: atomic の能力が読めない。相手からの atomic は受けない\n");
-        d->atomic_mode = 0;
-        return BFM_OK;
-    }
+    if (query_cap(d, MLX5_CAP_ATOMIC, "QUERY_HCA_CAP(atomic)") != BFM_OK) return BFM_E_HW;
     uint8_t *c = &s_cap_out[16];
     d->atomic_ops = bfm_rd16be(&c[18]);
     d->atomic_size_qp = bfm_rd16be(&c[22]);
-    const int can_host = (c[8] >> 1) & 1;
-    if (g_bfm_atomic_host_endian && can_host && (c[8] >> 6) != 1u) {
+    if ((c[8] >> 6) != 1u) {
+        if (!((c[8] >> 1) & 1u)) {
+            BFM_LOG("bfm: この装置は atomic をホストのバイト順にできない\n");
+            return BFM_E_HW;
+        }
         c[8] = (uint8_t)((c[8] & 0x3fu) | 0x40u);
         if (set_cap(d, MLX5_CAP_ATOMIC, "SET_HCA_CAP(atomic)") != BFM_OK) return BFM_E_HW;
-        if (query_cap(d, MLX5_CAP_ATOMIC, "QUERY_HCA_CAP(atomic)") != BFM_OK) return BFM_E_HW;
-        c = &s_cap_out[16];
     }
-    d->atomic_host_order = (uint8_t)(((c[8] >> 6) == 1u) || BFM_HOST_BIG_ENDIAN);
 
     /* atomic_mode: 拡張 atomic があれば対応する最大の大きさ(8B 未満なら 8B = 3)、
      * なければ標準の CS / FA で IB_COMP(1)。 */
@@ -195,8 +190,8 @@ static int setup_atomic_caps(bfm_dev_t *d)
     }
     if (mode <= 0 && (d->atomic_ops & 0x03u) == 0x03u) mode = 1;
     d->atomic_mode = (uint8_t)mode;
-    BFM_DBG("bfm: atomic ops=0x%x size_qp=0x%x host_order=%u atomic_mode=%u\n",
-            d->atomic_ops, d->atomic_size_qp, d->atomic_host_order, d->atomic_mode);
+    BFM_DBG("bfm: atomic ops=0x%x size_qp=0x%x atomic_mode=%u\n",
+            d->atomic_ops, d->atomic_size_qp, d->atomic_mode);
     if ((d->atomic_ops & 0x03u) != 0x03u) BFM_LOG("bfm: 注意: 8 バイトの CAS / FAA に対応していない\n");
     return BFM_OK;
 }
@@ -268,8 +263,6 @@ int mlx5_cq_create(bfm_dev_t *d, uint32_t uarn, volatile uint8_t *buf, uint32_t 
     for (uint32_t i = 0; i < nent; i++) buf[i * 64u + 63u] = (uint8_t)(MLX5_CQE_INVALID << 4);
     dbr[0] = 0;
     dbr[1] = 0;
-    bfm_port_cache_flush(buf, nent * 64u);
-    bfm_port_cache_flush(dbr, 8u);
 
     uint8_t in[272 + 16 * 8] = {0}, out[16];
     bfm_wr16be(&in[0], MLX5_CMD_CREATE_CQ);

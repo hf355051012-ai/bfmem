@@ -4,8 +4,11 @@ ConnectX(mlx5)の **BlueFlame** を使って、ノード間で相手のメモリ
 **write / read / atomic(CAS・FAA)** を打つためのライブラリ。RoCE v2 の RC QP を 1 本張り、
 WQE を UAR の BlueFlame の窓へ MMIO で書き込んで送る。相手の CPU は何もしない(相手の NIC が応答する)。
 
-- 対象は **VxWorks(論理アドレス = 物理アドレス)どうし**。設計と試験は **x86-64 Linux + VFIO** で行い、
-  プラットフォームに依存する部分は移植層(`port/`)に分けてある。
+- 対象は **x86-64(Intel)の VxWorks(論理アドレス = 物理アドレス)どうし**。設計と試験は
+  **x86-64 Linux + VFIO** で行い、OS に依存する部分は移植層(`port/`)に分けてある。
+- **前提を絞って簡単にしてある:** CPU は x86-64 だけ(リトルエンディアン、DMA はキャッシュと一貫)、
+  **相手は常に bfmem**(接続の手順は bfmem だけの短いもの。Linux の rdma_cm とは繋がらない)、
+  VxWorks の設定空間は ECAM だけ、atomic は常にホストのバイト順。
 - `vfio_nvme` の mlx5 ドライバ(ConnectX-4 / 4 Lx の実機で確認済み)から、この用途に要る部分だけを
   取り出して作り直した。**NVMe・NVMe/TCP・NVMe-oF・iSCSI・iSER・TCP/IP のスタックは一切含まない。**
 - 試験できるのは今のところ ConnectX-4 系だけ。**ConnectX-7 でも動くように書いてある**(下の「ConnectX-7 への備え」)が、
@@ -17,19 +20,18 @@ WQE を UAR の BlueFlame の窓へ MMIO で書き込んで送る。相手の CP
 |---|---|
 | `include/bfm_config.h` | **移植のときに設定する変数を全部ここに集めてある**(実体と既定値は `src/bfm_config.c`)|
 | `include/bfm.h` | アプリケーションが使う API |
-| `include/bfm_port.h` | 移植層の関数の宣言と、CPU ごとのバリア・バイト順の道具 |
+| `include/bfm_port.h` | 移植層の関数の宣言と、x86-64 のバリア・バイト順の道具 |
 | `src/bfm_core.c` | `bfm_init()` / `bfm_shutdown()` / `bfm_poll()` |
 | `src/bfm_pci.c` | PCIe の設定空間の設定(FLR・BAR0・Bus Master・MRRS)|
 | `src/mlx5_cmd.c` | コマンドキュー、FW へのページの受け渡し、EQ |
 | `src/mlx5_hca.c` | HCA の立ち上げ、UAR・PD・MKey・CQ、ポート、RoCE のアドレス |
 | `src/mlx5_qp.c` | QP(RC と GSI)の作成と状態遷移 |
-| `src/bfm_cm.c` | 接続の確立と切断(GSI の上の IB CM)|
+| `src/bfm_cm.c` | 接続の確立と切断(GSI の上の bfmem だけの REQ / REP / BYE)|
 | `src/bfm_ops.c` | データ経路(BlueFlame で WQE を送る、完了を拾う)|
 | `src/bfm_mem.c` | DMA 領域からの静的な切り出し |
 | `port/linux_vfio/port_linux.c` | 移植層: Linux + VFIO(試験環境)|
 | `port/vxworks/port_vxworks.c` | 移植層: VxWorks(**未検証**)|
-| `test/bfm_test.c` | 試験プログラム(server / client / info)|
-| `tools/bfm_peer.c` | 試験の相手(Linux のカーネルの mlx5 + librdmacm)|
+| `test/bfm_test.c` | 試験プログラム(server / client / bench / info)|
 | `doc/spec/bfmem_spec.adoc` | **関数仕様書**(全ソースの全関数。表・フロー図・関係図。図は `doc/spec/images/*.drawio.svg`)。`doc/spec/gen.py` で作る。HTML 版は `doc/spec/bfmem_spec.html`(図を埋め込んだ 1 ファイル。asciidoctor があれば gen.py が一緒に作る) |
 
 ## API
@@ -65,7 +67,7 @@ bfm_shutdown();
 
 ライブラリの本体(`src/`)は OS の機能を何も使わない。使うのは移植層(`include/bfm_port.h`)の
 10 個ほどの関数だけ: 設定空間の読み書き、BAR0 を張る、BAR0 の一部を write-combining で張る、
-時刻、待つ、表示、キャッシュの操作。
+時刻、待つ、表示。x86 の DMA はキャッシュと一貫しているので、キャッシュの操作は持たない。
 
 **アドレスの約束: NIC に渡すアドレス = CPU のポインタの値。** VxWorks は論理 = 物理なので
 そのまま成り立つ。Linux では、移植層が DMA 領域と公開メモリを `g_bfm_dma_base` / `g_bfm_mr_base`
@@ -105,28 +107,35 @@ VFIO の fd から BAR を張ると vfio-pci がカーネルの中でも BAR 全
 同じ物理ページに WC を許さなくなる(黙って UC- に格下げされる)。そのため BAR0 は sysfs の
 `resource0` から張り、UAR のページだけを `resource0_wc` で張り替える。
 
-### 接続(IB CM)
+### 接続(bfmem どうし)
 
 RC QP を繋ぐには、相手の QP 番号・開始 PSN と、公開メモリのアドレス・rkey を交換する必要がある。
-IP のスタックを持たないので、交換は **RoCE の GSI(QP1)で IB CM の REQ / REP / RTU** を使う
-(Linux の rdma_cm と同じ形なので、試験では Linux の相手と繋がる)。公開メモリの情報と自分の MAC は
-private data に入れる(REQ は rdma_cm の `cma_hdr` 36 バイトの後ろ、REP は先頭)。
+IP のスタックを持たないので、交換は **RoCE v2 の UD で相手の QP1(GSI)へ** 送る。相手は常に bfmem
+なので、IB CM ではなく 64 バイトの短いメッセージを 3 種類だけ使う。
 
 ```
-[0..3] 'BFM1'  [4..5] 版 = 1  [6..7] 旗(bit0 = MAC あり)
-[8..15] 公開メモリの先頭  [16..19] rkey  [20..27] 大きさ  [28..33] MAC   (ビッグエンディアン)
+掛け側 bfm_connect():    REQ ->(REP が来るまで 1 秒ごとに送り直す) <- REP
+受け側 bfm_accept():     <- REQ  QP を RTS にしてから REP ->
+切断   bfm_disconnect(): BYE ->(返事は待たない。相手は bfm_poll() で受けて閉じた扱いにする)
+
+[0..3] 'BFM2'  [4] 種類  [5] 経路 MTU  [6..7] 待ち受けの番号
+[8..11] 送り手の接続の id  [12..15] 受け手の接続の id  [16..19] QPN  [20..23] 開始 PSN
+[24] 受け付ける read / atomic の数  [26..31] MAC  [32..35] IPv4
+[36..39] rkey  [40..47] 公開メモリの先頭  [48..55] 大きさ        (数はビッグエンディアン)
 ```
+
+受け側は REP を送る前に RTS にするので、掛け側は REP を受けて RTS にすればすぐ使える(RTU は要らない)。
+REP が落ちたら掛け側が REQ を送り直し、受け側は確立済みの接続への REQ に REP を送り直す。
 
 **ARP を使わない。** 掛け側は相手の IP と MAC を引数(か `g_bfm_peer_ip` / `g_bfm_peer_mac`)で知り、
-受け側は相手の MAC を REQ の private data から知る。GID は IP から作る(`::ffff:a.b.c.d`、RoCE v2)。
+受け側は相手の MAC を REQ から知る。GID は IP から作る(`::ffff:a.b.c.d`、RoCE v2)。
 
 ### atomic のバイト順
 
-立ち上げのときに、対応していれば **8 バイトの atomic をホストのバイト順で扱う設定**にする
-(`atomic_req_8B_endianness_mode`、Linux の mlx5_core と同じ。`g_bfm_atomic_host_endian`)。
-`bfm_cas()` / `bfm_faa()` の `old` はこの設定に合わせてホストの数に直して返す。
-相手のメモリの中の並びは**相手の HCA の設定で決まる**ので、両方を bfmem にしておけば揃う。
-試験プログラムの `[4]` が、相手のメモリの並びを読んで表示する。
+立ち上げのときに、**8 バイトの atomic をホストのバイト順で扱う設定**にする
+(`atomic_req_8B_endianness_mode`、Linux の mlx5_core と同じ)。できない装置では `bfm_init()` が失敗する。
+両端とも bfmem なので、相手のメモリの中の atomic の語は常にホスト順(リトルエンディアン)になる。
+**CQE に入って返る元の値だけは、この設定によらずビッグエンディアン**なので、`bfm_cas()` / `bfm_faa()` が直して返す。
 
 ### ConnectX-7 への備え(実機では未確認)
 
@@ -138,7 +147,7 @@ private data に入れる(REQ は rdma_cm の `cma_hdr` 36 バイトの後ろ、
 | 時刻の形式を実時間だけにできる | RoCE の能力 `qp_ts_format` が 0 でなければ QP の `ts_format` を DEFAULT にする(Linux の `mlx5_get_qp_default_ts()` と同じ)|
 | `num_vhca_ports` が 0 でない | SET_ROCE_ADDRESS にポート番号を入れる |
 | BlueFlame の窓の大きさ | `log_bf_reg_size` から求める(想定外の値なら 512 として警告)|
-| atomic の対応 | atomic の能力から QP の `atomic_mode` を決める(Linux の `get_atomic_mode()` と同じ規則)。断られたら atomic を受けない形で繋ぐ |
+| atomic の対応 | atomic の能力から QP の `atomic_mode` を決める(Linux の `get_atomic_mode()` と同じ規則)。断られたら atomic を受けない形で繋ぐ。ホスト順の設定ができなければ立ち上げを断る |
 | 装置の番号 | 0x1013 / 0x1015(CX-4 / Lx)、0x1017 / 0x1019(CX-5)、0x101b / 0x101d / 0x101f(CX-6)、**0x1021(CX-7)** |
 
 ## VxWorks への移植
@@ -164,7 +173,7 @@ private data に入れる(REQ は rdma_cm の `cma_hdr` 36 バイトの後ろ、
 | `g_bfm_peer_ip` / `g_bfm_peer_mac` | 既定の相手 |
 | `g_bfm_cm_port` | 接続の番号 |
 | `g_bfm_path_mtu` / `g_bfm_port_mtu` | RoCE の経路 MTU(1〜5)/ ポートの MTU |
-| `g_bfm_bf_enable` / `g_bfm_scatter_cqe` / `g_bfm_atomic_host_endian` | 機能の入り切り |
+| `g_bfm_bf_enable` / `g_bfm_scatter_cqe` | 機能の入り切り |
 | `g_bfm_ack_timeout` / `g_bfm_retry_count` / `g_bfm_op_timeout_ms` | 再送と時間切れ |
 | `g_bfm_cpu_awake` | CPU を深い省電力状態に入れない(相手からの read / atomic の遅延に効く。VxWorks では下の 6)|
 | `g_bfm_link_wait_ms` / `g_bfm_signal_every` / `g_bfm_verbose` | そのほか |
@@ -173,13 +182,12 @@ private data に入れる(REQ は rdma_cm の `cma_hdr` 36 バイトの後ろ、
 
 ### BSP 側で用意すること
 
-1. DMA 領域と公開メモリの物理メモリを OS に使わせず、論理 = 物理で張る。
-   NIC と CPU のキャッシュが一貫しない CPU では、キャッシュしない属性で張るか、
-   `BFM_VX_CACHE_OPS` を定義して `cacheFlush` / `cacheInvalidate` を使う。
+1. DMA 領域と公開メモリの物理メモリを OS に使わせず、論理 = 物理・ライトバックで張る
+   (x86 の DMA はキャッシュと一貫しているので、キャッシュの操作は要らない)。
 2. BAR0(`g_bfm_bar0_addr` から BAR0 の大きさぶん)を論理 = 物理・キャッシュしない属性で張る。
-3. BlueFlame を使うなら、BAR0 全体を **write-combining** で張った別名を作り、`g_bfm_bar0_wc_va` に入れる
-   (x86 は PAT の WC、ARM64 は Normal-NC か Device-GRE)。
-4. ECAM が無い機材では `BFM_VX_PCI_LIB` を定義して pciConfigLib を使う。
+3. BlueFlame を使うなら、BAR0 全体を **write-combining**(PAT の WC)で張った別名を作り、
+   `g_bfm_bar0_wc_va` に入れる。
+4. PCIe の設定空間は ECAM(`g_bfm_pcie_ecam_base`)で読み書きする。ECAM の位置を入れること。
 5. **`bfm_init()` が設定するのは ConnectX の function だけ。** 途中のブリッジ(ルートポートやスイッチ)の
    バス番号・メモリの窓(Memory Base / Limit に BAR0 が入ること)・Memory Space / Bus Master は、
    BSP か呼び出し側で先に設定しておくこと。
@@ -190,37 +198,28 @@ private data に入れる(REQ は rdma_cm の `cma_hdr` 36 バイトの後ろ、
 ### ビルド
 
 `src/*.c` と `port/vxworks/port_vxworks.c` を DKM などのソースに入れ、`include/` をインクルードパスに足す。
-`BFM_PORT_LINUX` は定義しない。手元では `make vxcheck` で、仮のヘッダ(`tools/vxstub/`)を使って
-文法だけを確かめられる。
+`BFM_PORT_LINUX` は定義しない。64bit(x86-64)でビルドすること(それ以外は `#error` で止まる)。
+手元では `make vxcheck` で、仮のヘッダ(`tools/vxstub/`)を使って文法だけを確かめられる。
 
 ## 試験(Linux + VFIO)
 
 ### 準備
 
-- 試験する側(bfmem_test): ConnectX を `vfio-pci` に結びつける(同じ IOMMU グループの装置は全部)。
+- 両方の機械で ConnectX を `vfio-pci` に結びつける(同じ IOMMU グループの装置は全部)。
   root で動かす(sysfs の `resource0` / `resource0_wc` を開くため)。hugepage は要らない。
-- 相手(bfm_peer): カーネルの mlx5 のまま。`gcc -O2 -Wall -Wextra -o bfm_peer tools/bfm_peer.c -lrdmacm -libverbs`
+- 相手も bfmem(`bfmem_test server`)。Linux のカーネルの mlx5 とは繋がらない。
 
-### 手順(例: 試験する側 192.168.101.11、相手 192.168.101.21)
+### 手順(例: 掛け側 192.168.101.11、受け側 192.168.101.21)
 
 ```bash
 make
-# bfmem_test が掛け側、bfm_peer が受け側(相手の近隣表に bfmem の MAC を固定で書く。下の注)
-sudo ip neigh replace 192.168.101.11 lladdr <bfmem 側の MAC> dev <IF> nud permanent   # 相手
-./bfm_peer -a 192.168.101.21                                     # 相手
-sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 client 192.168.101.21 <相手のMAC>
-kill -QUIT $(pgrep -x bfm_peer)                                  # 相手の hash を出し、client の「模型の hash」と比べる
+# 受け側の機械
+sudo build/bfmem_test -d 0000:b3:00.0 -i 192.168.101.21 server
+# 掛け側の機械
+sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 client 192.168.101.21 <受け側の MAC>
+# 受け側が切断のときに出す hash と、client の「模型の hash」が同じことを見る
 ```
 
-```bash
-# bfmem_test が受け側、bfm_peer が掛け側(相手は bfmem の MAC を ARP で引けないので近隣表に書く)
-sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 server
-sudo ip neigh replace 192.168.101.11 lladdr <bfmem 側の MAC> dev <IF> nud permanent   # 相手
-./bfm_peer -c 192.168.101.11                                                            # 相手
-```
-
-- 相手の Linux には、bfmem 側の IP へ向く経路が要る(`ip route replace 192.168.101.11/32 dev <IF> src 192.168.101.21`)。
-  rdma_cm が受けた REQ の宛先を経路で確かめるため。
 - **同じカードの 2 ポートの間では試せない。** 宛先の GID か MAC が自分のカードのものだと、
   FW が内部で処理しようとしてワイヤに出ない(vfio_nvme で確認。ConnectX-4 Lx)。別の機械と繋ぐこと。
 - `-B` で BlueFlame を止めて比べられる。`-x` で最後に公開メモリの外を読み、相手が断ることを確かめる
@@ -233,7 +232,7 @@ sudo ip neigh replace 192.168.101.11 lladdr <bfmem 側の MAC> dev <IF> nud perm
 | [1] | 初期の中身を 1〜300 バイト・半端な位置で読む、64KiB まとめて読む |
 | [2] | write 1〜220 バイト(inline)と 221〜8,220 バイト(中継バッファ)、毎回読み戻す |
 | [3] | write_post 1〜32 バイト x 5,000 + flush の後に全体を読み戻す |
-| [4] | FAA +1 x 1,000(元の値の並び)、+2^32、CAS 0→1,000、外れる比較値。相手のメモリの並びを表示 |
+| [4] | FAA +1 x 1,000(元の値の並び)、+2^32、CAS 0→1,000、外れる比較値。相手のメモリの語がホスト順であること |
 | [5] | データ領域を読み戻して模型と比べる |
 | [6] | 遅延(write / read 8・64 バイト、FAA、CAS)と write_post の速さ。測った後にもう一度読み戻して比べる |
 | 最後 | 模型の hash を出す(相手が切断のときに出す hash と同じであること)|
@@ -241,8 +240,11 @@ sudo ip neigh replace 192.168.101.11 lladdr <bfmem 側の MAC> dev <IF> nud perm
 
 ## 確かめたこと / まだのこと
 
-- **2026-11-07: ConnectX-4 Lx(FW 14.32.1900)の実機で、Linux のカーネルの mlx5 の相手と両方向に通した**
-  (OptiPlex の bfmem ↔ Precision の `bfm_peer`。手順・結果・遅延は `TEST_PLAN.md`)。
+- **2026-11-07: bfmem どうし(OptiPlex ↔ Precision、どちらも ConnectX-4 Lx + VFIO)で両方向に通した。**
+  bfmem だけの接続の手順(REQ / REP / BYE)に作り直した後の確認で、[1]〜[7] が全部 OK、hash も一致
+  (`TEST_PLAN.md` の最後)。
+- 作り直す前(IB CM のころ)に、ConnectX-4 Lx(FW 14.32.1900)の実機で、Linux のカーネルの mlx5 の相手
+  (当時の `tools/bfm_peer.c`)と両方向に通した。手順・結果・遅延は `TEST_PLAN.md` の段階 0〜5。
   - 掛け側として: read / write(inline と中継バッファ)/ write_post / CAS / FAA が全部正しく、相手のメモリの
     hash も一致。BlueFlame で 1 回ずつの操作が約 320〜380ns 縮む(write 8B 中央値 1,784 → 1,403ns)。
   - 受け側として: 相手からの read / write / CAS / FAA を NIC が処理し、**公開メモリの範囲の外は MKey が断る**。
@@ -251,9 +253,7 @@ sudo ip neigh replace 192.168.101.11 lladdr <bfmem 側の MAC> dev <IF> nud perm
     なることも PAT の一覧で確かめた。
 - **CQE に入って返る atomic の元の値は、HCA の設定によらずビッグエンディアン**(メモリへ書かせた値は設定どおり)。
   `bfm_cas()` / `bfm_faa()` はこれを直して返す。ConnectX-7 でも同じかは未確認(試験の `[4]` で分かる)。
-- **相手が Linux のときは、相手の近隣表に bfmem の MAC を固定で書くこと**(掛け側・受け側どちらでも。
-  Linux の ib_cm が REP / REJ を送るときに MAC を近隣表で引き、bfmem は ARP に答えない)。bfmem どうしでは要らない。
 - **相手からの read / atomic の遅延は、受け側の CPU の C-state で約 300ns 変わる。** `g_bfm_cpu_awake`(既定 1)で
   Linux では対策した(FAA 2,150 → 1,760〜1,930ns)。hugepage(IOMMU の変換を減らす)は効かなかった。
-- まだ: **bfmem どうし**(本番の形)、VxWorks、ConnectX-7。`write_post` は BlueFlame なしのほうが速い
+- まだ: VxWorks、ConnectX-7。`write_post` は BlueFlame なしのほうが速い
   (11.4 → 13.1 Mops)ので、続けて出すときの扱いは見直しの余地がある。

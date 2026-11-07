@@ -12,7 +12,7 @@
 ConnectX(mlx5)の BlueFlame で、ノード間のメモリへ write / read / atomic を打つライブラリ。
 `vfio_nvme` の mlx5 ドライバから、この用途に要る部分だけを取り出して作り直した。
 **NVMe・NVMe/TCP・NVMe-oF・iSCSI・iSER・TCP/IP のコードはソースに入れない**(ユーザの指示)。
-本番は VxWorks(論理 = 物理)どうし。試験は x86-64 Linux + VFIO。
+本番は x86-64 の VxWorks(論理 = 物理)どうし。試験は x86-64 Linux + VFIO。
 
 ## 守ること
 
@@ -22,6 +22,10 @@ ConnectX(mlx5)の BlueFlame で、ノード間のメモリへ write / read / ato
 - NIC に渡すアドレス = CPU のポインタの値(VxWorks は論理 = 物理、Linux は仮想 = IOVA に張る)。
   アドレスの変換を本体に持ち込まない。
 - ConnectX-7 でも動く前提で書く(README「ConnectX-7 への備え」)。CX-4 だけで通る書き方をしない。
+- **前提を絞って簡単にしてある(ユーザの指示)。** 外れる場合のコードを足し戻さない:
+  CPU は x86-64 だけ(リトルエンディアン・DMA はキャッシュと一貫・TSO。他の CPU の分岐やキャッシュ操作は持たない)、
+  **相手は常に bfmem**(接続は bfmem だけの REQ / REP / BYE。IB CM・Linux の rdma_cm とは繋がらない)、
+  VxWorks の設定空間は ECAM だけ、atomic は常にホスト順(できない装置は `bfm_init()` が断る)。
 - コードのコメントは日本語。
 
 ## ビルド
@@ -30,8 +34,6 @@ ConnectX(mlx5)の BlueFlame で、ノード間のメモリへ write / read / ato
 export MSYS_NO_PATHCONV=1
 wsl.exe -d Ubuntu-22.04 -- bash -c "cd /mnt/c/Users/fukud/Documents/bfmem && make && make vxcheck"
 ```
-
-WSL には librdmacm の開発用ヘッダが無いので `tools/bfm_peer.c` は手元でビルドできない(相手の機械でビルドする)。
 
 ## 関数仕様書(`doc/spec/`)
 
@@ -51,11 +53,15 @@ wsl.exe -d Ubuntu-22.04 -- bash -c "cd /mnt/c/Users/fukud/Documents/bfmem && pyt
 
 ## 実機の試験
 
-手順・結果は `TEST_PLAN.md`(OptiPlex の ConnectX-4 Lx を vfio-pci にして bfmem、Precision はカーネルの mlx5 で `bfm_peer`)。
-OptiPlex の 2 つの PF は同じ IOMMU グループなので、**両方**を vfio-pci にする。終わったら mlx5_core に戻す。
+手順・結果は `TEST_PLAN.md` の最後の「bfmem どうしの試験」(OptiPlex と Precision の両方の ConnectX-4 Lx を
+vfio-pci にして bfmem_test どうし)。OptiPlex の 2 つの PF は同じ IOMMU グループなので、**両方**を vfio-pci にする。
+Precision は PF0(`0000:b3:00.0`)だけでよい。終わったら mlx5_core に戻す。
 ホストへの入り方は `kvcache_cmp/CLAUDE.md` と同じ(`ganesha_pnfs/tools/r.sh`)。
 
 ## このプロジェクトで踏んだ落とし穴
+
+次の 4 つ(近隣表・CA GUID・librdmacm・受け側の機械)は、IB CM で Linux の相手(`bfm_peer`)と繋いでいたころのもの。
+今の bfmem どうしの手順では起きないが、Linux の RoCE の相手を作るときの参考に残す。
 
 - **Linux の相手には、bfmem の MAC を近隣表に固定で書く**(`ip neigh replace … nud permanent`)。bfmem が掛け側でも要る。
   Linux の ib_cm は REP を送るときに近隣表で MAC を引き、bfmem は ARP に答えないので STALE のまま REP が出ない。

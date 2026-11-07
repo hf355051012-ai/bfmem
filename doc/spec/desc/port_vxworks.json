@@ -1,6 +1,6 @@
 {
   "file": "port/vxworks/port_vxworks.c",
-  "summary": "移植層の VxWorks 版(論理アドレス = 物理アドレス)。**この版は未検証(VxWorks の機材で動かしていない)。** 使う VxWorks の API は `printf`・`tickGet`・`sysClkRateGet`・`taskDelay`・`cacheFlush`・`cacheInvalidate` だけ(`BFM_VX_PCI_LIB` を定義したときは `pciConfigInLong` / `pciConfigOutLong` も)。DMA 領域・公開メモリ・BAR0 を論理 = 物理で張るのは BSP 側の役目で、この版はアドレスをそのまま返す。PCIe の設定空間は既定では ECAM(`g_bfm_pcie_ecam_base`)を直接読み書きし、`BFM_VX_PCI_LIB` を定義してビルドすると pciConfigLib を使う。`BFM_VX_CACHE_OPS` を定義してビルドすると、キャッシュの操作に `cacheFlush` / `cacheInvalidate` を使う。BlueFlame には、BSP が用意した BAR0 全体の write-combining の別名(`g_bfm_bar0_wc_va`)を使う。",
+  "summary": "移植層の x86-64 VxWorks 版(論理アドレス = 物理アドレス)。**この版は未検証(VxWorks の機材で動かしていない)。** 使う VxWorks の API は `printf`・`tick64Get`・`sysClkRateGet`・`taskDelay` だけ。DMA 領域・公開メモリ(論理 = 物理・ライトバック)と BAR0(論理 = 物理・キャッシュしない属性)を張るのは BSP 側の役目で、この版はアドレスをそのまま返す。x86 の DMA はキャッシュと一貫しているので、キャッシュの操作はしない。PCIe の設定空間は ECAM(`g_bfm_pcie_ecam_base`)を直接読み書きする(設定空間はリトルエンディアンなので、バイト順はそのまま)。BlueFlame には、BSP が PAT の WC で張った BAR0 全体の write-combining の別名(`g_bfm_bar0_wc_va`)を使う。",
   "functions": [
     {
       "func": "bfm_port_log",
@@ -17,24 +17,19 @@
     },
     {
       "func": "bfm_port_time_ns",
-      "summary": "`tickGet()` の tick の数を 64bit に伸ばし、1 tick のナノ秒(`10^9 / sysClkRateGet()`)を掛けて時刻を返す。`tickGet()` の下位 32bit が前に呼んだときより小さくなったら一周したとみなし、上位(静的変数 `s_high`)に 2^32 を足す。",
+      "summary": "`tick64Get()` の tick の数に、1 tick のナノ秒(`10^9 / sysClkRateGet()`)を掛けて時刻を返す。",
       "args": {},
       "ret": "時刻(ナノ秒)。分解能は 1 tick。",
-      "pre": "`tickGet()` の下位 32bit が一周する間(1000Hz で約 50 日)に 1 回以上呼ばれること。呼ぶのは `bfm_init()` と同じタスクだけであること(静的変数 `s_last` / `s_high` を排他なしで書き換える)。",
-      "notes": "* 時間切れの判定にしか使わない前提で、分解能は 1 tick。\n* `tickGet()` が 32bit の版で一周して 0 に戻っても、時刻が戻らないようにしている。一周の間に一度も呼ばれないと、その一周ぶんは数えない。\n* `sysClkRateGet()` が 0 を返したときは 60Hz として計算する。\n* VxWorks の実機で未検証。",
+      "pre": "特になし。",
+      "notes": "* 時間切れの判定にしか使わない前提で、分解能は 1 tick。\n* `tick64Get()` は 64bit なので一周しない。\n* `sysClkRateGet()` が 0 を返したときは 60Hz として計算する。\n* VxWorks の実機で未検証。",
       "flow": [
-        {"do": "now = tickGet() の下位 32bit"},
-        {"if": "now < s_last ?", "then": [
-          {"do": "s_high += 2^32"}
-        ]},
-        {"do": "s_last = now"},
         {"do": "hz = sysClkRateGet()"},
         {"if": "hz != 0 ?", "then": [
           {"do": "1 tick = 10^9 / hz ナノ秒"}
         ], "else": [
           {"do": "1 tick = 10^9 / 60 ナノ秒"}
         ]},
-        {"return": "(s_high + now) × 1 tick のナノ秒"}
+        {"return": "tick64Get() × 1 tick のナノ秒"}
       ]
     },
     {
@@ -54,48 +49,16 @@
       ]
     },
     {
-      "func": "bfm_port_cache_flush",
-      "summary": "CPU が書いたものを NIC が読む前のキャッシュの操作。`BFM_VX_CACHE_OPS` を定義してビルドしたときは `cacheFlush(DATA_CACHE, p, len)` を呼び、定義していなければ何もしない。",
-      "args": {"p": "範囲の先頭", "len": "範囲の大きさ(バイト)"},
-      "ret": "なし",
-      "pre": "`BFM_VX_CACHE_OPS` を定義しないときは、DMA 領域と公開メモリを NIC とキャッシュが一貫する属性(キャッシュしない属性など)で張ってあること。",
-      "notes": "* `cacheFlush` の戻り値は見ない。\n* VxWorks の実機で未検証。",
-      "flow": [
-        {"if": "BFM_VX_CACHE_OPS を定義してビルドした?", "then": [
-          {"do": "cacheFlush(DATA_CACHE, p, len)"}
-        ], "else": [
-          {"do": "何もしない"}
-        ]}
-      ]
-    },
-    {
-      "func": "bfm_port_cache_inval",
-      "summary": "NIC が書いたものを CPU が読む前のキャッシュの操作。`BFM_VX_CACHE_OPS` を定義してビルドしたときは `cacheInvalidate(DATA_CACHE, p, len)` を呼び、定義していなければ何もしない。",
-      "args": {"p": "範囲の先頭", "len": "範囲の大きさ(バイト)"},
-      "ret": "なし",
-      "pre": "`BFM_VX_CACHE_OPS` を定義しないときは、DMA 領域と公開メモリを NIC とキャッシュが一貫する属性(キャッシュしない属性など)で張ってあること。",
-      "notes": "* `cacheInvalidate` の戻り値は見ない。\n* VxWorks の実機で未検証。",
-      "flow": [
-        {"if": "BFM_VX_CACHE_OPS を定義してビルドした?", "then": [
-          {"do": "cacheInvalidate(DATA_CACHE, p, len)"}
-        ], "else": [
-          {"do": "何もしない"}
-        ]}
-      ]
-    },
-    {
       "func": "bfm_port_init",
-      "summary": "移植層を立ち上げる。`BFM_VX_PCI_LIB` を定義せずにビルドしたときは、ECAM の位置 `g_bfm_pcie_ecam_base` が設定されているかだけを確かめる。DMA 領域・公開メモリは BSP が論理 = 物理で張ってある前提で、ここでは何もしない。",
+      "summary": "移植層を立ち上げる。ECAM の位置 `g_bfm_pcie_ecam_base` が設定されているかだけを確かめる。DMA 領域・公開メモリは BSP が論理 = 物理で張ってある前提で、ここでは何もしない。",
       "args": {},
-      "ret": "0: 成功。-1: `BFM_VX_PCI_LIB` なしでビルドし、`g_bfm_pcie_ecam_base` が 0(理由を表示する)。",
-      "pre": "`g_bfm_dma_*` と `g_bfm_mr_*` の物理メモリが OS に使われず、論理 = 物理で張られていること(BSP の役目)。`BFM_VX_PCI_LIB` なしなら `g_bfm_pcie_ecam_base` を設定してあること。",
+      "ret": "0: 成功。-1: `g_bfm_pcie_ecam_base` が 0(理由を表示する)。",
+      "pre": "`g_bfm_dma_*` と `g_bfm_mr_*` の物理メモリが OS に使われず、論理 = 物理・ライトバックで張られていること(BSP の役目)。`g_bfm_pcie_ecam_base` を設定してあること。",
       "notes": "* `g_bfm_cpu_awake` はこの版では何もしない(深い C-state は BIOS / BSP で止める)。\n* VxWorks の実機で未検証。",
       "flow": [
-        {"if": "BFM_VX_PCI_LIB を定義せずにビルドした?", "then": [
-          {"if": "g_bfm_pcie_ecam_base == 0 ?", "then": [
-            {"call": "bfm_port_log() で理由を表示"},
-            {"return": "-1"}
-          ]}
+        {"if": "g_bfm_pcie_ecam_base == 0 ?", "then": [
+          {"call": "bfm_port_log() で理由を表示"},
+          {"return": "-1"}
         ]},
         {"return": "0"}
       ]
@@ -117,7 +80,7 @@
       "args": {"off": "設定空間の中の位置"},
       "ret": "ECAM の 32bit の位置(論理 = 物理のポインタ)。",
       "pre": "`g_bfm_pcie_ecam_base`・`g_bfm_pci_bus` / `g_bfm_pci_dev` / `g_bfm_pci_func` を設定してあること。ECAM が論理 = 物理で張られていること。",
-      "notes": "* `BFM_VX_PCI_LIB` を定義せずにビルドしたときだけ作られる。\n* `off` は `0xffc` で切るので、4KiB を超える位置や 4 の倍数でない位置は丸められる。\n* VxWorks の実機で未検証。",
+      "notes": "* `off` は `0xffc` で切るので、4KiB を超える位置や 4 の倍数でない位置は丸められる。\n* VxWorks の実機で未検証。",
       "flow": [
         {"do": "a = g_bfm_pcie_ecam_base + (g_bfm_pci_bus << 20) + (g_bfm_pci_dev << 15) + (g_bfm_pci_func << 12) + (off AND 0xffc)"},
         {"return": "a を volatile uint32_t のポインタにしたもの"}
@@ -125,45 +88,27 @@
     },
     {
       "func": "bfm_port_pci_read32",
-      "summary": "PCIe の設定空間の `off` から 32bit を読む。`BFM_VX_PCI_LIB` を定義してビルドしたときは `pciConfigInLong` で読み、定義していなければ ECAM を直接読む(設定空間はリトルエンディアンなので、ビッグエンディアンの CPU では入れ替える)。",
+      "summary": "PCIe の設定空間の `off` から 32bit を ECAM で直接読む。設定空間はリトルエンディアンなので、x86 ではそのまま返す。",
       "args": {"off": "設定空間の中の位置(4 の倍数)"},
       "ret": "読んだ値。",
       "pre": "`bfm_port_init()` が成功していること。",
-      "notes": "* `pciConfigInLong` の戻り値は見ない(読めなければ初期値の `0xffffffff` のまま返るかは pciConfigLib の動きによる)。\n* VxWorks の実機で未検証。",
+      "notes": "VxWorks の実機で未検証。",
       "flow": [
-        {"if": "BFM_VX_PCI_LIB を定義してビルドした?", "then": [
-          {"do": "v = 0xffffffff"},
-          {"do": "pciConfigInLong(g_bfm_pci_bus, g_bfm_pci_dev, g_bfm_pci_func, off, &v)"},
-          {"return": "v"}
-        ], "else": [
-          {"call": "v = *ecam(off) を呼ぶ"},
-          {"if": "BFM_HOST_BIG_ENDIAN ?", "then": [
-            {"call": "bfm_bswap32(v) を呼ぶ"},
-            {"return": "bfm_bswap32(v)"}
-          ], "else": [
-            {"return": "v"}
-          ]}
-        ]}
+        {"call": "ecam(off) を呼ぶ"},
+        {"return": "*ecam(off) を読んだ値"}
       ]
     },
     {
       "func": "bfm_port_pci_write32",
-      "summary": "PCIe の設定空間の `off` へ 32bit を書く。`BFM_VX_PCI_LIB` を定義してビルドしたときは `pciConfigOutLong` で書き、定義していなければ ECAM へ直接書いて(ビッグエンディアンの CPU では入れ替えて)`bfm_mb()` で順序を保つ。",
+      "summary": "PCIe の設定空間の `off` へ 32bit を ECAM で直接書き(設定空間はリトルエンディアンなので、x86 ではそのまま書く)、`bfm_mb()` で順序を保つ。",
       "args": {"off": "設定空間の中の位置(4 の倍数)", "val": "書く値"},
       "ret": "なし",
       "pre": "`bfm_port_init()` が成功していること。",
-      "notes": "* `pciConfigOutLong` の戻り値は見ない。\n* VxWorks の実機で未検証。",
+      "notes": "VxWorks の実機で未検証。",
       "flow": [
-        {"if": "BFM_VX_PCI_LIB を定義してビルドした?", "then": [
-          {"do": "pciConfigOutLong(g_bfm_pci_bus, g_bfm_pci_dev, g_bfm_pci_func, off, val)"}
-        ], "else": [
-          {"if": "BFM_HOST_BIG_ENDIAN ?", "then": [
-            {"call": "*ecam(off) = bfm_bswap32(val) を呼ぶ"}
-          ], "else": [
-            {"call": "*ecam(off) = val を呼ぶ"}
-          ]},
-          {"call": "bfm_mb() を呼ぶ"}
-        ]}
+        {"call": "ecam(off) を呼ぶ"},
+        {"do": "*ecam(off) = val"},
+        {"do": "bfm_mb()(`mfence`)"}
       ]
     },
     {

@@ -1,18 +1,18 @@
 {
   "file": "src/bfm_cm.c",
-  "summary": "接続の確立と切断。IP のスタックを持たないので、RC QP を繋ぐための情報(QP 番号・開始 PSN・公開メモリの先頭と rkey と大きさ・MAC)の交換を、RoCE の GSI(QP1)の上で IB CM の REQ / REP / RTU を使って行う。Linux の rdma_cm(librdmacm)と同じ形なので、Linux の相手(`tools/bfm_peer.c`)とも繋がる。\n\n* 掛け側 `bfm_connect()`: REQ を送り、REP を受け、RTU を送る。\n* 受け側 `bfm_accept()`: REQ を受け、REP を送り、RTU を待つ。\n* 切断 `bfm_disconnect()`: DREQ を送り、DREP を待つ。相手からの DREQ には `bfm_cm_poll()` が DREP を返す。\n\n公開メモリの情報は private data で渡す(REQ は rdma_cm の cma_hdr 36 バイトの後ろ、REP は先頭から)。中身は `'BFM1'`・版・旗(bit0 = MAC あり)・公開メモリの先頭・rkey・大きさ・MAC で、すべてビッグエンディアン。GSI の受信は 1 本の CQ に全部来るので、拾った CM の MAD はいったん待ち行列(`s_pend`、16 枠)に入れ、各処理が自分の欲しいものを取り出す(5 秒より古いものは `bfm_cm_poll()` が捨てる)。接続の枠 `g_bfm_conn[BFM_MAX_CONN]` もこのファイルが持つ。",
+  "summary": "接続の確立と切断(bfmem どうし)。RC QP を繋ぐには、相手の QP 番号と開始 PSN、公開メモリのアドレスと rkey を交換する必要がある。IP のスタックを持たないので、交換は RoCE v2 の UD で、相手の QP1(GSI。番号が決まっている唯一の QP)へ送る。相手は常に bfmem なので、IB CM ではなく bfmem だけの次の 3 種類の短いメッセージ(`MSG_SIZE` = 64 バイト)を使う。\n\n* 掛け側 `bfm_connect()`: REQ を送り(REP が来るまで送り直す)、REP を受ける。\n* 受け側 `bfm_accept()`: REQ を受け、QP を RTS にしてから REP を送る。\n* 切断 `bfm_disconnect()`: BYE を送る(返事は待たない。相手は `bfm_poll()` で受けて閉じた扱いにする)。\n\n受け側は REP を送る前に RTS にするので、掛け側は REP を受けて RTS にすればすぐ使える(RTU は要らない)。REP が落ちたときは掛け側が REQ を送り直し、受け側は確立済みの接続への REQ に REP を送り直す。\n\nメッセージの中身(数はビッグエンディアン): [0..3] `'BFM2'`、[4] 種類、[5] 経路 MTU、[6..7] 待ち受けの番号、[8..11] 送り手の接続の id、[12..15] 受け手の接続の id(REQ では 0)、[16..19] QPN、[20..23] 開始 PSN、[24] 受け付ける read / atomic の数、[26..31] 送り手の MAC、[32..35] 送り手の IPv4、[36..39] 公開メモリの rkey、[40..47] 公開メモリの先頭、[48..55] 公開メモリの大きさ。\n\n受け取ったメッセージは `gsi_pump()` が `handle_msg()` でその場で処理する(REP はその接続の枠へ写し、BYE は接続を閉じた扱いにし、REQ は `bfm_accept()` のために 1 つだけ `s_req` に取っておく)。接続の枠 `g_bfm_conn[BFM_MAX_CONN]` もこのファイルが持つ。",
   "functions": [
     {
       "func": "cm_rand32",
-      "summary": "32 ビットの擬似乱数を返す。静的変数 `x` に `bfm_port_time_ns()` と定数を足した値を XOR で混ぜ、xorshift(13・7・17)をかけて、上位寄りの 32 ビット(`x >> 16`)を返す。",
+      "summary": "32 ビットの擬似乱数を返す。静的変数 `x` に `bfm_port_time_ns()` と定数を足した値を XOR で混ぜ、xorshift(13・7・17)をかけて、`x >> 16` の下位 32 ビットの最下位ビットを立てて返す。",
       "args": {},
-      "ret": "32 ビットの擬似乱数。",
+      "ret": "32 ビットの擬似乱数(0 にはならない。最下位ビットは常に 1)。",
       "pre": "特になし。",
-      "notes": "暗号用ではない。呼ぶたびに今の時刻を混ぜるので、立ち上げ直しても同じ列にならない。comm id・トランザクション ID・GUID の乱数部分・cma_hdr の送り元ポートに使う。",
+      "notes": "* 暗号用ではない。呼ぶたびに今の時刻を混ぜる。\n* 接続の id(`local_id`)に使う。0 は「まだ無い」の意味に使うので避けている。",
       "flow": [
         {"call": "x ^= bfm_port_time_ns() + 0x9e3779b97f4a7c15 を計算する"},
         {"do": "x ^= x << 13、x ^= x >> 7、x ^= x << 17"},
-        {"return": "(uint32_t)(x >> 16)"}
+        {"return": "(uint32_t)(x >> 16) OR 1"}
       ]
     },
     {
@@ -28,70 +28,69 @@
       ]
     },
     {
+      "func": "own_rr",
+      "summary": "自分が受け付ける同時の read / atomic の数を返す。HCA の `log_max_ra_res_qp` を 4 で頭打ちにして、2 のその乗を返す。",
+      "args": {},
+      "ret": "同時の read / atomic の数(1〜16)。",
+      "pre": "`g_bfm.log_max_ra_res_qp` が HCA の能力から読んであること。",
+      "notes": "REQ・REP の [24] に入れる(`build_msg()`)。",
+      "flow": [
+        {"if": "g_bfm.log_max_ra_res_qp > 4 ?", "then": [{"do": "l = 4"}], "else": [{"do": "l = g_bfm.log_max_ra_res_qp"}]},
+        {"return": "1 << l"}
+      ]
+    },
+    {
+      "func": "build_msg",
+      "summary": "接続 `c` の自分の情報を詰めたメッセージを `m` に作る。`MSG_SIZE` バイトを 0 で埋め、`'BFM2'`・種類 `type`・経路 MTU(`c->path_mtu`)・待ち受けの番号(`c->port`)・自分の接続の id(`c->local_id`)・相手の接続の id(`c->peer_id`)を書く。BYE ならここまで。REQ / REP なら続けて QPN・開始 PSN・`own_rr()`・自分の MAC・自分の IPv4・公開メモリの rkey・先頭(`g_bfm_mr_base`)・大きさ(`g_bfm_mr_size`)を書く。",
+      "args": {"m": "書く先(`MSG_SIZE` バイト)", "type": "種類(`MSG_REQ` / `MSG_REP` / `MSG_BYE`)", "c": "接続"},
+      "ret": "なし",
+      "pre": "`c->path_mtu`・`c->port`・`c->local_id`・`c->peer_id` が決まっていること。REQ / REP では `c->qp` が作ってあり、`g_bfm.mac`・`g_bfm.ip`・`g_bfm.rkey` が決まっていること。",
+      "notes": "数はすべてビッグエンディアンで書く。",
+      "flow": [
+        {"do": "m を MSG_SIZE バイト 0 で埋める"},
+        {"do": "m[0..3] = MSG_MAGIC、m[4] = type、m[5] = c->path_mtu、m[6..7] = c->port、m[8..11] = c->local_id、m[12..15] = c->peer_id"},
+        {"if": "type == MSG_BYE ?", "then": [{"return": ""}]},
+        {"do": "m[16..19] = c->qp.qpn、m[20..23] = c->qp.local_psn"},
+        {"call": "m[24] = own_rr() を呼ぶ"},
+        {"do": "m[26..31] = g_bfm.mac、m[32..35] = g_bfm.ip、m[36..39] = g_bfm.rkey、m[40..47] = g_bfm_mr_base、m[48..55] = g_bfm_mr_size"}
+      ]
+    },
+    {
+      "func": "take_peer",
+      "summary": "REQ / REP のメッセージ `m` から相手の情報を接続の枠 `c` へ写す。相手の接続の id・QPN(下位 24 ビット)・開始 PSN(下位 24 ビット)・同時の read / atomic の数・MAC・IPv4 を読み、IPv4 から GID を作り、公開メモリの rkey・先頭・大きさを読む。",
+      "args": {"c": "情報を入れる接続", "m": "受け取った REQ / REP(`MSG_SIZE` バイト)"},
+      "ret": "なし",
+      "pre": "`m` は `MSG_SIZE` バイトの REQ / REP であること。",
+      "notes": "[24](同時の read / atomic の数)が 0 なら 1 にする。",
+      "flow": [
+        {"do": "c->peer_id = m[8..11]、c->peer_qpn = m[16..19] の下位 24 ビット、c->peer_psn = m[20..23] の下位 24 ビット"},
+        {"if": "m[24] != 0 ?", "then": [{"do": "c->peer_rr = m[24]"}], "else": [{"do": "c->peer_rr = 1"}]},
+        {"do": "c->peer_mac = m[26..31]、c->peer_ip = m[32..35]"},
+        {"call": "mlx5_gid_from_ipv4(c->peer_ip, c->peer_gid) を呼ぶ"},
+        {"do": "c->rkey = m[36..39]、c->raddr = m[40..47]、c->rlen = m[48..55]"}
+      ]
+    },
+    {
       "func": "gsi_post_recv",
       "summary": "GSI の受信キューに受信の WQE を 1 つ出す。`rq_pc` の位置の WQE(16 バイト)に、受信枠の大きさ `BFM_GSI_RX_SLOT`・`g_bfm.lkey`・受信枠 `s_rx_ring + idx * BFM_GSI_RX_SLOT` の DMA アドレスを書き、`rq_pc` を進めてドアベルレコード(`dbr[0]`)を書き換える。",
       "args": {},
       "ret": "なし",
       "pre": "`bfm_cm_init()` で GSI の WQ・ドアベルレコード・受信枠を切り出してあること。",
-      "notes": "受信枠の位置は WQE の位置と同じ添字で決まる(`gsi_pump()` は CQE の `wqe_cnt` から枠を引く)。WQE とドアベルレコードはキャッシュを書き戻してから NIC に見せる。",
+      "notes": "受信枠の位置は WQE の位置と同じ添字で決まる(`gsi_pump()` は CQE の `wqe_cnt` から枠を引く)。",
       "flow": [
         {"do": "idx = rq_pc を受信キューの大きさで割った余り"},
-        {"do": "WQE に大きさ BFM_GSI_RX_SLOT・lkey・受信枠の DMA アドレスを書き、キャッシュを書き戻す"},
+        {"do": "WQE に大きさ BFM_GSI_RX_SLOT・lkey・受信枠の DMA アドレスを書く"},
         {"do": "s_gsi.rq_pc++、bfm_dma_wmb()"},
-        {"do": "dbr[0] = rq_pc の下位 16 ビット(ビッグエンディアン)、キャッシュを書き戻す"}
-      ]
-    },
-    {
-      "func": "gsi_pump",
-      "summary": "GSI の CQ を読み切る。送信の完了(`MLX5_CQE_REQ`)は送信中の数 `s_tx_outstanding` を減らすだけ。受信の完了(`MLX5_CQE_RESP_SEND`)は、CM クラス(0x07)の MAD なら待ち行列 `s_pend` の空き枠(空きが無ければいちばん古い枠)へ写し、受信を出し直す。それ以外の完了はエラーとして表示して -1 を返す。",
-      "args": {},
-      "ret": "受け取って待ち行列に入れた CM の MAD の数。GSI のエラー完了を見たら -1。",
-      "pre": "`bfm_cm_init()` で GSI を用意してあること。",
-      "notes": "* 待ち行列が満杯のときは、いちばん古い MAD を上書きする(相手が再送する前提)。\n* CM クラス以外の MAD や短すぎる受信は捨てて、受信だけを出し直す。\n* エラー完了を見たらその場で -1 を返し、残りの CQE は次の呼び出しで読む。送信のエラー(`MLX5_CQE_REQ_ERR`)は送信中の数を減らし、受信のエラー(`MLX5_CQE_RESP_ERR`)は受信を出し直す。",
-      "flow": [
-        {"do": "n = CQ の大きさ、got = 0"},
-        {"loop": "CQ を読み切る", "body": [
-          {"do": "cq_cc の位置の CQE のキャッシュを無効にし、op_own = cqe[63] を読む"},
-          {"if": "所有ビットが今の周回と合わない、または opcode が MLX5_CQE_INVALID ?", "then": [{"break": true}]},
-          {"do": "bfm_rmb() の後、opcode・byte_cnt・wqe_cnt・syndrome を読む"},
-          {"do": "s_gsi.cq_cc++、cq_dbr[0] を書き換える"},
-          {"if": "opcode == MLX5_CQE_REQ ?", "then": [
-            {"if": "s_tx_outstanding != 0 ?", "then": [{"do": "s_tx_outstanding--"}]}
-          ], "else": [
-            {"if": "opcode == MLX5_CQE_RESP_SEND ?", "then": [
-              {"do": "wqe_cnt から受信枠を求め、キャッシュを無効にする。MAD は GRH(40 バイト)の後ろ"},
-              {"if": "byte_cnt >= GRH + MAD の頭 かつ mad[1] == CM_CLASS ?", "then": [
-                {"do": "slot = 0、oldest = 最大値"},
-                {"while": "i < PEND_SLOTS ?(i は 0 から)", "body": [
-                  {"if": "!s_pend[i].used ?", "then": [
-                    {"do": "slot = i"},
-                    {"break": true}
-                  ]},
-                  {"if": "s_pend[i].t < oldest ?", "then": [{"do": "oldest = s_pend[i].t、slot = i"}]}
-                ]},
-                {"do": "s_pend[slot] に used = 1・attr(MAD の 16〜17 バイト)・受けた時刻を入れる"},
-                {"while": "i < MAD_SIZE ?(i は 0 から)", "body": [{"do": "s_pend[slot].mad[i] = mad[i]"}]},
-                {"do": "got++"}
-              ]},
-              {"call": "gsi_post_recv() を呼ぶ"}
-            ], "else": [
-              {"do": "BFM_LOG でエラー完了(opcode・syndrome)を表示"},
-              {"if": "opcode == MLX5_CQE_REQ_ERR かつ s_tx_outstanding != 0 ?", "then": [{"do": "s_tx_outstanding--"}]},
-              {"if": "opcode == MLX5_CQE_RESP_ERR ?", "then": [{"call": "gsi_post_recv() を呼ぶ"}]},
-              {"return": "-1"}
-            ]}
-          ]}
-        ]},
-        {"return": "got"}
+        {"do": "dbr[0] = rq_pc の下位 16 ビット(ビッグエンディアン)"}
       ]
     },
     {
       "func": "gsi_send",
-      "summary": "MAD(256 バイト)を相手の GSI(QPN 1)へ UD の SEND で送る。送信中の数が `BFM_GSI_TXBUFS` に達していれば `gsi_pump()` で空くのを待つ。MAD を送信の置き場 `s_tx_buf`(順に使い回す)へ写し、ctrl・datagram(Q_Key・宛先 QPN 1・UDP の送り元ポート・相手の MAC・hop limit 64・GRH・相手の GID)・data の 2 WQEBB の WQE を作り、ドアベルレコードを書き換えて、WQE の先頭 8 バイトを GSI の UAR のドアベルへ書く。",
-      "args": {"mad": "送る MAD(256 バイト)", "peer_gid": "相手の GID(16 バイト)", "peer_mac": "相手の MAC(6 バイト)"},
+      "summary": "メッセージ(`MSG_SIZE` バイト)を接続 `c` の相手の QP1 へ UD の SEND で送る。送信中の数が `BFM_GSI_TXBUFS` に達していれば `gsi_pump()` で空くのを待つ。メッセージを送信の置き場 `s_tx_buf`(順に使い回す)へ写し、ctrl(16)・datagram(48。Q_Key・宛先 QPN 1・UDP の送り元ポート・相手の MAC・hop limit 64・GRH・相手の GID)・data(16)の 2 WQEBB の WQE を作り、ドアベルレコードを書き換えて、WQE の先頭 8 バイトを GSI の UAR のドアベルへ書く。",
+      "args": {"msg": "送るメッセージ(`MSG_SIZE` バイト)", "c": "宛先の接続(`peer_mac`・`peer_gid` を使う)"},
       "ret": "`BFM_OK`: 送信を出した(完了は待たない)。`BFM_E_CQE`: 送信の置き場が空くのを待つ間に GSI のエラー完了を見た。`BFM_E_TIMEOUT`: 送信の置き場が 1 秒空かなかった。",
-      "pre": "`bfm_cm_init()` で GSI を用意してあること。",
-      "notes": "* 完了を待たずに戻る。完了は後の `gsi_pump()` が数える。\n* 送信の置き場は `BFM_GSI_TXBUFS` 個を順に使い回すので、送信中の数がその数より少ない間だけ次を出す。\n* 待つ間の `gsi_pump()` で受けた MAD は待ち行列に入る(捨てない)。",
+      "pre": "`bfm_cm_init()` で GSI を用意してあること。`c->peer_mac`・`c->peer_gid` が決まっていること。",
+      "notes": "* 完了を待たずに戻る。完了は後の `gsi_pump()` が数える。\n* 送信の置き場は `BFM_GSI_TXBUFS` 個を順に使い回すので、送信中の数がその数より少ない間だけ次を出す。\n* 待つ間の `gsi_pump()` で受けたメッセージは `handle_msg()` で処理される(`handle_msg()` から `gsi_send()` が呼ばれることもある)。",
       "flow": [
         {"call": "t0 = bfm_port_time_ns() を呼ぶ"},
         {"while": "s_tx_outstanding >= BFM_GSI_TXBUFS ?", "body": [
@@ -106,269 +105,171 @@
           ]}
         ]},
         {"do": "buf = s_tx_buf の (s_tx_next++ を BFM_GSI_TXBUFS で割った余り) 番目"},
-        {"while": "i < MAD_SIZE ?(i は 0 から)", "body": [{"do": "buf[i] = mad[i]"}]},
-        {"do": "buf のキャッシュを書き戻す"},
+        {"while": "i < MSG_SIZE ?(i は 0 から)", "body": [{"do": "buf[i] = msg[i]"}]},
         {"do": "w0・w1 = sq_pc の位置から 2 つの WQEBB"},
         {"while": "i < MLX5_SEND_WQE_BB ?(i は 0 から)", "body": [{"do": "w0[i] = 0、w1[i] = 0"}]},
         {"do": "ctrl(opcode SEND・qpn・ds 5・CQ_UPDATE)と datagram(Q_Key・extended AV・宛先 QPN 1・UDP の送り元ポート)を書く"},
-        {"while": "i < 6 ?(i は 0 から)", "body": [{"do": "w0[36 + i] = peer_mac[i]"}]},
+        {"while": "i < 6 ?(i は 0 から)", "body": [{"do": "w0[36 + i] = c->peer_mac[i]"}]},
         {"do": "hop limit 64、GRH あり(送り元の GID は 0 番)を書く"},
-        {"while": "i < 16 ?(i は 0 から)", "body": [{"do": "w0[48 + i] = peer_gid[i]"}]},
-        {"do": "data(大きさ MAD_SIZE・lkey・buf の DMA アドレス)を w1 に書き、w0・w1 のキャッシュを書き戻す"},
-        {"do": "sq_pc += 2、s_tx_outstanding++、bfm_dma_wmb()"},
-        {"do": "dbr[1] = sq_pc の下位 16 ビット、キャッシュを書き戻し、bfm_dma_wmb()"},
+        {"while": "i < 16 ?(i は 0 から)", "body": [{"do": "w0[48 + i] = c->peer_gid[i]"}]},
+        {"do": "data(大きさ MSG_SIZE・lkey・buf の DMA アドレス)を w1 に書く"},
+        {"do": "sq_pc = pc + 2、s_tx_outstanding++、bfm_dma_wmb()"},
+        {"do": "dbr[1] = sq_pc の下位 16 ビット、bfm_dma_wmb()"},
         {"do": "w0 の先頭 8 バイトを GSI のドアベル(s_gsi_db)へ書き、bfm_wc_flush()"},
         {"return": "BFM_OK"}
       ]
     },
     {
-      "func": "pend_take",
-      "summary": "待ち行列 `s_pend` から、属性が `attr` で、`match` が NULL でなければ `match(mad, arg)` が真になる MAD を 1 つ探し、`out` へ写してその枠を空ける。",
-      "args": {"attr": "欲しい MAD の属性(`CM_ATTR_REQ` など)", "match": "追加の条件の関数(`match_remote_comm()` / `match_req_port()`)。NULL なら属性だけで選ぶ", "arg": "`match` に渡す値", "out": "見つけた MAD を写す先(256 バイト)"},
-      "ret": "1: 見つけて取り出した。0: 無かった。",
-      "pre": "特になし。",
-      "notes": "枠の番号の若い順に探し、最初に合ったものを取る(受けた順とは限らない)。",
-      "indirect": ["match_remote_comm", "match_req_port"],
-      "flow": [
-        {"while": "i < PEND_SLOTS ?(i は 0 から)", "body": [
-          {"if": "!s_pend[i].used または s_pend[i].attr != attr ?", "then": [{"continue": true}]},
-          {"if": "match != NULL かつ !match(s_pend[i].mad, arg) ?", "then": [{"continue": true}]},
-          {"do": "out へ s_pend[i].mad を写す"},
-          {"do": "s_pend[i].used = 0"},
-          {"return": "1"}
-        ]},
-        {"return": "0"}
-      ]
-    },
-    {
-      "func": "pend_age",
-      "summary": "待ち行列 `s_pend` のうち、受けてから `PEND_AGE_MS`(5 秒)より古い MAD を捨てる。",
-      "args": {},
+      "func": "handle_msg",
+      "summary": "受け取ったメッセージ 1 つを処理する。REQ なら、確立済み(`BFM_CS_UP`)の接続で相手の接続の id と IPv4 が同じものがあれば(REP が落ちたための送り直し)REP を送り直す。無ければ `bfm_accept()` のために `s_req` へ写して受けた時刻を記録する(前のものは上書き)。REQ 以外は、受け手の接続の id が `local_id` と同じ最初の枠について、REP で枠が `BFM_CS_SETUP` かつまだ REP を受けていなければ相手の情報を写して `got_rep = 1` にし、BYE で相手の接続の id が同じかつ枠が `BFM_CS_UP` か `BFM_CS_ERROR` なら `BFM_CS_CLOSED` にする。",
+      "args": {"m": "受け取ったメッセージ(`MSG_SIZE` バイト。magic は確認済み)"},
       "ret": "なし",
-      "pre": "特になし。",
-      "notes": "誰も取り出さない MAD で待ち行列が埋まらないようにする。捨てた MAD は相手が再送する前提。",
+      "pre": "`m` の magic が `MSG_MAGIC` であること(`gsi_pump()` が確かめてから呼ぶ)。",
+      "notes": "* `s_req` は 1 つだけで、新しい REQ で上書きする(掛け側が送り直すので失ってもよい)。\n* REP の送り直しの `gsi_send()` の失敗は無視する。\n* REQ 以外は `local_id` が合った最初の枠で処理を終える(条件に合わなければ何もしない)。どの枠にも合わなければ捨てる。\n* 相手が切った接続は `BFM_CS_CLOSED` にするだけで枠は返さない。アプリケーションが `bfm_disconnect()` で返すこと(表示もそう促す)。",
       "flow": [
-        {"call": "now = bfm_port_time_ns() を呼ぶ"},
-        {"while": "i < PEND_SLOTS ?(i は 0 から)", "body": [
-          {"if": "s_pend[i].used かつ now - s_pend[i].t > 5 秒 ?", "then": [{"do": "s_pend[i].used = 0"}]}
+        {"do": "type = m[4]、src = m[8..11]、dst = m[12..15]"},
+        {"if": "type == MSG_REQ ?", "then": [
+          {"while": "i < BFM_MAX_CONN ?(i は 0 から)", "body": [
+            {"do": "c = &g_bfm_conn[i]"},
+            {"if": "c->state == BFM_CS_UP かつ c->peer_id == src かつ c->peer_ip == m[32..35] ?", "then": [
+              {"call": "build_msg(rep, MSG_REP, c) を呼ぶ"},
+              {"call": "gsi_send(rep, c) を呼ぶ"},
+              {"return": ""}
+            ]}
+          ]},
+          {"do": "s_req.msg に m を写す"},
+          {"call": "s_req.t = bfm_port_time_ns() を呼ぶ"},
+          {"do": "s_req.used = 1"},
+          {"return": ""}
+        ]},
+        {"while": "i < BFM_MAX_CONN ?(i は 0 から)", "body": [
+          {"do": "c = &g_bfm_conn[i]"},
+          {"if": "c->local_id != dst ?", "then": [{"continue": true}]},
+          {"if": "type == MSG_REP かつ c->state == BFM_CS_SETUP かつ !c->got_rep ?", "then": [
+            {"call": "take_peer(c, m) を呼ぶ"},
+            {"do": "c->got_rep = 1"}
+          ], "else": [
+            {"if": "type == MSG_BYE かつ c->peer_id == src かつ (c->state == BFM_CS_UP または c->state == BFM_CS_ERROR) ?", "then": [
+              {"do": "c->state = BFM_CS_CLOSED"},
+              {"do": "BFM_LOG で「相手が接続を切った」を表示"}
+            ]}
+          ]},
+          {"return": ""}
         ]}
       ]
     },
     {
-      "func": "match_remote_comm",
-      "summary": "相手の MAD の REMOTE_COMM_ID(payload の 4〜7 バイト)が、`arg` の指す自分の comm id と同じかを返す。`pend_take()` の条件に使う。",
-      "args": {"mad": "調べる MAD", "arg": "自分の comm id(`uint32_t` へのポインタ)"},
-      "ret": "1: 同じ。0: 違う。",
-      "pre": "`arg` は `uint32_t` を指すこと。",
-      "notes": "REP・REJ・RTU・DREQ・DREP の宛先の接続を見分けるのに使う。",
-      "entry_note": "`pend_take()` から関数ポインタ `match` 経由で呼ばれる",
-      "flow": [
-        {"return": "MAD の payload の 4〜7 バイト == *arg"}
-      ]
-    },
-    {
-      "func": "match_req_port",
-      "summary": "REQ の SERVICE_ID(payload の 8〜15 バイト)が、`CM_PORT_SPACE`(0x0106)を 16 ビット左へずらして `arg` の指すポート番号と OR した値と同じかを返す。`pend_take()` の条件に使う。",
-      "args": {"mad": "調べる MAD(REQ)", "arg": "待ち受けるポート番号(`uint16_t` へのポインタ)"},
-      "ret": "1: 同じ。0: 違う。",
-      "pre": "`arg` は `uint16_t` を指すこと。",
-      "notes": "SERVICE_ID の形は Linux の rdma_cm の port space(RDMA_PS_TCP)と同じ。",
-      "entry_note": "`pend_take()` から関数ポインタ `match` 経由で呼ばれる",
-      "flow": [
-        {"return": "SERVICE_ID == (CM_PORT_SPACE << 16) OR port"}
-      ]
-    },
-    {
-      "func": "mad_header",
-      "summary": "MAD(256 バイト)を 0 で埋め、CM の MAD の頭(base_version 1・クラス 0x07・クラスの版 2・メソッド SEND・トランザクション ID・属性)を書く。",
-      "args": {"mad": "書く先(256 バイト)", "tid": "トランザクション ID", "attr": "属性(`CM_ATTR_REQ` など)"},
-      "ret": "なし",
-      "pre": "特になし。",
-      "notes": "特になし。",
-      "flow": [
-        {"do": "mad を 0 で埋める"},
-        {"do": "mad[0..3] = base_version 1、CM_CLASS、CM_CLASS_VERSION、CM_METHOD_SEND"},
-        {"do": "mad[8..15] = tid、mad[16..17] = attr"}
-      ]
-    },
-    {
-      "func": "local_guid",
-      "summary": "自分の CA GUID を作って返す。自分の MAC から EUI-64 を作り(先頭のバイトの bit1 を反転)、EUI-64 で 0xfffe が入る真ん中の 16 ビットに `bfm_cm_init()` で決めた乱数 `s_guid_salt` を入れる。",
+      "func": "gsi_pump",
+      "summary": "GSI の CQ を読み切る。送信の完了(`MLX5_CQE_REQ`)は送信中の数 `s_tx_outstanding` を減らすだけ。受信の完了(`MLX5_CQE_RESP_SEND`)は、受信枠の GRH(`MLX5_GRH_BYTES`)の後ろからメッセージを写して受信を出し直し、長さが足りて magic が `MSG_MAGIC` なら `handle_msg()` で処理して数える。それ以外の完了はエラーとして表示して -1 を返す。",
       "args": {},
-      "ret": "64 ビットの CA GUID。",
-      "pre": "`g_bfm.mac` と `s_guid_salt` が決まっていること(`bfm_cm_init()` の後)。",
-      "notes": "Linux の ib_cm は (CA GUID, QPN) で相手を見分ける。立ち上げ直した後の FW は QPN を同じ順に配り直すので、GUID まで同じだと前の実行の接続の残りと重なり REJ reason 10(stale connection)で断られる。それを避けるために真ん中を乱数にしている。",
+      "ret": "受け取って `handle_msg()` で処理したメッセージの数。GSI のエラー完了を見たら -1。",
+      "pre": "`bfm_cm_init()` で GSI を用意してあること。",
+      "notes": "* 受信枠からメッセージを写してから受信を出し直し、その後で `handle_msg()` を呼ぶ。\n* 短すぎる受信や magic の違うものは捨てる(受信は出し直す)。\n* エラー完了を見たらその場で -1 を返し、残りの CQE は次の呼び出しで読む。送信のエラー(`MLX5_CQE_REQ_ERR`)は送信中の数を減らし、受信のエラー(`MLX5_CQE_RESP_ERR`)は受信を出し直す。\n* `handle_msg()` が `gsi_send()` を呼び、`gsi_send()` が送信の置き場を待つ間に `gsi_pump()` を呼ぶことがある(入れ子になる)。",
       "flow": [
-        {"return": "MAC[0] XOR 0x02、MAC[1]、MAC[2]、s_guid_salt(16 ビット)、MAC[3]、MAC[4]、MAC[5] を上から並べた値"}
-      ]
-    },
-    {
-      "func": "put_priv",
-      "summary": "自分の公開メモリの情報を private data の形で書く。`'BFM1'`・版 1・旗 1(MAC あり)・公開メモリの先頭 `g_bfm_mr_base`・rkey `g_bfm.rkey`・大きさ `g_bfm_mr_size`・自分の MAC を、ビッグエンディアンで書く。",
-      "args": {"p": "書く先(36 バイト)"},
-      "ret": "なし",
-      "pre": "`g_bfm.rkey` と `g_bfm.mac` が決まっていること。",
-      "notes": "特になし。",
-      "flow": [
-        {"do": "p[0..3] = PRIV_MAGIC、p[4..5] = 1(版)、p[6..7] = 1(旗)"},
-        {"do": "p[8..15] = g_bfm_mr_base、p[16..19] = g_bfm.rkey、p[20..27] = g_bfm_mr_size"},
-        {"do": "p[28..33] = g_bfm.mac"}
-      ]
-    },
-    {
-      "func": "get_priv",
-      "summary": "相手の private data を読み、公開メモリの先頭・rkey・大きさを接続 `c` に入れる。`'BFM1'` の形なら、旗の bit0 が立っていれば相手の MAC も `c->peer_mac` に入れる。vfio_nvme の `tools/rdma_short_peer` の形(`'RSHT'`。大きさは 32 ビット)も読む。",
-      "args": {"c": "情報を入れる接続", "p": "相手の private data の先頭", "mac_ok": "相手の MAC を読めたら 1、読めなければ 0 を入れる先"},
-      "ret": "1: 公開メモリの情報があった。0: 知らない形(何も入れない)。",
-      "pre": "特になし。",
-      "notes": "`*mac_ok` は最初に 0 にする。`'RSHT'` の形には MAC が無いので `*mac_ok` は 0 のまま。",
-      "flow": [
-        {"do": "*mac_ok = 0、magic = p[0..3]"},
-        {"if": "magic == PRIV_MAGIC ?", "then": [
-          {"do": "c->raddr = p[8..15]、c->rkey = p[16..19]、c->rlen = p[20..27]"},
-          {"if": "旗(p[6..7])の bit0 が立っている?", "then": [
-            {"do": "c->peer_mac = p[28..33]"},
-            {"do": "*mac_ok = 1"}
-          ]},
-          {"return": "1"}
-        ]},
-        {"if": "magic == PRIV_MAGIC_RSHT ?", "then": [
-          {"do": "c->raddr = p[8..15]、c->rkey = p[16..19]、c->rlen = p[20..23](32 ビット)"},
-          {"return": "1"}
-        ]},
-        {"return": "0"}
-      ]
-    },
-    {
-      "func": "own_rr",
-      "summary": "自分が受け付ける同時の read / atomic の数を返す。HCA の `log_max_ra_res_qp` を 4 で頭打ちにして、2 のその乗を返す。",
-      "args": {},
-      "ret": "同時の read / atomic の数(1〜16)。",
-      "pre": "`g_bfm.log_max_ra_res_qp` が HCA の能力から読んであること。",
-      "notes": "REQ・REP の RESPONDER_RESOURCES(REQ では INITIATOR_DEPTH も)に入れる。",
-      "flow": [
-        {"if": "g_bfm.log_max_ra_res_qp > 4 ?", "then": [{"do": "l = 4"}], "else": [{"do": "l = g_bfm.log_max_ra_res_qp"}]},
-        {"return": "1 << l"}
-      ]
-    },
-    {
-      "func": "build_req",
-      "summary": "接続 `c` の REQ を作る。MAD の頭(属性 `CM_ATTR_REQ`)の後ろに、自分の comm id・SERVICE_ID(`CM_PORT_SPACE` とポート番号)・CA GUID・QPN・RESPONDER_RESOURCES と INITIATOR_DEPTH(`own_rr()`)・CM の応答待ち時間・開始 PSN・再送回数 7・PKEY 0xffff・PATH_MTU・RNR の再送回数 7・CM の再送回数 3・自分と相手の GID・hop limit 64・LOCAL_ACK_TIMEOUT(`g_bfm_ack_timeout`)を書く。private data には rdma_cm の cma_hdr(IPv4、送り元ポートは 0xc000 以上の乱数、送り元と宛先の IP)と、その後ろに自分の公開メモリの情報(`put_priv()`)を入れる。",
-      "args": {"c": "接続(tid・comm id・ポート・QP・相手の GID と IP・path_mtu が決まっていること)", "mad": "書く先(256 バイト)"},
-      "ret": "なし",
-      "pre": "`c->qp` が作ってあり、`c->tid`・`c->local_comm_id`・`c->port`・`c->peer_gid`・`c->peer_ip`・`c->path_mtu` が決まっていること。",
-      "notes": "cma_hdr の送り元ポートは呼ぶたびに乱数で変わる(再送の REQ でも変わる)。",
-      "flow": [
-        {"call": "mad_header(mad, c->tid, CM_ATTR_REQ) を呼ぶ"},
-        {"call": "comm id・SERVICE_ID・local_guid()・QPN・own_rr()・応答待ち時間・PSN・再送回数・PKEY・PATH_MTU・CM の再送回数・GID・hop limit・LOCAL_ACK_TIMEOUT を書く"},
-        {"call": "cma_hdr(ip_version 4、送り元ポート 0xc000 OR (cm_rand32() の下位 14 ビット)、送り元 IP g_bfm.ip、宛先 IP c->peer_ip)を書く"},
-        {"call": "put_priv(cma_hdr の後ろ) を呼ぶ"}
-      ]
-    },
-    {
-      "func": "build_rep",
-      "summary": "接続 `c` の REP を作る。MAD の頭(属性 `CM_ATTR_REP`)の後ろに、自分と相手の comm id・QPN・開始 PSN・RESPONDER_RESOURCES(`own_rr()`)・INITIATOR_DEPTH(`c->max_rd`)・TARGET_ACK_DELAY 14・RNR の再送回数 7・CA GUID を書き、private data(payload の 36 バイトから)に自分の公開メモリの情報(`put_priv()`)を入れる。",
-      "args": {"c": "接続(tid・comm id・QP・max_rd が決まっていること)", "mad": "書く先(256 バイト)"},
-      "ret": "なし",
-      "pre": "`c->qp` が作ってあり、`c->tid`・`c->local_comm_id`・`c->remote_comm_id`・`c->max_rd` が決まっていること(`c->max_rd` は QP を RTS へ進めるときに決まる)。",
-      "notes": "`bfm_accept()` の最初の REP と、`bfm_cm_poll()` の REP の送り直し(REQ の再送が来たとき)の両方で使う。",
-      "flow": [
-        {"call": "mad_header(mad, c->tid, CM_ATTR_REP) を呼ぶ"},
-        {"call": "comm id・QPN・PSN・own_rr()・c->max_rd・TARGET_ACK_DELAY・RNR の再送回数・local_guid() を書く"},
-        {"call": "put_priv(payload + 36) を呼ぶ"}
-      ]
-    },
-    {
-      "func": "build_short",
-      "summary": "comm id の組だけを持つ短い CM の MAD(RTU・DREQ・DREP)を作る。MAD の頭を書き、payload の先頭に自分の comm id と相手の comm id を書く。",
-      "args": {"mad": "書く先(256 バイト)", "tid": "トランザクション ID", "attr": "属性(`CM_ATTR_RTU` / `CM_ATTR_DREQ` / `CM_ATTR_DREP`)", "local": "自分の comm id", "remote": "相手の comm id"},
-      "ret": "なし",
-      "pre": "特になし。",
-      "notes": "DREQ の REMOTE_QPN は呼び出し側(`bfm_disconnect()`)が後から書き足す。",
-      "flow": [
-        {"call": "mad_header(mad, tid, attr) を呼ぶ"},
-        {"do": "payload[0..3] = local、payload[4..7] = remote"}
-      ]
-    },
-    {
-      "func": "conn_alloc",
-      "summary": "接続の枠 `g_bfm_conn` から空き(`BFM_CS_FREE`)を 1 つ探し、`BFM_CS_SETUP` にして返す。",
-      "args": {},
-      "ret": "取った枠。空きが無ければ NULL(理由を表示する)。",
-      "pre": "`bfm_cm_init()` で枠を初期化してあること。",
-      "notes": "枠の資源(QP の WQ・CQ・UAR・中継バッファ)は `bfm_cm_init()` で切り出し済みのものを使い回す。",
-      "flow": [
-        {"while": "i < BFM_MAX_CONN ?(i は 0 から)", "body": [
-          {"if": "g_bfm_conn[i].state == BFM_CS_FREE ?", "then": [
-            {"do": "g_bfm_conn[i].state = BFM_CS_SETUP"},
-            {"return": "&g_bfm_conn[i]"}
+        {"do": "n = CQ の大きさ、got = 0"},
+        {"loop": "CQ を読み切る", "body": [
+          {"do": "cqe = cq_cc の位置の CQE、op_own = cqe[63]"},
+          {"if": "所有ビットが今の周回と合わない、または op_own >> 4 == MLX5_CQE_INVALID ?", "then": [{"break": true}]},
+          {"do": "bfm_rmb() の後、opcode・byte_cnt・wqe_cnt・syndrome を読む"},
+          {"do": "s_gsi.cq_cc++、cq_dbr[0] = cq_cc の下位 24 ビット"},
+          {"if": "opcode == MLX5_CQE_REQ ?", "then": [
+            {"if": "s_tx_outstanding != 0 ?", "then": [{"do": "s_tx_outstanding--"}]}
+          ], "else": [
+            {"if": "opcode == MLX5_CQE_RESP_SEND ?", "then": [
+              {"do": "idx = wqe_cnt を受信キューの大きさで割った余り、buf = 受信枠 idx の GRH の後ろ"},
+              {"while": "i < MSG_SIZE ?(i は 0 から)", "body": [{"do": "m[i] = buf[i]"}]},
+              {"call": "gsi_post_recv() を呼ぶ"},
+              {"if": "byte_cnt >= MLX5_GRH_BYTES + MSG_SIZE かつ m[0..3] == MSG_MAGIC ?", "then": [
+                {"call": "handle_msg(m) を呼ぶ"},
+                {"do": "got++"}
+              ]}
+            ], "else": [
+              {"do": "BFM_LOG でエラー完了(opcode・syndrome)を表示"},
+              {"if": "opcode == MLX5_CQE_REQ_ERR かつ s_tx_outstanding != 0 ?", "then": [{"do": "s_tx_outstanding--"}]},
+              {"if": "opcode == MLX5_CQE_RESP_ERR ?", "then": [{"call": "gsi_post_recv() を呼ぶ"}]},
+              {"return": "-1"}
+            ]}
           ]}
         ]},
-        {"do": "BFM_LOG で「接続の枠が足りない」を表示"},
-        {"return": "NULL"}
+        {"return": "got"}
       ]
     },
     {
-      "func": "conn_create_qp",
-      "summary": "接続 `c` の RC QP を作り、INIT まで進める。`g_bfm_scatter_cqe` が 0 でなければ scatter to CQE を有効にする(`cs_req = 0x11`)。",
-      "args": {"c": "接続"},
-      "ret": "`BFM_OK`: INIT まで進んだ。そのほか `mlx5_qp_create()` / `mlx5_qp_rst2init()` の戻り値。",
-      "pre": "`c->qp` の WQ・CQ・UAR などが `bfm_cm_init()` で用意してあること。",
-      "notes": "`mlx5_qp_create()` が失敗したら `mlx5_qp_rst2init()` は呼ばない。失敗したときの後始末は呼び出し側が `conn_release()` で行う。",
+      "func": "conn_open",
+      "summary": "接続の枠 `g_bfm_conn` から空き(`BFM_CS_FREE`)を 1 つ取り、`BFM_CS_SETUP` にして、待ち受けの番号・自分の接続の id(`cm_rand32()`)・path_mtu・scatter to CQE の設定を入れ、RC QP を作って INIT まで進める。",
+      "args": {"port": "待ち受けの番号"},
+      "ret": "取った枠。空きが無ければ NULL(理由を表示する)。QP の作成か INIT への遷移に失敗したら、QP を壊し枠を `BFM_CS_FREE` に戻して NULL。",
+      "pre": "`bfm_cm_init()` で枠を初期化してあること。",
+      "notes": "* `peer_id`・`got_rep` は 0 にする。\n* path_mtu は `g_bfm_path_mtu` が 1〜5 ならそれ、そうでなければ 3(1024 バイト)。\n* `g_bfm_scatter_cqe` が 0 でなければ scatter to CQE を有効にする(`cs_req = 0x11`)。\n* `mlx5_qp_create()` が失敗したら `mlx5_qp_rst2init()` は呼ばない。\n* 枠の資源(QP の WQ・CQ・UAR・中継バッファ)は `bfm_cm_init()` で切り出し済みのものを使い回す。",
       "flow": [
+        {"do": "c = NULL"},
+        {"while": "i < BFM_MAX_CONN かつ c == NULL ?(i は 0 から)", "body": [
+          {"if": "g_bfm_conn[i].state == BFM_CS_FREE ?", "then": [{"do": "c = &g_bfm_conn[i]"}]}
+        ]},
+        {"if": "c == NULL ?", "then": [
+          {"do": "BFM_LOG で「接続の枠が足りない」を表示"},
+          {"return": "NULL"}
+        ]},
+        {"do": "c->state = BFM_CS_SETUP、c->port = port"},
+        {"call": "c->local_id = cm_rand32() を呼ぶ"},
+        {"do": "c->peer_id = 0、c->got_rep = 0"},
+        {"if": "g_bfm_path_mtu が 1 以上 5 以下?", "then": [{"do": "c->path_mtu = g_bfm_path_mtu"}], "else": [{"do": "c->path_mtu = 3"}]},
         {"if": "g_bfm_scatter_cqe != 0 ?", "then": [{"do": "c->cs_req = 0x11"}], "else": [{"do": "c->cs_req = 0"}]},
-        {"call": "rc = mlx5_qp_create(&g_bfm, &c->qp, MLX5_QP_ST_RC, c->cs_req) を呼ぶ"},
-        {"if": "rc == BFM_OK ?", "then": [{"call": "rc = mlx5_qp_rst2init(&g_bfm, &c->qp, 0) を呼ぶ"}]},
-        {"return": "rc"}
+        {"call": "mlx5_qp_create(&g_bfm, &c->qp, MLX5_QP_ST_RC, c->cs_req) を呼ぶ"},
+        {"if": "mlx5_qp_create() != BFM_OK ?", "then": [
+          {"call": "mlx5_qp_destroy(&g_bfm, &c->qp) を呼ぶ"},
+          {"do": "c->state = BFM_CS_FREE"},
+          {"return": "NULL"}
+        ]},
+        {"call": "mlx5_qp_rst2init(&g_bfm, &c->qp, 0) を呼ぶ"},
+        {"if": "mlx5_qp_rst2init() != BFM_OK ?", "then": [
+          {"call": "mlx5_qp_destroy(&g_bfm, &c->qp) を呼ぶ"},
+          {"do": "c->state = BFM_CS_FREE"},
+          {"return": "NULL"}
+        ]},
+        {"return": "c"}
       ]
     },
     {
       "func": "conn_release",
-      "summary": "接続 `c` を返す。データ経路の状態を外し(`bfm_ops_detach()`)、RC QP を壊し(`mlx5_qp_destroy()`)、枠を `BFM_CS_FREE` に戻す。",
+      "summary": "接続 `c` を返す。データ経路の状態を外し(`bfm_ops_detach()`)、RC QP を壊し(`mlx5_qp_destroy()`)、枠を `BFM_CS_FREE` に戻して、自分と相手の接続の id を 0 にする。",
       "args": {"c": "接続"},
       "ret": "なし",
       "pre": "特になし。",
-      "notes": "相手へは何も送らない(切断の DREQ は `bfm_disconnect()` が送る)。枠ごとの資源(WQ・CQ・UAR・中継バッファ)は返さず、次の接続で使い回す。",
+      "notes": "相手へは何も送らない(BYE は `bfm_disconnect()` が送る)。枠ごとの資源(WQ・CQ・UAR・中継バッファ)は返さず、次の接続で使い回す。",
       "flow": [
         {"call": "bfm_ops_detach(c) を呼ぶ"},
         {"call": "mlx5_qp_destroy(&g_bfm, &c->qp) を呼ぶ"},
-        {"do": "c->state = BFM_CS_FREE"}
+        {"do": "c->state = BFM_CS_FREE"},
+        {"do": "c->local_id = c->peer_id = 0"}
       ]
     },
     {
-      "func": "conn_to_rts",
-      "summary": "接続 `c` の RC QP を INIT から RTR、RTS へ進める。相手の QPN・PSN・GID・MAC・path_mtu などは `c` から取る。",
-      "args": {"c": "接続(相手の情報が入っていること)"},
-      "ret": "`BFM_OK`: RTS になった。そのほか `mlx5_qp_init2rtr_rc()` / `mlx5_qp_rtr2rts_rc()` の戻り値。",
-      "pre": "`conn_create_qp()` で INIT まで進めてあり、`c` に相手の情報(`peer_qpn`・`peer_psn`・`peer_gid`・`peer_mac`・`peer_rr`・`path_mtu`)が入っていること。",
-      "notes": "RTR へ進めるのに失敗したら RTS へは進めない。",
+      "func": "conn_up",
+      "summary": "接続 `c` の RC QP を INIT から RTR、RTS へ進め、データ経路を用意して(`bfm_ops_attach()`)、`BFM_CS_UP` にする。接続の内容(掛け側・受け側の別、自分と相手の QPN、相手の IP、相手の公開メモリの先頭・大きさ・rkey、MTU、同時の read / atomic の数、BlueFlame の有無)を表示する。",
+      "args": {"c": "接続(相手の情報が入っていること)", "how": "表示する「掛け側」「受け側」の文字列"},
+      "ret": "`BFM_OK`: 使える状態になった。そのほか `mlx5_qp_init2rtr_rc()` / `mlx5_qp_rtr2rts_rc()` / `bfm_ops_attach()` の戻り値。",
+      "pre": "`conn_open()` で INIT まで進めてあり、`c` に相手の情報(`peer_qpn`・`peer_psn`・`peer_gid`・`peer_mac`・`peer_rr`・`path_mtu`)が入っていること。",
+      "notes": "途中で失敗したら残りは行わず、`c->state` も変えない(後始末は呼び出し側が `conn_release()` で行う)。",
       "flow": [
         {"call": "rc = mlx5_qp_init2rtr_rc(&g_bfm, &c->qp, c) を呼ぶ"},
         {"if": "rc == BFM_OK ?", "then": [{"call": "rc = mlx5_qp_rtr2rts_rc(&g_bfm, &c->qp, c) を呼ぶ"}]},
-        {"return": "rc"}
-      ]
-    },
-    {
-      "func": "conn_log_up",
-      "summary": "接続ができたことを表示する。掛け側・受け側の別、自分と相手の QPN、相手の IP、相手の公開メモリの先頭・大きさ・rkey、MTU、同時の read / atomic の数、BlueFlame の有無を出す。",
-      "args": {"c": "接続", "how": "表示する「掛け側」「受け側」の文字列"},
-      "ret": "なし",
-      "pre": "特になし。",
-      "notes": "特になし。",
-      "flow": [
-        {"do": "BFM_LOG で接続の内容を表示"}
+        {"if": "rc == BFM_OK ?", "then": [{"call": "rc = bfm_ops_attach(c) を呼ぶ"}]},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"do": "c->state = BFM_CS_UP"},
+        {"do": "BFM_LOG で接続の内容を表示"},
+        {"return": "BFM_OK"}
       ]
     },
     {
       "func": "bfm_cm_init",
-      "summary": "接続管理を用意する(`bfm_init()` から呼ばれる)。待ち行列と送信の数を 0 にし、GUID の乱数 `s_guid_salt` を決め、GSI の WQ・ドアベルレコード・CQ・受信枠・送信の置き場を DMA 領域から切り出す。UAR を取って GSI(QP1)を作り、INIT・RTS へ進め、受信を `BFM_GSI_PREPOST` 個出す。続けて接続の枠ごとに、0 で埋めて、RC QP の WQ・ドアベルレコード・CQ・CQ のドアベルレコード・中継バッファ(`g_bfm_stage_size` を 4KiB に切り上げた大きさ)を切り出し、UAR を取ってドアベルの窓を決め、BlueFlame を使うなら UAR を write-combining でも張る。全部そろってから `s_gsi_ready = 1` にする。",
+      "summary": "接続管理を用意する(`bfm_init()` から呼ばれる)。GSI の状態と `s_req` を 0 で埋め、送信の数を 0 にし、GSI の WQ・ドアベルレコード・CQ・受信枠・送信の置き場を DMA 領域から切り出す。UAR を取って GSI(QP1)を作り、INIT・RTS へ進め、受信を `BFM_GSI_PREPOST` 個出す。続けて接続の枠ごとに、0 で埋めて、RC QP の WQ・ドアベルレコード・CQ・CQ のドアベルレコード・中継バッファ(`g_bfm_stage_size` を `BFM_PAGE` に切り上げた大きさ)を切り出し、UAR を取ってドアベルの窓を決め、BlueFlame を使うなら UAR を write-combining でも張る。全部そろってから `s_gsi_ready = 1` にする。",
       "args": {},
       "ret": "`BFM_OK`: 用意できた。`BFM_E_NOMEM`: DMA 領域が足りない。そのほか `mlx5_alloc_uar()` / `mlx5_qp_create()` / `mlx5_qp_rst2init()` / `mlx5_qp_ud_to_rts()` の戻り値。",
       "pre": "HCA が立ち上がっていること(`mlx5_hca_init()` の後)。`bfm_mem_reset()` で DMA 領域の切り出しが初期化してあること。",
       "notes": "* 途中で失敗しても DMA 領域・UAR・GSI は返さない。後始末は呼び出し側(`bfm_init()` の `cleanup()`。HCA を止める)に任せる。\n* 接続の枠の準備で失敗したとき(`fail`)は、それまでに write-combining で張った UAR の窓を `bfm_port_bar0_wc_release()` で返し、全部の枠の `c->bf` を NULL にしてから戻る。\n* `s_gsi_ready = 1` にするのは全部そろって成功するときだけなので、失敗したときは `s_gsi_ready` は 0 のまま(`bfm_connect()` などは NULL を返す)。\n* `g_bfm_bf_enable` と `g_bfm.bf_cap` が立っているのに WC で張れなかったときは、注意を表示して BlueFlame なしで動かす(`c->bf = NULL`)。",
       "flow": [
-        {"do": "s_gsi と s_pend を 0 で埋め、s_tx_next = s_tx_outstanding = 0"},
-        {"call": "s_guid_salt = cm_rand32() を呼ぶ"},
+        {"do": "s_gsi と s_req を 0 で埋め、s_tx_next = s_tx_outstanding = 0"},
         {"do": "GSI の rq_log・sq_log・cq_log を決める"},
         {"call": "bfm_mem_alloc() で GSI の WQ・dbr・CQ・cq_dbr・受信枠・送信の置き場を切り出す"},
         {"if": "どれかが NULL ?", "then": [{"return": "BFM_E_NOMEM"}]},
@@ -416,84 +317,54 @@
       "args": {},
       "ret": "なし",
       "pre": "`bfm_cm_init()` の後であること。",
-      "notes": "GSI の QP や UAR は壊さない(HCA の停止で消える)。切断する接続があれば、それぞれ DREP を最大 1 秒待つ。",
+      "notes": "GSI の QP や UAR は壊さない(HCA の停止で消える)。切断する接続があれば、それぞれ BYE が出ていくのを最大 `TX_DRAIN_MS`(100 ミリ秒)待つ。",
       "flow": [
         {"while": "i < BFM_MAX_CONN ?(i は 0 から)", "body": [
           {"if": "c->state != BFM_CS_FREE ?", "then": [{"call": "bfm_disconnect(c) を呼ぶ"}]},
-          {"if": "c->qp.has_uar ?", "then": [
-            {"if": "c->bf != NULL ?", "then": [{"call": "bfm_port_bar0_wc_release(uarn * BFM_PAGE, BFM_PAGE) を呼ぶ"}]},
-            {"do": "c->bf = NULL"}
-          ]}
+          {"if": "c->bf != NULL ?", "then": [{"call": "bfm_port_bar0_wc_release(uarn * BFM_PAGE, BFM_PAGE) を呼ぶ"}]},
+          {"do": "c->bf = NULL"}
         ]},
         {"do": "s_gsi_ready = 0"}
       ]
     },
     {
       "func": "bfm_connect",
-      "summary": "相手へ接続を掛ける(掛け側)。接続の枠を取り、相手の IP・MAC・GID・ポート・path_mtu を入れて RC QP を INIT まで作り、comm id とトランザクション ID を乱数で決める。REQ を送り、REP か REJ が来るまで `REQ_RETRY_MS`(2 秒)ごとに最大 `REQ_RETRIES`(4)回まで再送する。REP が来たら相手の comm id・QPN・PSN・同時の read / atomic の数・公開メモリの情報を読み、QP を RTS へ進めて RTU を送り、データ経路に繋いで `BFM_CS_UP` にする。",
-      "args": {"peer_ip": "相手の IPv4 アドレス。0 なら `g_bfm_peer_ip` と `g_bfm_peer_mac` を使う", "peer_mac": "相手の MAC(6 バイト)。`peer_ip` が 0 なら無視する。NULL なら `g_bfm_peer_mac` を使う", "port": "相手の待ち受けるポート番号。0 なら `g_bfm_cm_port`", "timeout_ms": "REP を待つ時間の上限(ミリ秒)。0 なら 10 秒(`(REQ_RETRIES + 1) * REQ_RETRY_MS`)"},
-      "ret": "接続(`bfm_conn_t *`)。失敗したら NULL(接続管理が用意されていない、相手の IP が無い、枠が無い、QP の失敗、REP が来ない、REJ が来た、REP に公開メモリの情報が無い、送信の失敗)。",
-      "pre": "`bfm_init()` の後であること。`peer_ip` が 0 でなく `peer_mac` が NULL でなければ、`peer_mac` は 6 バイトを指すこと。",
-      "notes": "* 相手の MAC は引数(または `g_bfm_peer_mac`)のものを使い、REP の private data の MAC は使わない。\n* REP の private data が bfmem の形(`'BFM1'` / `'RSHT'`)でなければ失敗にする。\n* 失敗したときは相手へ何も送らずに(REJ も DREQ も送らない)枠を返す。\n* path_mtu は `g_bfm_path_mtu` が 1〜5 ならそれ、そうでなければ 3(1024 バイト)。",
+      "summary": "相手へ接続を掛ける(掛け側)。接続の枠を取って RC QP を INIT まで作り(`conn_open()`)、相手の IP・MAC・GID を入れる。REQ を作り、REP を受けるまで `REQ_RETRY_MS`(1 秒)ごとに送り直しながら `gsi_pump()` を回す。REP を受けたら(`handle_msg()` が相手の情報を枠へ写す)QP を RTS へ進めてデータ経路に繋ぎ、`BFM_CS_UP` にする(`conn_up()`)。",
+      "args": {"peer_ip": "相手の IPv4 アドレス。0 なら `g_bfm_peer_ip`", "peer_mac": "相手の MAC(6 バイト)。NULL なら `g_bfm_peer_mac`", "port": "相手の待ち受けの番号。0 なら `g_bfm_cm_port`", "timeout_ms": "REP を待つ時間の上限(ミリ秒)。0 なら `REQ_TIMEOUT_MS`(5 秒)"},
+      "ret": "接続(`bfm_conn_t *`)。失敗したら NULL(接続管理が用意されていない、相手の IP が無い、枠が無い、QP の失敗、REP が来ない、送信の失敗)。",
+      "pre": "`bfm_init()` の後であること。`peer_mac` が NULL でなければ 6 バイトを指すこと。",
+      "notes": "* REQ は最初に 1 度作り、送り直しでも同じものを送る。\n* 相手の MAC・IP は引数(または設定の値)のものを入れるが、REP を受けると `take_peer()` が REP の中身で上書きする。\n* 失敗したときは相手へ何も送らずに(BYE も送らない)枠を返す(`conn_release()`)。\n* REP を待つ間の `gsi_pump()` の戻り値は見ない。",
       "flow": [
         {"if": "!s_gsi_ready ?", "then": [{"return": "NULL"}]},
-        {"if": "peer_ip == 0 ?", "then": [{"do": "peer_ip = g_bfm_peer_ip、peer_mac = g_bfm_peer_mac"}]},
+        {"if": "peer_ip == 0 ?", "then": [{"do": "peer_ip = g_bfm_peer_ip"}]},
         {"if": "peer_mac == NULL ?", "then": [{"do": "peer_mac = g_bfm_peer_mac"}]},
         {"if": "peer_ip == 0 ?", "then": [
           {"do": "BFM_LOG で「相手の IP が無い」を表示"},
           {"return": "NULL"}
         ]},
         {"if": "port == 0 ?", "then": [{"do": "port = g_bfm_cm_port"}]},
-        {"if": "timeout_ms == 0 ?", "then": [{"do": "timeout_ms = (REQ_RETRIES + 1) * REQ_RETRY_MS"}]},
-        {"call": "c = conn_alloc() を呼ぶ"},
+        {"if": "timeout_ms == 0 ?", "then": [{"do": "timeout_ms = REQ_TIMEOUT_MS"}]},
+        {"call": "c = conn_open(port) を呼ぶ"},
         {"if": "c == NULL ?", "then": [{"return": "NULL"}]},
         {"do": "c->peer_ip = peer_ip、c->peer_mac = peer_mac"},
         {"call": "mlx5_gid_from_ipv4(peer_ip, c->peer_gid) を呼ぶ"},
-        {"do": "c->port = port"},
-        {"if": "g_bfm_path_mtu が 1 以上 5 以下?", "then": [{"do": "c->path_mtu = g_bfm_path_mtu"}], "else": [{"do": "c->path_mtu = 3"}]},
-        {"call": "conn_create_qp(c) を呼ぶ"},
-        {"if": "conn_create_qp() != BFM_OK ?", "then": [
-          {"call": "conn_release(c) を呼ぶ"},
-          {"return": "NULL"}
-        ]},
-        {"call": "c->local_comm_id = cm_rand32()、c->tid = cm_rand32() 2 つで 64 ビット"},
-        {"do": "t_start = 今、t_sent = 0、sent = 0"},
-        {"loop": "REP が来るまで", "body": [
-          {"if": "sent == 0 または ms_since(t_sent) > REQ_RETRY_MS ?", "then": [
-            {"if": "sent > REQ_RETRIES または ms_since(t_start) > timeout_ms ?", "then": [
-              {"do": "BFM_LOG で「接続できない(REP が来ない)」を表示"},
-              {"goto": "fail"}
-            ]},
-            {"call": "build_req(c, mad) を呼ぶ"},
-            {"call": "gsi_send(mad, c->peer_gid, c->peer_mac) を呼ぶ"},
-            {"if": "gsi_send() != BFM_OK ?", "then": [{"goto": "fail"}]},
-            {"do": "t_sent = 今、sent++"}
-          ]},
-          {"call": "gsi_pump() を呼ぶ"},
-          {"call": "pend_take(CM_ATTR_REJ, match_remote_comm, &c->local_comm_id, mad) を呼ぶ"},
-          {"if": "REJ を取り出した?", "then": [
-            {"do": "BFM_LOG で REJ の reason を表示(8 なら「その番号で待ち受けていない」も)"},
+        {"call": "build_msg(req, MSG_REQ, c) を呼ぶ"},
+        {"call": "t0 = bfm_port_time_ns() を呼ぶ"},
+        {"do": "t_sent = 0"},
+        {"while": "!c->got_rep ?", "body": [
+          {"if": "ms_since(t0) > timeout_ms ?", "then": [
+            {"do": "BFM_LOG で「接続できない(REP が来ない)」を表示"},
             {"goto": "fail"}
           ]},
-          {"call": "pend_take(CM_ATTR_REP, match_remote_comm, &c->local_comm_id, mad) を呼ぶ"},
-          {"if": "REP を取り出した?", "then": [{"break": true}]}
+          {"if": "t_sent == 0 または ms_since(t_sent) > REQ_RETRY_MS ?", "then": [
+            {"call": "gsi_send(req, c) を呼ぶ"},
+            {"if": "gsi_send() != BFM_OK ?", "then": [{"goto": "fail"}]},
+            {"call": "t_sent = bfm_port_time_ns() を呼ぶ"}
+          ]},
+          {"call": "gsi_pump() を呼ぶ"}
         ]},
-        {"do": "REP から c->remote_comm_id・c->peer_qpn・c->peer_psn を読む"},
-        {"if": "REP の RESPONDER_RESOURCES(p[24])!= 0 ?", "then": [{"do": "c->peer_rr = p[24]"}], "else": [{"do": "c->peer_rr = 1"}]},
-        {"call": "get_priv(c, p + 36, &mac_ok) を呼ぶ"},
-        {"if": "get_priv() == 0 ?", "then": [
-          {"do": "BFM_LOG で「REP の private data に公開メモリの情報が無い」を表示"},
-          {"goto": "fail"}
-        ]},
-        {"call": "conn_to_rts(c) を呼ぶ"},
-        {"if": "conn_to_rts() != BFM_OK ?", "then": [{"goto": "fail"}]},
-        {"call": "build_short(mad, c->tid, CM_ATTR_RTU, c->local_comm_id, c->remote_comm_id) を呼ぶ"},
-        {"call": "gsi_send(mad, c->peer_gid, c->peer_mac) を呼ぶ"},
-        {"if": "gsi_send() != BFM_OK ?", "then": [{"goto": "fail"}]},
-        {"call": "bfm_ops_attach(c) を呼ぶ"},
-        {"if": "bfm_ops_attach() != BFM_OK ?", "then": [{"goto": "fail"}]},
-        {"do": "c->state = BFM_CS_UP"},
-        {"call": "conn_log_up(c, \"掛け側\") を呼ぶ"},
+        {"call": "conn_up(c, \"掛け側\") を呼ぶ"},
+        {"if": "conn_up() != BFM_OK ?", "then": [{"goto": "fail"}]},
         {"return": "c"},
         {"label": "fail"},
         {"call": "conn_release(c) を呼ぶ"},
@@ -502,65 +373,32 @@
     },
     {
       "func": "bfm_accept",
-      "summary": "相手からの接続を受ける(受け側)。`gsi_pump()` と `bfm_cm_poll()` を回しながら、`port` 宛ての REQ を待つ。REQ が来たら接続の枠を取り、REQ から tid・相手の comm id・QPN・同時の read / atomic の数・PSN・path_mtu(自分の値と相手の値の小さい方)・GID・IP・公開メモリの情報・MAC を読む。RC QP を作って RTS まで進め、comm id を乱数で決めて REP を送り、データ経路に繋いで `BFM_CS_UP` にする。その後 RTU を最大 `RTU_WAIT_MS`(3 秒)待つ。",
-      "args": {"port": "待ち受けるポート番号。0 なら `g_bfm_cm_port`", "timeout_ms": "REQ を待つ時間の上限(ミリ秒)。0 なら無期限に待つ"},
-      "ret": "接続(`bfm_conn_t *`)。失敗したら NULL(接続管理が用意されていない、REQ が時間内に来ない、枠が無い、相手の MAC が分からない、QP の失敗、送信の失敗)。",
+      "summary": "相手からの接続を受ける(受け側)。`gsi_pump()` を回しながら、`handle_msg()` が `s_req` に取っておいた REQ のうち、待ち受けの番号が `port` で、受けてから `REQ_STALE_MS`(2 秒)以内のものを待つ。REQ が来たら接続の枠を取って RC QP を INIT まで作り(`conn_open()`)、REQ から相手の情報を写し(`take_peer()`)、path_mtu を自分と相手の小さい方にする。QP を RTS へ進めてデータ経路に繋いで `BFM_CS_UP` にし(`conn_up()`)、REP を送る。",
+      "args": {"port": "待ち受けの番号。0 なら `g_bfm_cm_port`", "timeout_ms": "REQ を待つ時間の上限(ミリ秒)。0 なら無期限に待つ"},
+      "ret": "接続(`bfm_conn_t *`)。失敗したら NULL(接続管理が用意されていない、REQ が時間内に来ない、枠が無い、QP の失敗、REP の送信の失敗)。",
       "pre": "`bfm_init()` の後であること。",
-      "notes": "* REQ の private data に公開メモリの情報が無ければ、表示だけして相手のメモリに触れない接続(`raddr`・`rlen`・`rkey` が 0)として進める。\n* private data に MAC が無ければ `g_bfm_peer_mac` を使う。それも 0 なら枠を返して NULL を返す(REQ は取り出し済みで、相手へは何も送らない)。\n* RTU が来なくても QP は RTS なので、注意を表示して接続を返す。\n* 待つ間に `bfm_cm_poll()` を呼ぶので、既存の接続への DREQ や REQ の再送もここで処理される。",
+      "notes": "* `s_req` は見たら番号や時刻が合わなくても空ける(合わない REQ は捨てる)。\n* REQ の経路 MTU([5])が 1 以上で自分の path_mtu より小さければ、そちらに合わせる。\n* QP を RTS にしてから REP を送るので、掛け側は REP を受けてすぐ使える。REP が落ちたときは、掛け側の REQ の送り直しに `handle_msg()` が REP を送り直す。\n* 待つ間の `gsi_pump()` で、既存の接続への BYE や REQ の送り直しも処理される。",
       "flow": [
         {"if": "!s_gsi_ready ?", "then": [{"return": "NULL"}]},
         {"if": "port == 0 ?", "then": [{"do": "port = g_bfm_cm_port"}]},
         {"call": "t0 = bfm_port_time_ns() を呼ぶ"},
         {"loop": "REQ が来るまで", "body": [
           {"call": "gsi_pump() を呼ぶ"},
-          {"call": "bfm_cm_poll() を呼ぶ"},
-          {"call": "pend_take(CM_ATTR_REQ, match_req_port, &port, mad) を呼ぶ"},
-          {"if": "REQ を取り出した?", "then": [{"break": true}]},
+          {"if": "s_req.used ?", "then": [
+            {"do": "s_req.used = 0"},
+            {"if": "s_req.msg[6..7] == port かつ ms_since(s_req.t) < REQ_STALE_MS ?", "then": [{"break": true}]}
+          ]},
           {"if": "timeout_ms != 0 かつ ms_since(t0) > timeout_ms ?", "then": [{"return": "NULL"}]}
         ]},
-        {"call": "c = conn_alloc() を呼ぶ"},
+        {"call": "c = conn_open(port) を呼ぶ"},
         {"if": "c == NULL ?", "then": [{"return": "NULL"}]},
-        {"do": "c->port = port、REQ から c->tid・c->remote_comm_id・c->peer_qpn を読む"},
-        {"if": "REQ の RESPONDER_RESOURCES(p[35])!= 0 ?", "then": [{"do": "c->peer_rr = p[35]"}], "else": [{"do": "c->peer_rr = 1"}]},
-        {"do": "c->peer_psn と相手の PATH_MTU(peer_mtu)を REQ から読む"},
-        {"if": "g_bfm_path_mtu が 1 以上 5 以下?", "then": [{"do": "c->path_mtu = g_bfm_path_mtu"}], "else": [{"do": "c->path_mtu = 3"}]},
-        {"if": "peer_mtu >= 1 かつ peer_mtu < c->path_mtu ?", "then": [{"do": "c->path_mtu = peer_mtu"}]},
-        {"do": "c->peer_gid = REQ の PRIMARY_LOCAL_PORT_GID、c->peer_ip = cma_hdr の送り元 IP"},
-        {"call": "get_priv(c, cma_hdr の後ろ, &mac_ok) を呼ぶ"},
-        {"if": "get_priv() == 0 ?", "then": [
-          {"do": "BFM_LOG で「相手のメモリには触れない接続になる」を表示"},
-          {"do": "c->raddr = c->rlen = 0、c->rkey = 0"}
-        ]},
-        {"if": "!mac_ok ?", "then": [
-          {"if": "g_bfm_peer_mac が全部 0 ?", "then": [
-            {"do": "BFM_LOG で「相手の MAC が分からない」を表示"},
-            {"do": "c->state = BFM_CS_FREE"},
-            {"return": "NULL"}
-          ]},
-          {"do": "c->peer_mac = g_bfm_peer_mac"}
-        ]},
-        {"call": "conn_create_qp(c) を呼ぶ"},
-        {"if": "conn_create_qp() != BFM_OK ?", "then": [{"goto": "fail"}]},
-        {"call": "conn_to_rts(c) を呼ぶ"},
-        {"if": "conn_to_rts() != BFM_OK ?", "then": [{"goto": "fail"}]},
-        {"call": "c->local_comm_id = cm_rand32() を呼ぶ"},
-        {"call": "build_rep(c, mad) を呼ぶ"},
-        {"call": "gsi_send(mad, c->peer_gid, c->peer_mac) を呼ぶ"},
+        {"call": "take_peer(c, s_req.msg) を呼ぶ"},
+        {"if": "s_req.msg[5] >= 1 かつ s_req.msg[5] < c->path_mtu ?", "then": [{"do": "c->path_mtu = s_req.msg[5]"}]},
+        {"call": "conn_up(c, \"受け側\") を呼ぶ"},
+        {"if": "conn_up() != BFM_OK ?", "then": [{"goto": "fail"}]},
+        {"call": "build_msg(rep, MSG_REP, c) を呼ぶ"},
+        {"call": "gsi_send(rep, c) を呼ぶ"},
         {"if": "gsi_send() != BFM_OK ?", "then": [{"goto": "fail"}]},
-        {"call": "bfm_ops_attach(c) を呼ぶ"},
-        {"if": "bfm_ops_attach() != BFM_OK ?", "then": [{"goto": "fail"}]},
-        {"do": "c->state = BFM_CS_UP"},
-        {"do": "t1 = 今、rtu = 0"},
-        {"while": "ms_since(t1) < RTU_WAIT_MS ?", "body": [
-          {"call": "gsi_pump() を呼ぶ"},
-          {"call": "pend_take(CM_ATTR_RTU, match_remote_comm, &c->local_comm_id, mad) を呼ぶ"},
-          {"if": "RTU を取り出した?", "then": [
-            {"do": "rtu = 1"},
-            {"break": true}
-          ]}
-        ]},
-        {"if": "!rtu ?", "then": [{"do": "BFM_LOG で「RTU が来ない(QP は使える状態なので進む)」を表示"}]},
-        {"call": "conn_log_up(c, \"受け側\") を呼ぶ"},
         {"return": "c"},
         {"label": "fail"},
         {"call": "conn_release(c) を呼ぶ"},
@@ -569,73 +407,40 @@
     },
     {
       "func": "bfm_disconnect",
-      "summary": "接続を切って枠を返す。接続が `BFM_CS_UP` か `BFM_CS_ERROR` なら、相手へ DREQ(REMOTE_QPN つき、トランザクション ID は乱数)を送り、DREP を最大 `DREP_WAIT_MS`(1 秒)待つ。待つ間に相手からも DREQ が来たら DREP を返して待つのをやめる。最後に `conn_release()` で QP を壊して枠を返す。",
+      "summary": "接続を切って枠を返す。接続が `BFM_CS_UP` か `BFM_CS_ERROR` なら、相手へ BYE を送り、送信の完了を最大 `TX_DRAIN_MS`(100 ミリ秒)待つ(返事は待たない)。最後に `conn_release()` で QP を壊して枠を返す。",
       "args": {"c": "切る接続"},
-      "ret": "`BFM_OK`: 枠を返した(DREP が来なくても、DREQ を送れなくても)。`BFM_E_PARAM`: `c` が NULL か、既に空いている枠。",
+      "ret": "`BFM_OK`: 枠を返した(BYE を送れなくても)。`BFM_E_PARAM`: `c` が NULL か、既に空いている枠。",
       "pre": "`c` は `bfm_connect()` / `bfm_accept()` が返した接続であること。",
-      "notes": "* 相手が先に切って `BFM_CS_CLOSED` になった接続は、DREQ を送らずに枠だけ返す。\n* DREQ の送信に失敗しても、DREP を待たずに枠を返す。\n* 呼んだ後 `c` は使えない。",
+      "notes": "* 相手が先に切って `BFM_CS_CLOSED` になった接続は、BYE を送らずに枠だけ返す。\n* BYE の送信に失敗したら待たずに枠を返す。待つ間に GSI のエラー完了を見たら待つのをやめる。\n* 送信の完了は GSI 全体の送信中の数(`s_tx_outstanding`)が 0 になるまで待つ。\n* 呼んだ後 `c` は使えない。",
       "flow": [
         {"if": "c == NULL または c->state == BFM_CS_FREE ?", "then": [{"return": "BFM_E_PARAM"}]},
         {"if": "c->state == BFM_CS_UP または c->state == BFM_CS_ERROR ?", "then": [
-          {"call": "tid = cm_rand32() 2 つで 64 ビット"},
-          {"call": "build_short(mad, tid, CM_ATTR_DREQ, c->local_comm_id, c->remote_comm_id) を呼ぶ"},
-          {"do": "MAD の REMOTE_QPN = c->peer_qpn"},
-          {"call": "gsi_send(mad, c->peer_gid, c->peer_mac) を呼ぶ"},
+          {"call": "build_msg(bye, MSG_BYE, c) を呼ぶ"},
+          {"call": "gsi_send(bye, c) を呼ぶ"},
           {"if": "gsi_send() == BFM_OK ?", "then": [
-            {"do": "t0 = 今"},
-            {"while": "ms_since(t0) < DREP_WAIT_MS ?", "body": [
+            {"call": "t0 = bfm_port_time_ns() を呼ぶ"},
+            {"while": "s_tx_outstanding > 0 かつ ms_since(t0) < TX_DRAIN_MS ?", "body": [
               {"call": "gsi_pump() を呼ぶ"},
-              {"call": "pend_take(CM_ATTR_DREP, match_remote_comm, &c->local_comm_id, mad) を呼ぶ"},
-              {"if": "DREP を取り出した?", "then": [{"break": true}]},
-              {"call": "pend_take(CM_ATTR_DREQ, match_remote_comm, &c->local_comm_id, mad) を呼ぶ"},
-              {"if": "相手からの DREQ を取り出した?", "then": [
-                {"call": "build_short(mad, 相手の tid, CM_ATTR_DREP, c->local_comm_id, c->remote_comm_id) を呼ぶ"},
-                {"call": "gsi_send(mad, c->peer_gid, c->peer_mac) を呼ぶ"},
-                {"break": true}
-              ]}
+              {"if": "gsi_pump() < 0 ?", "then": [{"break": true}]}
             ]}
           ]}
         ]},
         {"call": "conn_release(c) を呼ぶ"},
+        {"do": "BFM_DBG で「切断した」を表示"},
         {"return": "BFM_OK"}
       ]
     },
     {
       "func": "bfm_cm_poll",
-      "summary": "GSI に来た CM のメッセージを処理する。`gsi_pump()` で受け取った後、待ち行列の DREQ をすべて取り出し、宛先の comm id が同じ使用中の接続(作っている途中の `BFM_CS_SETUP` を除く)へ DREP を返して、`BFM_CS_UP` か `BFM_CS_ERROR` なら `BFM_CS_CLOSED` にする。次に、待ち行列に残っている REQ のうち、確立済み(`BFM_CS_UP`)の接続の相手の comm id と GID が同じもの(RTU が落ちたための REQ の再送)には REP を送り直してその REQ を捨てる。最後に古い MAD を捨てる(`pend_age()`)。",
+      "summary": "GSI に来たものを処理する(`gsi_pump()` を 1 回呼ぶ)。相手からの BYE で接続を閉じた扱いにし、REP が落ちたときの REQ の送り直しに REP を送り直す(どちらも `handle_msg()` が行う)。",
       "args": {},
-      "ret": "処理したメッセージの数(DREP を返した数と REP を送り直した数の和)。接続管理が用意されていなければ 0。",
+      "ret": "処理したメッセージの数(0 以上)。接続管理が用意されていないときや GSI のエラー完了を見たときは 0。",
       "pre": "`bfm_init()` と同じタスクから呼ぶこと。",
-      "notes": "* 相手が切った接続は `BFM_CS_CLOSED` になるだけで枠は返さない。アプリケーションが `bfm_disconnect()` で返すこと(表示もそう促す)。\n* どの接続にも当たらない DREQ は捨てる(DREP を返さない)。\n* 作っている途中の枠(`BFM_CS_SETUP`)は `local_comm_id` がまだ前の値なので、DREQ の宛先として見ない。\n* 新しい接続への REQ は待ち行列に残し、`bfm_accept()` に任せる。\n* `bfm_poll()` と `bfm_accept()` から呼ばれる。",
+      "notes": "* 相手が切った接続は `BFM_CS_CLOSED` になるだけで枠は返さない。アプリケーションが `bfm_disconnect()` で返すこと。\n* 新しい接続への REQ は `s_req` に取っておかれ、`bfm_accept()` に任せる。",
       "flow": [
         {"if": "!s_gsi_ready ?", "then": [{"return": "0"}]},
-        {"do": "n = 0"},
-        {"call": "gsi_pump() を呼ぶ"},
-        {"while": "pend_take(CM_ATTR_DREQ, NULL, NULL, mad) が 1 ?", "body": [
-          {"do": "target = DREQ の REMOTE_COMM_ID、tid = DREQ のトランザクション ID"},
-          {"while": "i < BFM_MAX_CONN ?(i は 0 から)", "body": [
-            {"if": "c->state == BFM_CS_FREE または c->state == BFM_CS_SETUP または c->local_comm_id != target ?", "then": [{"continue": true}]},
-            {"call": "build_short(rep, tid, CM_ATTR_DREP, c->local_comm_id, c->remote_comm_id) を呼ぶ"},
-            {"call": "gsi_send(rep, c->peer_gid, c->peer_mac) を呼ぶ"},
-            {"if": "c->state == BFM_CS_UP または c->state == BFM_CS_ERROR ?", "then": [
-              {"do": "c->state = BFM_CS_CLOSED"},
-              {"do": "BFM_LOG で「相手が接続を切った」を表示"}
-            ]},
-            {"do": "n++"}
-          ]}
-        ]},
-        {"while": "i < PEND_SLOTS ?(i は 0 から)", "body": [
-          {"if": "!s_pend[i].used または s_pend[i].attr != CM_ATTR_REQ ?", "then": [{"continue": true}]},
-          {"while": "k < BFM_MAX_CONN ?(k は 0 から)", "body": [
-            {"if": "c->state != BFM_CS_UP または c->remote_comm_id が REQ の LOCAL_COMM_ID と違う、または c->peer_gid が REQ の GID と違う?", "then": [{"continue": true}]},
-            {"call": "build_rep(c, rep) を呼ぶ"},
-            {"call": "gsi_send(rep, c->peer_gid, c->peer_mac) を呼ぶ"},
-            {"do": "s_pend[i].used = 0、n++"},
-            {"break": true}
-          ]}
-        ]},
-        {"call": "pend_age() を呼ぶ"},
-        {"return": "n"}
+        {"call": "n = gsi_pump() を呼ぶ"},
+        {"if": "n > 0 ?", "then": [{"return": "n"}], "else": [{"return": "0"}]}
       ]
     }
   ]

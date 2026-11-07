@@ -15,7 +15,7 @@
     },
     {
       "func": "bfm_mem_alloc",
-      "summary": "DMA 領域の続きから、`size` バイトを `align` の境界に合わせて切り出し、0 で埋め、キャッシュを吐き出して(`bfm_port_cache_flush()`)先頭を返す。",
+      "summary": "DMA 領域の続きから、`size` バイトを `align` の境界に合わせて切り出し、0 で埋めて先頭を返す。",
       "args": {
         "size": "切り出す大きさ(バイト)",
         "align": "先頭を合わせる境界(バイト)。2 のべき乗であること。0 は 1 とみなす"
@@ -41,7 +41,6 @@
         {"do": "s_next = at + size - g_bfm_dma_base"},
         {"do": "p = at をポインタにしたもの"},
         {"do": "memset(p, 0, size) で 0 で埋める"},
-        {"call": "bfm_port_cache_flush(p, size) を呼ぶ"},
         {"return": "p"}
       ]
     },

@@ -3,15 +3,24 @@
 
 /* =====================================================================
  * 移植層。プラットフォームごとに port/<名前>/ で実装する関数と、
- * CPU の種類で決まるバリアとバイト順の道具。
+ * バリアとバイト順の道具。
  *
  *   port/linux_vfio/  x86-64 Linux + VFIO(試験環境)
- *   port/vxworks/     VxWorks(論理アドレス = 物理アドレス)
+ *   port/vxworks/     x86-64 VxWorks(論理アドレス = 物理アドレス)
+ *
+ * CPU は x86-64(Intel)だけ。次を前提にしている:
+ *   - リトルエンディアン
+ *   - DMA はキャッシュと一貫している(キャッシュの flush / invalidate は要らない)
+ *   - TSO(書き込みどうしの順序は保たれる)、64bit の MMIO 書き込みは 1 回で出る
  *
  * アドレスの約束: DMA に使うアドレス(NIC に渡すアドレス)は CPU のポインタの値
  * そのもの。VxWorks は論理 = 物理なので自然に成り立ち、Linux はポート層が
  * 仮想アドレス = IOVA になるよう張る。
  * ===================================================================== */
+
+#if !defined(__x86_64__)
+#error "bfmem は x86-64 専用"
+#endif
 
 #include <stdint.h>
 #include <stddef.h>
@@ -48,63 +57,24 @@ void     bfm_port_delay_us(uint32_t us);
 /* 表示(printf と同じ書式)。 */
 void     bfm_port_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
-/* キャッシュの操作。NIC と CPU のキャッシュが一貫している機材(x86)では何もしない。
- * flush: CPU が書いたものを NIC が読む前。inval: NIC が書いたものを CPU が読む前。 */
-void bfm_port_cache_flush(const volatile void *p, size_t len);
-void bfm_port_cache_inval(const volatile void *p, size_t len);
-
-/* ---- バリア ----
+/* ---- バリア(x86-64)----
  * bfm_dma_wmb(): ホストメモリへの書き込み(WQE・doorbell record)を、この後の
- *                MMIO(ドアベル)より先に NIC から見えるようにする。
+ *                MMIO(ドアベル)より先に NIC から見えるようにする。x86 は TSO なので
+ *                コンパイラ障壁だけでよい(rdma-core の udma_to_device_barrier() と同じ)。
  * bfm_wc_flush(): write-combining のバッファを吐き出させる(BlueFlame の後)。
  * bfm_mb():      読み書き全部の順序(コマンドキューなど冷たい経路)。
- * bfm_rmb():     CQE の owner を読んでから中身を読む。 */
-#if defined(__x86_64__) || defined(__i386__)
-/* x86 は TSO なので、WB への書き込みが後の MMIO を追い越すことはない
- * (rdma-core の udma_to_device_barrier() も x86 ではコンパイラ障壁だけ)。 */
+ * bfm_rmb():     CQE の owner を読んでから中身を読む(x86 では読み出しどうしは追い越さない)。 */
 #define bfm_dma_wmb()  __asm__ volatile("" ::: "memory")
 #define bfm_wc_flush() __asm__ volatile("sfence" ::: "memory")
 #define bfm_mb()       __asm__ volatile("mfence" ::: "memory")
 #define bfm_rmb()      __asm__ volatile("" ::: "memory")
-#elif defined(__aarch64__)
-#define bfm_dma_wmb()  __asm__ volatile("dmb oshst" ::: "memory")
-#define bfm_wc_flush() __asm__ volatile("dsb st" ::: "memory")
-#define bfm_mb()       __asm__ volatile("dsb sy" ::: "memory")
-#define bfm_rmb()      __asm__ volatile("dmb oshld" ::: "memory")
-#elif defined(__arm__)
-#define bfm_dma_wmb()  __asm__ volatile("dmb st" ::: "memory")
-#define bfm_wc_flush() __asm__ volatile("dsb st" ::: "memory")
-#define bfm_mb()       __asm__ volatile("dsb sy" ::: "memory")
-#define bfm_rmb()      __asm__ volatile("dmb sy" ::: "memory")
-#elif defined(__powerpc__) || defined(__PPC__)
-#define bfm_dma_wmb()  __asm__ volatile("sync" ::: "memory")
-#define bfm_wc_flush() __asm__ volatile("sync" ::: "memory")
-#define bfm_mb()       __asm__ volatile("sync" ::: "memory")
-#define bfm_rmb()      __asm__ volatile("lwsync" ::: "memory")
-#else
-#define bfm_dma_wmb()  __sync_synchronize()
-#define bfm_wc_flush() __sync_synchronize()
-#define bfm_mb()       __sync_synchronize()
-#define bfm_rmb()      __sync_synchronize()
-#endif
 
 /* ---- バイト順 ----
- * ConnectX の構造(コマンド・WQE・CQE)はすべてビッグエンディアン。 */
-static inline uint16_t bfm_bswap16(uint16_t v) { return (uint16_t)((v >> 8) | (v << 8)); }
-static inline uint32_t bfm_bswap32(uint32_t v) { return __builtin_bswap32(v); }
-static inline uint64_t bfm_bswap64(uint64_t v) { return __builtin_bswap64(v); }
-
-#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
-#define BFM_HOST_BIG_ENDIAN 1
-static inline uint32_t bfm_cpu_to_be32(uint32_t v) { return v; }
-static inline uint64_t bfm_cpu_to_be64(uint64_t v) { return v; }
-#else
-#define BFM_HOST_BIG_ENDIAN 0
-static inline uint32_t bfm_cpu_to_be32(uint32_t v) { return bfm_bswap32(v); }
-static inline uint64_t bfm_cpu_to_be64(uint64_t v) { return bfm_bswap64(v); }
-#endif
-#define bfm_be32_to_cpu(v) bfm_cpu_to_be32(v)
-#define bfm_be64_to_cpu(v) bfm_cpu_to_be64(v)
+ * ConnectX の構造(コマンド・WQE・CQE)はすべてビッグエンディアン。CPU はリトルエンディアン。 */
+#define bfm_cpu_to_be32(v) __builtin_bswap32(v)
+#define bfm_cpu_to_be64(v) __builtin_bswap64(v)
+#define bfm_be32_to_cpu(v) __builtin_bswap32(v)
+#define bfm_be64_to_cpu(v) __builtin_bswap64(v)
 
 /* バイト列としての読み書き(揃っていない位置でもよい)。 */
 static inline uint16_t bfm_rd16be(const volatile void *p) {
@@ -155,8 +125,7 @@ static inline void bfm_mmio_wr32be(volatile uint8_t *base, uint64_t off, uint32_
     *(volatile uint32_t *)(volatile void *)(base + off) = bfm_cpu_to_be32(v);
 }
 /* 8 バイトのドアベルは 1 回の 64bit 書き込みで出す(32bit 2 回に分けると PCIe 上で
- * 分かれうる)。32bit CPU では分かれるが、UAR は接続ごとに別なので混ざらない。
- * v はメモリ上の並び(WQE の先頭 8 バイトをそのまま)。 */
+ * 分かれうる)。v はメモリ上の並び(WQE の先頭 8 バイトをそのまま)。 */
 static inline void bfm_mmio_wr64_raw(volatile void *dst, uint64_t v) {
     *(volatile uint64_t *)dst = v;
 }

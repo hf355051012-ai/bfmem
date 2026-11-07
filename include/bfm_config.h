@@ -35,9 +35,7 @@ extern uint32_t g_bfm_pci_dev;
 extern uint32_t g_bfm_pci_func;
 
 /* PCIe の ECAM(拡張設定空間)の先頭。VxWorks のポート層はここを直接読み書きする
- * (bus << 20 | dev << 15 | func << 12 | off)。0 だと bfm_init() が断る。
- * BFM_VX_PCI_LIB を定義して port/vxworks/port_vxworks.c を作ると、これは使わず
- * BSP の pciConfigLib で読み書きする(どちらを使うかはコンパイル時に決まる)。Linux では使わない。 */
+ * (bus << 20 | dev << 15 | func << 12 | off)。0 だと bfm_init() が断る。Linux では使わない。 */
 extern uint64_t g_bfm_pcie_ecam_base;
 
 /* BAR0(64bit・メモリ)に割り当てるアドレス。0 なら書き込まず、今入っている値を使う
@@ -96,12 +94,12 @@ extern uint32_t g_bfm_local_ip;
 /* 自分の MAC。全部 0 なら NIC の固有の MAC(vport の permanent_address)を使う。 */
 extern uint8_t g_bfm_local_mac[6];
 
-/* 既定の相手(bfm_connect() の peer_ip が 0 のとき / 受け側で相手の MAC が
- * private data に無いときに使う)。ARP を使わないので、相手の MAC は必ず要る。 */
+/* 既定の相手(bfm_connect() の peer_ip が 0 / peer_mac が NULL のときに使う)。
+ * ARP を使わないので、掛け側は相手の MAC が必ず要る(受け側は REQ に入った MAC を使う)。 */
 extern uint32_t g_bfm_peer_ip;
 extern uint8_t  g_bfm_peer_mac[6];
 
-/* 接続の番号(Linux の rdma_cm のポート番号と同じ意味。SERVICE_ID に入る)。 */
+/* 接続の番号(待ち受けを見分ける番号。bfm_connect() と bfm_accept() で同じ値にする)。 */
 extern uint16_t g_bfm_cm_port;
 
 /* RoCE の経路 MTU(IB の符号: 1=256 2=512 3=1024 4=2048 5=4096)。
@@ -125,10 +123,6 @@ extern uint32_t g_bfm_bf_enable;
 
 /* 1 = 32 バイトまでの read / atomic の応答を CQE に書かせる(scatter to CQE)。 */
 extern uint32_t g_bfm_scatter_cqe;
-
-/* 1 = 8 バイトの atomic をホストのバイト順で扱うよう HCA に設定する(対応していれば)。
- * Linux の mlx5_core も同じ設定をする。 */
-extern uint32_t g_bfm_atomic_host_endian;
 
 /* RC の再送: ack timeout(4.096us x 2^N)と再送回数(0〜7)。 */
 extern uint8_t g_bfm_ack_timeout;

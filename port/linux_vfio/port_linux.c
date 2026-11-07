@@ -72,10 +72,6 @@ void bfm_port_delay_us(uint32_t us)
     }
 }
 
-/* x86 は NIC と CPU のキャッシュが一貫しているので何もしない。 */
-void bfm_port_cache_flush(const volatile void *p, size_t len) { (void)p; (void)len; }
-void bfm_port_cache_inval(const volatile void *p, size_t len) { (void)p; (void)len; }
-
 /* ---------------------------------------------------------------------
  * VFIO
  * ------------------------------------------------------------------- */

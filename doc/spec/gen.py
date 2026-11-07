@@ -45,18 +45,16 @@ FILES = [
     ("port/linux_vfio/port_linux.c", ["linux"]),
     ("port/vxworks/port_vxworks.c", ["vxworks"]),
     ("test/bfm_test.c", ["linux"]),
-    ("tools/bfm_peer.c", ["peer"]),
 ]
 
 # 関数として扱うマクロ(呼び出しの関係図では、展開先の関数を呼んだことにする)。
 MACRO_ALIAS = {
     "BFM_LOG": "bfm_port_log",
     "BFM_DBG": "bfm_port_log",
-    "bfm_be32_to_cpu": "bfm_cpu_to_be32",
-    "bfm_be64_to_cpu": "bfm_cpu_to_be64",
 }
-# 関数ではないマクロ(バリア)。関係図には「マクロ」として出す。
-MACROS = {"bfm_dma_wmb", "bfm_wc_flush", "bfm_mb", "bfm_rmb"}
+# 関数ではないマクロ(バリアとバイト順)。関係図には「マクロ」として出す。
+MACROS = {"bfm_dma_wmb", "bfm_wc_flush", "bfm_mb", "bfm_rmb",
+          "bfm_cpu_to_be32", "bfm_cpu_to_be64", "bfm_be32_to_cpu", "bfm_be64_to_cpu"}
 KEYWORDS = {"if", "for", "while", "switch", "return", "sizeof", "volatile", "__asm__", "asm",
             "_Static_assert", "__attribute__", "defined", "case", "do", "else"}
 

@@ -39,7 +39,6 @@ void *bfm_mem_alloc(uint64_t size, uint64_t align)
     s_next = at + size - base;
     void *p = (void *)(uintptr_t)at;
     memset(p, 0, (size_t)size);
-    bfm_port_cache_flush(p, (size_t)size);
     return p;
 }
 

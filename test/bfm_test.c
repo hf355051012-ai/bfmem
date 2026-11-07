@@ -4,9 +4,9 @@
  *   bfmem_test [オプション] client <IP> <MAC>      掛け側。相手の公開メモリへ一通りの操作をして確かめ、速さを測る
  *   bfmem_test [オプション] info                   立ち上げて能力を表示するだけ
  *
- * 相手は同じプログラムの server か、Linux の tools/bfm_peer.c(カーネルの mlx5 で動く)。
+ * 相手は別の機械で動かす同じプログラムの server(相手は常に bfmem)。
  *
- * 公開メモリの取り決め(server と bfm_peer で同じ):
+ * 公開メモリの取り決め(server が埋める):
  *   [0, 64KiB)          データ領域。(i * 7 + 3) & 0xff で埋める
  *   [64KiB, 64KiB+4KiB) 8 バイトの atomic 語 x 512(0 で埋める)
  * client はデータ領域の中身を自分でも持っておき(模型)、最後に読み戻して突き合わせ、
@@ -261,17 +261,10 @@ static int run_client(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t
         if (ok && (bfm_cas(c, ATOM_OFF + 8u, 7, 99, &old) != BFM_OK || old != 1000u)) ok = 0;
         if (ok && (bfm_cas(c, ATOM_OFF + 8u, 1000, 1000, &old) != BFM_OK || old != 1000u)) ok = 0;
         check("[4] CAS 0->1000(毎回成功)、外れる比較値で変わらない", ok);
-        uint8_t raw[8];
-        if (bfm_read(c, ATOM_OFF + 8u, raw, 8) == BFM_OK) {
-            const int le = (raw[0] == 0xe8 && raw[1] == 0x03);
-            const int be = (raw[7] == 0xe8 && raw[6] == 0x03);
-            printf("client: [4] 相手のメモリの語 1(値 1000)の並び: %02x %02x %02x %02x %02x %02x %02x %02x = %s\n",
-                   raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
-                   le ? "リトルエンディアン(ホスト順)" : be ? "ビッグエンディアン" : "?");
-            if (!le && !be) g_ng++;
-        }
-        printf("client: [4] この HCA は atomic の元の値を %s で返す設定\n",
-               g_bfm.atomic_host_order ? "ホスト順" : "ビッグエンディアン");
+        /* 相手の HCA も atomic をホスト順(リトルエンディアン)で書く設定のはず */
+        uint64_t v = 0;
+        check("[4] 相手のメモリの語 1 がホスト順の 1000",
+              bfm_read(c, ATOM_OFF + 8u, &v, 8) == BFM_OK && v == 1000u);
     }
     /* [5] 全体を読み戻して模型と突き合わせる。 */
     {
@@ -299,7 +292,7 @@ static int run_client(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t
         rc = bfm_read(c, 0, buf, DATA_BYTES);
         check("[6] 測った後のデータ領域が模型と一致", rc == BFM_OK && memcmp(buf, g_model, DATA_BYTES) == 0);
     }
-    printf("client: 模型の hash = %016llx(相手の server / bfm_peer が切断のときに出す値と同じはず)\n",
+    printf("client: 模型の hash = %016llx(相手の server が切断のときに出す値と同じはず)\n",
            (unsigned long long)fnv1a(g_model, DATA_BYTES));
     /* [7] 範囲の外。相手の NIC が REMOTE_ACCESS で断ること(相手の MKey が範囲を持っていること)。 */
     if (oob && !g_stop) {
@@ -393,7 +386,6 @@ static int run_bench(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t 
         /* 埋め込みでない write は中継バッファから送るので、送る中身を置いておく */
         struct bfm_conn *ci = (struct bfm_conn *)c;
         for (uint32_t i = 0; i < ci->stage_size; i++) ci->stage[i] = (uint8_t)(0x5a ^ i);
-        bfm_port_cache_flush(ci->stage, ci->stage_size);
     }
     printf("bench: 各 %u 回。相手の公開メモリ %llu バイト、BlueFlame %s、inline %u バイトまで、MTU %u\n", n,
            (unsigned long long)bfm_remote_size(c), bfm_bf_active(c) ? "あり" : "なし", bfm_inline_max(),
@@ -457,9 +449,9 @@ int main(int argc, char **argv)
             ret = run_client(ip, mac, port, iters ? iters : 20000u, oob);
         }
     } else if (strcmp(mode, "info") == 0) {
-        printf("info: %s bf=%u bf_buf=%u atomic ops=0x%x size_qp=0x%x host_order=%u mode=%u ts_format=%u "
+        printf("info: %s bf=%u bf_buf=%u atomic ops=0x%x size_qp=0x%x mode=%u ts_format=%u "
                "read/atomic req/res=%u/%u FW ページ %u\n", g_bfm.name, g_bfm.bf_cap, g_bfm.bf_buf_size,
-               g_bfm.atomic_ops, g_bfm.atomic_size_qp, g_bfm.atomic_host_order, g_bfm.atomic_mode,
+               g_bfm.atomic_ops, g_bfm.atomic_size_qp, g_bfm.atomic_mode,
                g_bfm.qp_ts_format, 1u << g_bfm.log_max_ra_req_qp, 1u << g_bfm.log_max_ra_res_qp,
                g_bfm.fw_pages_used);
     } else {

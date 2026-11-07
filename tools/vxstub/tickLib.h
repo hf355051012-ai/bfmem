@@ -1,2 +1,2 @@
 /* make vxcheck 用の仮のヘッダ。 */
-unsigned long tickGet(void);
+UINT64 tick64Get(void);

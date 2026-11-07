@@ -43,28 +43,6 @@
       ]
     },
     {
-      "func": "bfm_port_cache_flush",
-      "summary": "CPU が書いたものを NIC が読む前のキャッシュの操作。x86 は NIC と CPU のキャッシュが一貫しているので何もしない。",
-      "args": {"p": "範囲の先頭(使わない)", "len": "範囲の大きさ(バイト。使わない)"},
-      "ret": "なし",
-      "pre": "特になし。",
-      "notes": "特になし。",
-      "flow": [
-        {"do": "何もしない"}
-      ]
-    },
-    {
-      "func": "bfm_port_cache_inval",
-      "summary": "NIC が書いたものを CPU が読む前のキャッシュの操作。x86 は NIC と CPU のキャッシュが一貫しているので何もしない。",
-      "args": {"p": "範囲の先頭(使わない)", "len": "範囲の大きさ(バイト。使わない)"},
-      "ret": "なし",
-      "pre": "特になし。",
-      "notes": "特になし。",
-      "flow": [
-        {"do": "何もしない"}
-      ]
-    },
-    {
       "func": "vfio_open_device",
       "summary": "PCI アドレス `bdf` の装置を VFIO で掴む。sysfs の `iommu_group` からグループ番号を読み、`/dev/vfio/vfio`(コンテナ)と `/dev/vfio/<グループ>` を開いて Type1 IOMMU を設定し、装置の fd を取る。あわせて設定空間と BAR0 の領域の位置(`s_cfg_off`・`s_bar0_vfio_off`)と BAR0 の大きさ(`s_bar0_size`)を読む。",
       "args": {"bdf": "装置の PCI アドレス(`\"0000:01:00.0\"` の形)"},

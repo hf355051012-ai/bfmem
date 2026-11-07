@@ -25,9 +25,9 @@
 #define BFM_GSI_CQ_LOG   8u
 #define BFM_GSI_SQ_LOG   6u     /* 64 WQEBB。UD の SEND は 1 個 2 WQEBB */
 #define BFM_GSI_RQ_LOG   8u     /* 256 x 16B */
-#define BFM_GSI_RX_SLOT  512u   /* 受信 1 枠(GRH 40 + MAD 256 が入る)*/
+#define BFM_GSI_RX_SLOT  128u   /* 受信 1 枠(GRH 40 + メッセージ 64 が入る)*/
 #define BFM_GSI_PREPOST  64u    /* GSI に投稿しておく受信の数 */
-#define BFM_GSI_TXBUFS   16u    /* 送る MAD の置き場(順に使い回す)*/
+#define BFM_GSI_TXBUFS   16u    /* 送るメッセージの置き場(順に使い回す)*/
 #define BFM_MBOX_BLOCKS  9u     /* メールボックスの鎖の長さ(16 + 9 x 512 = 4624 バイトまで)*/
 #define BFM_MBOX_STRIDE  1024u
 #define BFM_WQE_MAX      256u   /* 1 個の WQE の上限(= BlueFlame の窓 1 面)*/
@@ -155,7 +155,6 @@ typedef struct {
     uint8_t  qp_ts_format;           /* QPC の ts_format に書く値 */
     uint16_t atomic_ops, atomic_size_qp;
     uint8_t  atomic_mode;            /* QPC の atomic_mode(0 = 相手からの atomic を受けない)*/
-    uint8_t  atomic_host_order;      /* 1 = atomic の値をホストのバイト順で扱う設定になった */
 
     /* 資源 */
     uint32_t eq_uarn, eqn, eq_cc;
@@ -223,10 +222,10 @@ struct bfm_conn {
     uint8_t  path_mtu;
     uint8_t  peer_rr;                /* 相手が受け付ける同時 read / atomic の数 */
 
-    /* CM */
-    uint32_t local_comm_id, remote_comm_id;
-    uint64_t tid;
-    uint16_t port;
+    /* 接続の確立(bfm_cm.c)*/
+    uint32_t local_id, peer_id;      /* 接続を見分ける乱数(0 = まだ無い)*/
+    uint16_t port;                   /* 待ち受けの番号 */
+    uint8_t  got_rep;                /* 掛け側: REP を受け取った */
 };
 
 extern struct bfm_conn g_bfm_conn[BFM_MAX_CONN];

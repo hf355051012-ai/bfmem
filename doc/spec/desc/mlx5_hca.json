@@ -100,13 +100,13 @@
     },
     {
       "func": "set_host_endianness",
-      "summary": "`HOST_ENDIANNESS` のレジスタに CPU のバイト順を書く(Linux の `set_hca_ctrl()` と同じ)。ビッグエンディアンの CPU なら byte 0 を 0x80、リトルエンディアンなら 0x00 にする。",
+      "summary": "`HOST_ENDIANNESS` のレジスタに CPU のバイト順を書く(Linux の `set_hca_ctrl()` と同じ)。x86-64 はリトルエンディアンなので、16 バイトを全部 0 にして書く。",
       "args": {"d": "装置"},
       "ret": "`access_reg()` の戻り値。",
       "pre": "boot のページを渡した後であること。",
-      "notes": "バイト順は `BFM_HOST_BIG_ENDIAN` で決まる(コンパイル時)。",
+      "notes": "特になし。",
       "flow": [
-        {"do": "data[16] を 0 で埋め、data[0] = BFM_HOST_BIG_ENDIAN ? 0x80 : 0x00"},
+        {"do": "data[16] を 0 で埋める"},
         {"call": "access_reg(d, MLX5_REG_HOST_ENDIANNESS, 0, data, \"ACCESS_REG(HOST_ENDIANNESS)\") を呼ぶ"},
         {"return": "access_reg() の戻り値"}
       ]
@@ -167,28 +167,24 @@
     },
     {
       "func": "setup_atomic_caps",
-      "summary": "atomic の能力を読み、対応する演算(`atomic_ops`)と大きさ(`atomic_size_qp`)を `d` に入れる。`g_bfm_atomic_host_endian` が 0 以外で、8 バイトの atomic をホストのバイト順で扱えて、まだそうなっていなければ、その設定(`atomic_req_8B_endianness_mode` = 1)を書いて読み直す(Linux の `handle_hca_cap_atomic()` と同じ)。あわせて `atomic_host_order` と QP の `atomic_mode` を決める(Linux の `get_atomic_mode()` と同じ規則。拡張 atomic があれば対応する最大の大きさの log2(3 未満なら 3)、なければ標準の CS / FA の両方に対応していれば 1)。",
+      "summary": "atomic の能力を読み、対応する演算(`atomic_ops`)と大きさ(`atomic_size_qp`)を `d` に入れる。8 バイトの atomic をまだホストのバイト順で扱う設定になっていなければ、その設定(`atomic_req_8B_endianness_mode` = 1)を `SET_HCA_CAP` で書く(Linux の `handle_hca_cap_atomic()` と同じ)。その設定に対応していない装置は断る。あわせて QP の `atomic_mode` を決める(Linux の `get_atomic_mode()` と同じ規則。拡張 atomic があれば対応する最大の大きさの log2(3 未満なら 3)、なければ標準の CS / FA の両方に対応していれば 1)。",
       "args": {"d": "装置"},
-      "ret": "`BFM_OK`: 設定した(atomic の能力が読めなかったときも)。`BFM_E_HW`: バイト順の設定の書き込み、または読み直しに失敗した。",
+      "ret": "`BFM_OK`: 設定した。`BFM_E_HW`: atomic の能力が読めない、装置が atomic をホストのバイト順にできない、またはバイト順の設定の書き込みに失敗した。",
       "pre": "`setup_general_caps()` の後で、`INIT_HCA` の前であること。",
-      "notes": "* atomic の能力が読めなければ `atomic_mode` を 0 にして `BFM_OK` を返す(相手からの atomic は受けない)。\n* `atomic_host_order` は、バイト順の設定が 1 か、CPU がビッグエンディアンなら 1。\n* 8 バイトの CAS と FAA の両方に対応していなければ注意を表示する。",
+      "notes": "* atomic の元の値は中継バッファからホスト順として読む(`atomic_result()`)ので、ホストのバイト順にできない装置は使えない。\n* 能力の byte 8 のビット 1(`supported_atomic_req_8B_endianness_mode_1`)が 0 なら、表示して `BFM_E_HW` を返す。\n* 書いた後に読み直さない。\n* 8 バイトの CAS と FAA の両方に対応していなければ注意を表示する(失敗にはしない)。",
       "flow": [
         {"call": "query_cap(d, MLX5_CAP_ATOMIC, \"QUERY_HCA_CAP(atomic)\") を呼ぶ"},
-        {"if": "query_cap() != BFM_OK ?", "then": [
-          {"do": "BFM_LOG で「相手からの atomic は受けない」を表示"},
-          {"do": "d->atomic_mode = 0"},
-          {"return": "BFM_OK"}
-        ]},
-        {"do": "d->atomic_ops = 能力の byte 18〜19、d->atomic_size_qp = 能力の byte 22〜23、can_host = 能力の byte 8 のビット 1"},
-        {"if": "g_bfm_atomic_host_endian かつ can_host かつ 能力の byte 8 の上位 2 ビット != 1 ?", "then": [
+        {"if": "query_cap() != BFM_OK ?", "then": [{"return": "BFM_E_HW"}]},
+        {"do": "c = &s_cap_out[16]。d->atomic_ops = 能力の byte 18〜19、d->atomic_size_qp = 能力の byte 22〜23"},
+        {"if": "能力の byte 8 の上位 2 ビット != 1(まだホスト順の設定でない)?", "then": [
+          {"if": "能力の byte 8 のビット 1 が 0(ホスト順に対応していない)?", "then": [
+            {"do": "BFM_LOG で「この装置は atomic をホストのバイト順にできない」を表示"},
+            {"return": "BFM_E_HW"}
+          ]},
           {"do": "能力の byte 8 の上位 2 ビットを 1 にする"},
           {"call": "set_cap(d, MLX5_CAP_ATOMIC, \"SET_HCA_CAP(atomic)\") を呼ぶ"},
-          {"if": "set_cap() != BFM_OK ?", "then": [{"return": "BFM_E_HW"}]},
-          {"call": "query_cap(d, MLX5_CAP_ATOMIC, \"QUERY_HCA_CAP(atomic)\") を呼ぶ"},
-          {"if": "query_cap() != BFM_OK ?", "then": [{"return": "BFM_E_HW"}]},
-          {"do": "c = &s_cap_out[16](読み直した能力)"}
+          {"if": "set_cap() != BFM_OK ?", "then": [{"return": "BFM_E_HW"}]}
         ]},
-        {"do": "d->atomic_host_order = (byte 8 の上位 2 ビット == 1) または BFM_HOST_BIG_ENDIAN"},
         {"do": "mode = 0"},
         {"if": "d->atomic_ops AND 0x0c(拡張 CS / 拡張 FA がある)?", "then": [
           {"do": "m = d->atomic_size_qp AND 0x1ff"},
@@ -267,7 +263,7 @@
     },
     {
       "func": "mlx5_cq_create",
-      "summary": "`CREATE_CQ` で CQ を作る。CQE は 64 バイトで `2^log_n` 個。CQE は全部「まだ書かれていない」(opcode = `MLX5_CQE_INVALID`、owner = 0)にし、ドアベルのレコードを 0 にしてキャッシュから書き出してから、CQ の文脈(大きさ・UAR・EQ・ドアベルのレコードのアドレス)と各ページの物理アドレスを渡す。",
+      "summary": "`CREATE_CQ` で CQ を作る。CQE は 64 バイトで `2^log_n` 個。CQE は全部「まだ書かれていない」(opcode = `MLX5_CQE_INVALID`、owner = 0)にし、ドアベルのレコードを 0 にしてから、CQ の文脈(大きさ・UAR・EQ・ドアベルのレコードのアドレス)と各ページの物理アドレスを渡す。",
       "args": {"d": "装置", "uarn": "CQ に結びつける UAR の番号", "buf": "CQE の緩衝(DMA 領域。4KiB のページの並び)", "log_n": "CQE の数の log2", "dbr": "ドアベルのレコード(DMA 領域。8 バイト)", "cqn": "[出力] CQ の番号"},
       "ret": "`BFM_OK`: 作れた。`BFM_E_PARAM`: `log_n` が 10 を超える(緩衝が 16 ページを超える)。そのほか `mlx5_cmd()` の戻り値。",
       "pre": "`d->eqn` が作ってあること(`mlx5_eq_create()` の後)。`buf` が `2^log_n` × 64 バイト以上あること。",
@@ -281,7 +277,6 @@
           {"do": "i++"}
         ]},
         {"do": "dbr[0] = 0、dbr[1] = 0"},
-        {"call": "bfm_port_cache_flush(buf, nent × 64) と bfm_port_cache_flush(dbr, 8) を呼ぶ"},
         {"do": "in(272 + 16 × 8 バイト)を 0 で埋め、byte 0 に MLX5_CMD_CREATE_CQ を書く"},
         {"call": "cqc(in の byte 16 から)に log_cq_size = log_n、uar_page = uarn、c_eqn = d->eqn、log_page_size = 0、dbr_addr = bfm_dma_addr(dbr) を書く"},
         {"do": "p = 0"},

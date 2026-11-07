@@ -61,7 +61,6 @@ static const char *syndrome_str(uint8_t synd)
 static int poll_one(struct bfm_conn *c)
 {
     volatile uint8_t *cqe = c->qp.cq + (c->qp.cq_cc & (CQ_N - 1u)) * 64u;
-    bfm_port_cache_inval(cqe, 64u);
     const uint8_t op_own = cqe[63];
     if ((op_own & 1u) != ((c->qp.cq_cc >> BFM_RC_CQ_LOG) & 1u) || (op_own >> 4) == MLX5_CQE_INVALID) return 0;
     bfm_rmb();
@@ -121,14 +120,12 @@ static int post(struct bfm_conn *c, const uint64_t *w, uint32_t bbs)
     for (uint32_t b = 0; b < bbs; b++) {
         volatile uint64_t *dst = (volatile uint64_t *)(volatile void *)(c->qp.sq + ((pc + b) & (SQ_N - 1u)) * MLX5_SEND_WQE_BB);
         for (unsigned k = 0; k < 8u; k++) dst[k] = w[b * 8u + k];
-        bfm_port_cache_flush(dst, MLX5_SEND_WQE_BB);
     }
     c->wqe_bbs[pc & (SQ_N - 1u)] = (uint8_t)bbs;
     c->qp.sq_pc = pc + bbs;
 
     bfm_dma_wmb();
     c->qp.dbr[1] = bfm_cpu_to_be32(c->qp.sq_pc & 0xffffu);
-    bfm_port_cache_flush(c->qp.dbr, 8u);
     bfm_dma_wmb();
     if (c->bf != NULL && bbs * MLX5_SEND_WQE_BB <= g_bfm.bf_buf_size) {
         volatile uint64_t *reg = (volatile uint64_t *)(volatile void *)(c->bf + c->bf_off);
@@ -273,7 +270,6 @@ int bfm_write(bfm_conn_t *c, uint64_t off, const void *src, uint32_t len)
     while (len > 0) {
         const uint32_t n = (len > c->stage_size) ? c->stage_size : len;
         memcpy((void *)(uintptr_t)c->stage, s, n);
-        bfm_port_cache_flush(c->stage, n);
         memset(w, 0, 64);
         build_ctrl(c, w, MLX5_OPCODE_RDMA_WRITE, 3u, 1);
         build_raddr(c, w, off);
@@ -334,7 +330,6 @@ int bfm_read(bfm_conn_t *c, uint64_t off, void *dst, uint32_t len)
         if (c->last_scat != NULL && n <= SCAT_MAX) {
             for (uint32_t i = 0; i < n; i++) d[i] = c->last_scat[i];
         } else {
-            bfm_port_cache_inval(c->stage, n);
             memcpy(d, (const void *)(uintptr_t)c->stage, n);
         }
         d += n;
@@ -345,24 +340,14 @@ int bfm_read(bfm_conn_t *c, uint64_t off, void *dst, uint32_t len)
 }
 
 /* atomic の元の値(8 バイト)を数にする。
- * **CQE に入って返った値は、HCA の設定によらずビッグエンディアン**(ConnectX-4 Lx で確認。
- * Linux の libmlx5 から見ても同じ)。メモリへ書かれた値は、HCA がホスト順の設定ならホスト順、
- * そうでなければビッグエンディアン。 */
+ * **CQE に入って返った値は、HCA の設定によらずビッグエンディアン**(ConnectX-4 Lx で確認)。
+ * 中継バッファへ書かれた値は、HCA をホスト順に設定してあるのでホスト順。 */
 static uint64_t atomic_result(struct bfm_conn *c)
 {
-    uint8_t raw[8];
-    if (c->last_scat != NULL) {
-        for (unsigned i = 0; i < 8u; i++) raw[i] = c->last_scat[i];
-        return bfm_rd64be(raw);
-    }
-    bfm_port_cache_inval(c->stage, 8u);
-    memcpy(raw, (const void *)(uintptr_t)c->stage, 8);
-    if (g_bfm.atomic_host_order) {
-        uint64_t v;
-        memcpy(&v, raw, 8);
-        return v;
-    }
-    return bfm_rd64be(raw);
+    if (c->last_scat != NULL) return bfm_rd64be(c->last_scat);
+    uint64_t v;
+    memcpy(&v, (const void *)(uintptr_t)c->stage, 8);   /* HCA がホスト順で書く */
+    return v;
 }
 
 static int atomic_op(struct bfm_conn *c, uint32_t opcode, uint64_t off, uint64_t swap_add,

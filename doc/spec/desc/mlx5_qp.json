@@ -37,7 +37,7 @@
     },
     {
       "func": "mlx5_qp_create",
-      "summary": "QP を作る。\n\n* RQ・SQ の大きさを検査し、WQ のページ数を数える(切り上げ)。\n* 送受信で共有する CQ を作る(`mlx5_cq_create()`)。\n* WQ(RQ の直後に SQ)とドアベルのレコードを 0 で埋めて書き戻す。`qp->sq` を SQ の先頭にする。\n* `CREATE_QP` を出す。QPC には st・pd・mtu(1024。後で変える)と log_msg_max(20)・RQ と SQ の大きさ・ts_format・uar_page・送受信の cqn・dbr_addr・rq_type(通常)・cs_req を入れ、WQ の各ページの物理アドレスを並べる。\n* 返った QPN を `qp->qpn` に入れ、生産位置を 0 にし、自分の開始 PSN を時刻から決める。",
+      "summary": "QP を作る。\n\n* RQ・SQ の大きさを検査し、WQ のページ数を数える(切り上げ)。\n* 送受信で共有する CQ を作る(`mlx5_cq_create()`)。\n* WQ(RQ の直後に SQ)とドアベルのレコードを 0 で埋める。`qp->sq` を SQ の先頭にする。\n* `CREATE_QP` を出す。QPC には st・pd・mtu(1024。後で変える)と log_msg_max(20)・RQ と SQ の大きさ・ts_format・uar_page・送受信の cqn・dbr_addr・rq_type(通常)・cs_req を入れ、WQ の各ページの物理アドレスを並べる。\n* 返った QPN を `qp->qpn` に入れ、生産位置を 0 にし、自分の開始 PSN を時刻から決める。",
       "args": {
         "d": "デバイスの状態",
         "qp": "QP(`rq_log` / `sq_log` / `cq_log` / `wq` / `dbr` / `cq` / `cq_dbr` / `uarn` は呼び出し側が埋めておく)",
@@ -54,7 +54,7 @@
         {"call": "rc = mlx5_cq_create(d, qp->uarn, qp->cq, qp->cq_log, qp->cq_dbr, &qp->cqn) を呼ぶ"},
         {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
         {"do": "qp->has_cq = 1、qp->cq_cc = 0"},
-        {"do": "qp->sq = qp->wq + rq_bytes。WQ と dbr[0..1] を 0 で埋め、bfm_port_cache_flush() で書き戻す"},
+        {"do": "qp->sq = qp->wq + rq_bytes。WQ と dbr[0..1] を 0 で埋める"},
         {"do": "入力を 0 で埋め、opcode = CREATE_QP と QPC の各欄(st・pd・mtu と log_msg_max・log_rq_size・log_sq_size・ts_format・uar_page・cqn_snd・cqn_rcv・dbr_addr・rq_type・cs_req)を書く"},
         {"do": "WQ の各ページの物理アドレスを入力の 272 バイト目以降に並べる"},
         {"call": "rc = mlx5_cmd(d, in, 272 + npages x 8, out, 16, \"CREATE_QP\") を呼ぶ"},

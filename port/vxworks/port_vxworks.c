@@ -1,21 +1,18 @@
-/* 移植層: VxWorks(論理アドレス = 物理アドレス)。
+/* 移植層: x86-64 の VxWorks(論理アドレス = 物理アドレス)。
  *
  * **この版は未検証(VxWorks の機材で動かしていない)。** 使う VxWorks の API は
- * printf・tickGet・sysClkRateGet・taskDelay・cacheFlush・cacheInvalidate だけにしてある。
+ * printf・tick64Get・sysClkRateGet・taskDelay だけにしてある。
  *
  * 前提(BSP 側で用意すること):
- *   - g_bfm_dma_* と g_bfm_mr_* の物理メモリが OS に使われず、論理 = 物理で張られていること
- *     (NIC と CPU のキャッシュが一貫しない CPU では、キャッシュしない属性で張るか、
- *      BFM_VX_CACHE_OPS を定義して cacheFlush / cacheInvalidate を使う)。
+ *   - g_bfm_dma_* と g_bfm_mr_* の物理メモリが OS に使われず、論理 = 物理・ライトバックで
+ *     張られていること(x86 の DMA はキャッシュと一貫しているので、キャッシュの操作は要らない)。
  *   - BAR0(g_bfm_bar0_addr から BAR0 の大きさぶん)が論理 = 物理・キャッシュしない属性で
  *     張られていること。
- *   - BlueFlame を使うなら、BAR0 全体を write-combining で張った別名を用意し、その先頭を
- *     g_bfm_bar0_wc_va に入れること(x86 なら PAT の WC、ARM64 なら Normal-NC か
- *     Device-GRE)。無ければ 8 バイトのドアベルだけで動く。
+ *   - BlueFlame を使うなら、BAR0 全体を write-combining(PAT の WC)で張った別名を用意し、
+ *     その先頭を g_bfm_bar0_wc_va に入れること。無ければ 8 バイトのドアベルだけで動く。
  *   - g_bfm_cpu_awake はこの版では何もしない。相手からの read / atomic の遅延を抑えるには、
  *     BIOS / BSP で CPU の深い C-state(パッケージの C-state、C1E など)を止めること。
- *   - PCIe の設定空間は ECAM(g_bfm_pcie_ecam_base)を直接読み書きする。ECAM が無い機材では
- *     BFM_VX_PCI_LIB を定義して pciConfigLib(pciConfigInLong / pciConfigOutLong)を使う。 */
+ *   - PCIe の設定空間は ECAM(g_bfm_pcie_ecam_base)を直接読み書きする。 */
 #include "bfm_port.h"
 #include "bfm_config.h"
 
@@ -25,10 +22,6 @@
 #include <tickLib.h>
 #include <sysLib.h>
 #include <taskLib.h>
-#include <cacheLib.h>
-#ifdef BFM_VX_PCI_LIB
-#include <drv/pci/pciConfigLib.h>
-#endif
 
 void bfm_port_log(const char *fmt, ...)
 {
@@ -38,19 +31,11 @@ void bfm_port_log(const char *fmt, ...)
     va_end(ap);
 }
 
-/* 分解能は 1 tick(時間切れの判定にしか使わない)。
- * tickGet() が 32bit の版では一周して 0 に戻る(1000Hz で約 50 日)ので、下位 32bit が
- * 前より小さくなったら上位に 1 を足して 64bit に伸ばす(一周の間に 1 回以上呼ばれる前提。
- * 呼ぶのは bfm_init() と同じタスクだけ)。 */
+/* 分解能は 1 tick(時間切れの判定にしか使わない)。tick64Get() は 64bit なので一周しない。 */
 uint64_t bfm_port_time_ns(void)
 {
-    static uint32_t s_last;
-    static uint64_t s_high;
-    const uint32_t now = (uint32_t)tickGet();
-    if (now < s_last) s_high += 1ull << 32;
-    s_last = now;
     const uint64_t hz = (uint64_t)sysClkRateGet();
-    return (s_high + now) * (1000000000ull / (hz ? hz : 60u));
+    return (uint64_t)tick64Get() * (1000000000ull / (hz ? hz : 60u));
 }
 
 void bfm_port_delay_us(uint32_t us)
@@ -61,34 +46,12 @@ void bfm_port_delay_us(uint32_t us)
     (void)taskDelay((int)ticks);
 }
 
-void bfm_port_cache_flush(const volatile void *p, size_t len)
-{
-#ifdef BFM_VX_CACHE_OPS
-    (void)cacheFlush(DATA_CACHE, (void *)(uintptr_t)p, len);
-#else
-    (void)p;
-    (void)len;
-#endif
-}
-
-void bfm_port_cache_inval(const volatile void *p, size_t len)
-{
-#ifdef BFM_VX_CACHE_OPS
-    (void)cacheInvalidate(DATA_CACHE, (void *)(uintptr_t)p, len);
-#else
-    (void)p;
-    (void)len;
-#endif
-}
-
 int bfm_port_init(void)
 {
-#ifndef BFM_VX_PCI_LIB
     if (g_bfm_pcie_ecam_base == 0) {
-        bfm_port_log("port: g_bfm_pcie_ecam_base が 0(ECAM の位置を入れるか、BFM_VX_PCI_LIB で作り直すこと)\n");
+        bfm_port_log("port: g_bfm_pcie_ecam_base が 0(ECAM の位置を入れること)\n");
         return -1;
     }
-#endif
     return 0;
 }
 
@@ -96,36 +59,23 @@ void bfm_port_fini(void)
 {
 }
 
-#ifndef BFM_VX_PCI_LIB
 static volatile uint32_t *ecam(uint32_t off)
 {
     const uint64_t a = g_bfm_pcie_ecam_base + ((uint64_t)g_bfm_pci_bus << 20) +
                        ((uint64_t)g_bfm_pci_dev << 15) + ((uint64_t)g_bfm_pci_func << 12) + (off & 0xffcu);
     return (volatile uint32_t *)(uintptr_t)a;
 }
-#endif
 
-/* 設定空間はリトルエンディアン。ECAM の読み書きもリトルエンディアンの 32bit として扱う。 */
+/* 設定空間はリトルエンディアンなので、x86 ではそのまま読み書きできる。 */
 uint32_t bfm_port_pci_read32(uint32_t off)
 {
-#ifdef BFM_VX_PCI_LIB
-    UINT32 v = 0xffffffffu;
-    (void)pciConfigInLong((int)g_bfm_pci_bus, (int)g_bfm_pci_dev, (int)g_bfm_pci_func, (int)off, &v);
-    return v;
-#else
-    const uint32_t v = *ecam(off);
-    return BFM_HOST_BIG_ENDIAN ? bfm_bswap32(v) : v;
-#endif
+    return *ecam(off);
 }
 
 void bfm_port_pci_write32(uint32_t off, uint32_t val)
 {
-#ifdef BFM_VX_PCI_LIB
-    (void)pciConfigOutLong((int)g_bfm_pci_bus, (int)g_bfm_pci_dev, (int)g_bfm_pci_func, (int)off, val);
-#else
-    *ecam(off) = BFM_HOST_BIG_ENDIAN ? bfm_bswap32(val) : val;
+    *ecam(off) = val;
     bfm_mb();
-#endif
 }
 
 static uint64_t s_bar_size;   /* bfm_port_bar0_wc() の範囲の検査に使う */

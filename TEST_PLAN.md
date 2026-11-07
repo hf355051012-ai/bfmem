@@ -2,6 +2,10 @@
 
 試験の手順の正本はこの文書。結果は各段階の「記録」に書き足す。
 
+**今の手順は最後の「bfmem どうしの試験」。** 2026-11-07 に、相手を常に bfmem とする前提で接続の手順を
+bfmem だけのもの(REQ / REP / BYE)に作り直し、Linux の相手(`tools/bfm_peer.c`、librdmacm)は消した。
+段階 0〜5 と「調査」は、作り直す前(IB CM で Linux の相手と繋いでいたころ)の記録として残している。
+
 ## 前提(2026-11-07 に読んだ状態)
 
 | | OptiPlex(`rpi5-rdma-target`)| Precision(`p5820`)|
@@ -276,3 +280,40 @@ FAA は Linux どうし(受け側 Precision)の 1,761ns と同じところまで
   `bfm_peer -n 0` は断り(戻り値 2)、server が居ないときは UNREACHABLE を表示して止まらずに終わった。
 - 性能(各 10,000 回、MTU 1500): 80 通り全部が流れ、値は BENCH.md と同じ(write / read とも 8KiB 以上で約 2.89 GB/s)。
 - 終わった後、OptiPlex は mlx5_core に戻した。
+
+## bfmem どうしの試験(今の手順)
+
+相手は常に bfmem なので、**両方の機械の ConnectX を vfio-pci にして bfmem_test を動かす**。
+Precision の PF0(`0000:b3:00.0`)は単独の IOMMU グループ(2)なので、それだけを vfio-pci にすればよい
+(ssh は別の NIC `eno1` を通るので切れない)。近隣表・経路の設定は要らない(どちらも ARP を使わない)。
+
+```bash
+# 両方: ビルドして vfio-pci にする(OptiPlex は 01:00.0 と 01:00.1、Precision は b3:00.0)
+make
+echo vfio-pci | sudo tee /sys/bus/pci/devices/<BDF>/driver_override
+echo <BDF> | sudo tee /sys/bus/pci/devices/<BDF>/driver/unbind
+echo <BDF> | sudo tee /sys/bus/pci/drivers_probe
+
+# Precision(受け側)
+sudo build/bfmem_test -d 0000:b3:00.0 -i 192.168.101.21 server
+# OptiPlex(掛け側)。"" / -B / -x の 3 通り
+sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 client 192.168.101.21 b8:ce:f6:73:bf:7e
+
+# 役割を入れ替える: OptiPlex で server、Precision で client(と bench)
+sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 server
+sudo build/bfmem_test -d 0000:b3:00.0 -i 192.168.101.21 client 192.168.101.11 b8:3f:d2:1c:eb:81
+sudo build/bfmem_test -d 0000:b3:00.0 -i 192.168.101.21 -n 10000 bench 192.168.101.11 b8:3f:d2:1c:eb:81
+```
+
+終わったら driver_override を空にして unbind / drivers_probe で mlx5_core に戻す(段階 5 と同じ)。
+
+- 合格: client の `[1]`〜`[6]`(`-x` では `[7]` も)が全部 OK。client の「模型の hash」と、server が切断のときに
+  出す hash が同じ。server が `相手が接続 0 を切った` を出す(BYE が届いている)。
+
+記録(2026-11-07、作り直した直後): **合格。**
+- Precision でも bfmem が立ち上がった(FW 14.29.1016、FW ページ 7,841、atomic_mode 5)。
+- OptiPlex → Precision: 通常 / `-B` / `-x` の 3 通りとも NG 0、hash は両側で `e92cdeb4e6b0c81d`。
+  server は 3 回とも BYE を受けて閉じた(`-x` の回は先に範囲外の読みで WQ_ACCESS_ERROR になった)。
+  遅延(中央値): write 8B 1,335ns / read 8B 1,644ns / FAA 1,638ns(BlueFlame なしでは 1,702 / 1,961 / 1,952ns)。
+- Precision → OptiPlex: 通常 / `-x` とも NG 0、hash 一致。bench(各 1 万回)は 8KiB 以上で約 2.89 GB/s と前と同じ。
+- 終わった後、両方とも mlx5_core に戻した(Precision の `ens1f0np0` には 192.168.101.21 を付け直した)。

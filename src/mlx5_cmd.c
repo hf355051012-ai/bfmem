@@ -91,7 +91,6 @@ int mlx5_cmd(bfm_dev_t *d, const uint8_t *in, uint32_t inlen, uint8_t *out, uint
         for (uint32_t i = 0; i < n; i++) m[MBOX_DATA + i] = in[from + i];
         bfm_wr32be(m + MBOX_BLOCK_NUM, b);
         if (b + 1u < in_blocks) bfm_wr64be(m + MBOX_NEXT, bfm_dma_addr(mbox_in(d, b + 1u)));
-        bfm_port_cache_flush(m, MBOX_SIZE);
     }
     if (in_blocks) bfm_wr64be(e + CMD_IN_PTR, bfm_dma_addr(mbox_in(d, 0)));
     bfm_wr32be(e + CMD_INLEN, inlen);
@@ -102,20 +101,17 @@ int mlx5_cmd(bfm_dev_t *d, const uint8_t *in, uint32_t inlen, uint8_t *out, uint
         for (unsigned i = 0; i < MBOX_SIZE; i++) m[i] = 0;
         bfm_wr32be(m + MBOX_BLOCK_NUM, b);
         if (b + 1u < out_blocks) bfm_wr64be(m + MBOX_NEXT, bfm_dma_addr(mbox_out(d, b + 1u)));
-        bfm_port_cache_flush(m, MBOX_SIZE);
     }
     if (out_blocks) bfm_wr64be(e + CMD_OUT_PTR, bfm_dma_addr(mbox_out(d, 0)));
     bfm_wr32be(e + CMD_OUTLEN, outlen);
     e[CMD_TYPE] = CMD_XPORT_PCI;
     e[CMD_STATUS_OWN] = 0x1u;        /* 持ち主を FW へ */
-    bfm_port_cache_flush(e, CMD_ENTRY_SIZE);
     bfm_mb();
     bfm_mmio_wr32be(d->bar0, MLX5_ISEG_CMD_DBELL, 1u);   /* entry 0 */
 
     const uint16_t opcode = (uint16_t)(((uint16_t)in[0] << 8) | in[1]);
     const uint64_t t0 = bfm_port_time_ns();
     for (;;) {
-        bfm_port_cache_inval(e, CMD_ENTRY_SIZE);
         if (!(e[CMD_STATUS_OWN] & 0x1u)) break;
         if (bfm_port_time_ns() - t0 > (uint64_t)CMD_TIMEOUT_MS * 1000000u) {
             BFM_LOG("bfm: %s (opcode 0x%x): FW が %u ms 待っても答えない\n", what, opcode, CMD_TIMEOUT_MS);
@@ -131,7 +127,6 @@ int mlx5_cmd(bfm_dev_t *d, const uint8_t *in, uint32_t inlen, uint8_t *out, uint
     for (uint32_t i = 0; i < 16u && i < outlen; i++) out[i] = e[CMD_OUT + i];
     for (uint32_t b = 0; b < out_blocks; b++) {
         volatile uint8_t *m = mbox_out(d, b);
-        bfm_port_cache_inval(m, MBOX_SIZE);
         const uint32_t from = 16u + b * 512u;
         const uint32_t n = (outlen - from > 512u) ? 512u : outlen - from;
         for (uint32_t i = 0; i < n; i++) out[from + i] = m[MBOX_DATA + i];
@@ -224,7 +219,6 @@ int mlx5_eq_create(bfm_dev_t *d)
     d->eq_buf = (volatile uint8_t *)bfm_mem_alloc(bytes, BFM_PAGE);
     if (d->eq_buf == NULL) return BFM_E_NOMEM;
     for (uint32_t i = 0; i < nent; i++) d->eq_buf[i * EQE_SIZE + EQE_SIZE - 1u] = 1u;  /* owner の初期値 */
-    bfm_port_cache_flush(d->eq_buf, bytes);
 
     int rc = mlx5_alloc_uar(d, &d->eq_uarn);
     if (rc != BFM_OK) return rc;
@@ -275,7 +269,6 @@ int mlx5_eq_poll(bfm_dev_t *d)
     int page_req = 0;
     while (n < (int)nent) {
         volatile uint8_t *e = d->eq_buf + (d->eq_cc & (nent - 1u)) * EQE_SIZE;
-        bfm_port_cache_inval(e, EQE_SIZE);
         const uint8_t want = (d->eq_cc & nent) ? 1u : 0u;
         if ((e[EQE_SIZE - 1u] & 1u) != want) break;
         bfm_rmb();

@@ -62,8 +62,7 @@ uint32_t g_bfm_link_wait_ms = 10000u;
 
 uint32_t g_bfm_bf_enable          = 1u;
 uint32_t g_bfm_scatter_cqe        = 1u;
-uint32_t g_bfm_atomic_host_endian = 1u;
-uint8_t  g_bfm_ack_timeout        = 17u;            /* 約 0.54 秒(Linux の rdma_cm と同じ)*/
+uint8_t  g_bfm_ack_timeout        = 17u;            /* 約 0.54 秒 */
 uint8_t  g_bfm_retry_count        = 7u;
 uint32_t g_bfm_op_timeout_ms      = 5000u;
 uint32_t g_bfm_signal_every       = 32u;

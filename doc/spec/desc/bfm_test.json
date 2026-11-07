@@ -1,6 +1,6 @@
 {
   "file": "test/bfm_test.c",
-  "summary": "試験プログラム `bfmem_test`(Linux + VFIO)。動きはコマンドの引数で選ぶ。\n\n* `server`: 受け側。公開メモリを決まった模様で埋めて接続を待ち、Ctrl-\\(SIGQUIT)か切断のときにデータ領域の hash を表示する。\n* `client <IP> <MAC>`: 掛け側。相手の公開メモリへ read / write / write_post / atomic を一通り出して手元の模型と突き合わせ、遅延と速さを測る。\n* `bench <IP> <MAC>`: write / read を 4B〜256KiB、多重度 1・4・8・16 で流し、IOPS・MB/s・平均遅延を表示する。\n* `info`: 立ち上げて HCA の能力を表示するだけ。\n\n公開メモリの取り決め(server と `tools/bfm_peer.c` で同じ)は、先頭 64KiB がデータ領域(`(i * 7 + 3) & 0xff` で埋める)、その後ろ 4KiB が 8 バイトの atomic 語 512 個(0 で埋める)。",
+  "summary": "試験プログラム `bfmem_test`(Linux + VFIO)。動きはコマンドの引数で選ぶ。\n\n* `server`: 受け側。公開メモリを決まった模様で埋めて接続を待ち、Ctrl-\\(SIGQUIT)か切断のときにデータ領域の hash を表示する。\n* `client <IP> <MAC>`: 掛け側。相手の公開メモリへ read / write / write_post / atomic を一通り出して手元の模型と突き合わせ、遅延と速さを測る。\n* `bench <IP> <MAC>`: write / read を 4B〜256KiB、多重度 1・4・8・16 で流し、IOPS・MB/s・平均遅延を表示する。\n* `info`: 立ち上げて HCA の能力を表示するだけ。\n\n相手は別の機械で動かす同じプログラムの server(相手は常に bfmem)。\n\n公開メモリの取り決め(server が埋める)は、先頭 64KiB がデータ領域(`(i * 7 + 3) & 0xff` で埋める)、その後ろ 4KiB が 8 バイトの atomic 語 512 個(0 で埋める)。",
   "functions": [
     {
       "func": "on_sig",
@@ -32,7 +32,7 @@
       "args": {"i": "データ領域の中の位置(バイト)"},
       "ret": "その位置の初期値(1 バイト)。",
       "pre": "特になし。",
-      "notes": "server と `tools/bfm_peer.c` の埋め方と同じ式であること。",
+      "notes": "特になし。",
       "flow": [
         {"return": "(i * 7 + 3) & 0xff"}
       ]
@@ -311,10 +311,10 @@
     },
     {
       "func": "run_client",
-      "summary": "掛け側の本体。相手へ接続し、手元に公開メモリのデータ領域の模型を持って、次の検査をして結果を表示する。\n\n* [1] いろいろな長さ・半端な位置の read と 64KiB まとめての read\n* [2] inline に収まる長さと収まらない長さの write と読み戻し\n* [3] `bfm_write_post()` を 5000 回と `bfm_flush()` の後の読み戻し\n* [4] FAA と CAS の元の値の並び、相手のメモリの語の並び(エンディアン)\n* [5] データ領域全体の読み戻し\n* [6] 遅延(`lat()`)と `bfm_write_post()` の速さ、その後の読み戻し(ここまで NG が無いときだけ)\n* [7] 公開メモリの外の read を相手が断ること(oob のときだけ)\n\n最後に模型の hash を表示して接続を返す。",
+      "summary": "掛け側の本体。相手へ接続し、手元に公開メモリのデータ領域の模型を持って、次の検査をして結果を表示する。\n\n* [1] いろいろな長さ・半端な位置の read と 64KiB まとめての read\n* [2] inline に収まる長さと収まらない長さの write と読み戻し\n* [3] `bfm_write_post()` を 5000 回と `bfm_flush()` の後の読み戻し\n* [4] FAA と CAS の元の値の並び、相手のメモリの語 1 がホスト順の 1000 であること\n* [5] データ領域全体の読み戻し\n* [6] 遅延(`lat()`)と `bfm_write_post()` の速さ、その後の読み戻し(ここまで NG が無いときだけ)\n* [7] 公開メモリの外の read を相手が断ること(oob のときだけ)\n\n最後に模型の hash を表示して接続を返す。",
       "args": {"ip": "相手の IPv4 アドレス", "mac": "相手の MAC アドレス", "port": "接続の番号", "iters": "[6] の遅延の測定の回数", "oob": "0 以外なら [7] を行う"},
       "ret": "0: すべて OK。1: 接続できない、相手の公開メモリが小さい、または NG があった。",
-      "pre": "`bfm_init()` が済んでいること。相手が server か `tools/bfm_peer.c` で、公開メモリを取り決めどおりに埋めていること。",
+      "pre": "`bfm_init()` が済んでいること。相手が server で、公開メモリを取り決めどおりに埋めていること。",
       "notes": "* [7] は接続の構造体の `rlen` を一時的に書き換えて手元の範囲検査をすり抜ける。相手が断ると接続はエラーになる。\n* [4] で相手の atomic 語 0・1 を書き換える。[6] の測定はデータ領域の 64 か所と atomic 語 100〜163・200〜263 に触る。\n* 検査が NG でも次の検査へ進む([6] だけは飛ばす)。",
       "flow": [
         {"call": "c = bfm_connect(ip, mac, port, 0) を呼ぶ"},
@@ -419,26 +419,9 @@
           {"if": "bfm_cas() != BFM_OK、または old != 1000 ?", "then": [{"do": "ok = 0"}]}
         ]},
         {"call": "check(\"[4] CAS ...\", ok) を呼ぶ"},
-        {"call": "bfm_read(c, ATOM_OFF + 8, raw, 8) を呼ぶ"},
-        {"if": "bfm_read() == BFM_OK ?", "then": [
-          {"do": "le = (raw[0] == 0xe8 && raw[1] == 0x03)、be = (raw[7] == 0xe8 && raw[6] == 0x03)"},
-          {"if": "le ?", "then": [
-            {"do": "並びの表示を「リトルエンディアン(ホスト順)」にする"}
-          ], "else": [
-            {"if": "be ?", "then": [
-              {"do": "並びの表示を「ビッグエンディアン」にする"}
-            ], "else": [
-              {"do": "並びの表示を「?」にする"}
-            ]}
-          ]},
-          {"do": "raw の 8 バイトと並びを表示"},
-          {"if": "!le && !be ?", "then": [{"do": "g_ng++"}]}
-        ]},
-        {"if": "g_bfm.atomic_host_order ?", "then": [
-          {"do": "「atomic の元の値をホスト順で返す設定」を表示"}
-        ], "else": [
-          {"do": "「atomic の元の値をビッグエンディアンで返す設定」を表示"}
-        ]},
+        {"do": "v = 0"},
+        {"call": "bfm_read(c, ATOM_OFF + 8, &v, 8) を呼ぶ"},
+        {"call": "check(\"[4] 相手のメモリの語 1 がホスト順の 1000\", bfm_read() == BFM_OK && v == 1000) を呼ぶ"},
         {"call": "[5] rc = bfm_read(c, 0, buf, DATA_BYTES) を呼ぶ"},
         {"call": "check(\"[5] ...\", rc == BFM_OK && buf と g_model が一致) を呼ぶ"},
         {"if": "[6] !g_stop && g_ng == 0 ?", "then": [
@@ -571,7 +554,7 @@
       "args": {"ip": "相手の IPv4 アドレス", "mac": "相手の MAC アドレス", "port": "接続の番号", "n": "1 つの組で流す回数"},
       "ret": "0: すべて流し終えた。1: 接続できない、または `bench_one()` が失敗した。",
       "pre": "`bfm_init()` が済んでいて、`g_bfm_stage_size` が `BENCH_QD_MAX * BENCH_SIZE_MAX` であること(`main()` が設定する)。",
-      "notes": "* `bench_one()` が 1 回でも失敗したら残りの組を流さずに接続を返す。\n* 埋め込み(inline)でない write は中継バッファから送るので、流す前に中継バッファ全体を `0x5a ^ i` で埋めてキャッシュを書き戻しておく(内部の構造体の `stage` / `stage_size` を直接使う)。",
+      "notes": "* `bench_one()` が 1 回でも失敗したら残りの組を流さずに接続を返す。\n* 埋め込み(inline)でない write は中継バッファから送るので、流す前に中継バッファ全体を `0x5a ^ i` で埋めておく(内部の構造体の `stage` / `stage_size` を直接使う)。",
       "flow": [
         {"call": "c = bfm_connect(ip, mac, port, 0) を呼ぶ"},
         {"if": "c == NULL ?", "then": [{"return": "1"}]},
@@ -586,7 +569,6 @@
           {"do": "ci->stage[i] = 0x5a ^ i"},
           {"do": "i++"}
         ]},
-        {"call": "bfm_port_cache_flush(ci->stage, ci->stage_size) を呼ぶ"},
         {"if": "bfm_bf_active(c) ?", "then": [{"do": "BlueFlame の表示を「あり」にする"}], "else": [{"do": "BlueFlame の表示を「なし」にする"}]},
         {"call": "bfm_remote_size(c) と bfm_inline_max() を呼び、回数・相手の公開メモリの大きさ・BlueFlame・inline の上限・MTU を表示"},
         {"do": "表の見出しを表示"},

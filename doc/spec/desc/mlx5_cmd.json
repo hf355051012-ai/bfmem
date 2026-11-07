@@ -73,7 +73,6 @@
           {"if": "b + 1 < in_blocks ?", "then": [
             {"call": "mbox_in(d, b + 1) の物理アドレスを MBOX_NEXT へ書く"}
           ]},
-          {"do": "bfm_port_cache_flush() でブロックを書き戻す"},
           {"do": "b++"}
         ]},
         {"if": "in_blocks != 0 ?", "then": [
@@ -87,17 +86,15 @@
           {"if": "b + 1 < out_blocks ?", "then": [
             {"call": "mbox_out(d, b + 1) の物理アドレスを MBOX_NEXT へ書く"}
           ]},
-          {"do": "bfm_port_cache_flush() でブロックを書き戻す"},
           {"do": "b++"}
         ]},
         {"if": "out_blocks != 0 ?", "then": [
           {"call": "mbox_out(d, 0) の物理アドレスを CMD_OUT_PTR へ書く"}
         ]},
         {"do": "outlen を CMD_OUTLEN へ、CMD_XPORT_PCI を CMD_TYPE へ、1(持ち主 = FW)を CMD_STATUS_OWN へ書く"},
-        {"do": "entry を書き戻し、bfm_mb() の後 CMD_DBELL に 1(entry 0)を書く"},
+        {"do": "bfm_mb() の後 CMD_DBELL に 1(entry 0)を書く"},
         {"do": "opcode = in[0..1]、t0 = bfm_port_time_ns()"},
         {"loop": "FW が entry を返すまで待つ", "body": [
-          {"do": "bfm_port_cache_inval() で entry を読み直す"},
           {"if": "CMD_STATUS_OWN の bit 0 が 0 ?", "then": [{"break": true}]},
           {"if": "経過が 10000ms を超えた?", "then": [
             {"do": "BFM_LOG で時間切れを表示"},
@@ -112,7 +109,7 @@
         {"do": "entry の CMD_OUT から先頭 16 バイト(outlen まで)を out へ写す"},
         {"while": "b < out_blocks ?", "body": [
           {"call": "m = mbox_out(d, b) を呼ぶ"},
-          {"do": "bfm_port_cache_inval() でブロックを読み直し、out の 16 + b x 512 バイト目へ最大 512 バイトを写す"},
+          {"do": "ブロックから out の 16 + b x 512 バイト目へ最大 512 バイトを写す"},
           {"do": "b++"}
         ]},
         {"if": "out[0] != 0 ?", "then": [
@@ -186,7 +183,7 @@
     },
     {
       "func": "mlx5_eq_create",
-      "summary": "EQ を 1 本作る(`2^BFM_EQ_LOG` 個 x 64 バイト)。\n\n* DMA 領域から EQ の領域を取り、全 EQE の owner を 1 にして書き戻す。\n* EQ のドアベル用の UAR を取る(`mlx5_alloc_uar()`)。\n* 購読するイベント(Linux の `MLX5_ASYNC_EVENT_MASK` と同じ組。`page_request_disable` が 0 ならページ要求も)を `d->eq_mask` に入れる。\n* `CREATE_EQ` を出し、返った EQ の番号を `d->eqn` に入れ、`d->eq_cc` を 0 にする。\n\n割り込みは使わない(arm しない)。中身は `mlx5_eq_poll()` で読む。",
+      "summary": "EQ を 1 本作る(`2^BFM_EQ_LOG` 個 x 64 バイト)。\n\n* DMA 領域から EQ の領域を取り、全 EQE の owner を 1 にする。\n* EQ のドアベル用の UAR を取る(`mlx5_alloc_uar()`)。\n* 購読するイベント(Linux の `MLX5_ASYNC_EVENT_MASK` と同じ組。`page_request_disable` が 0 ならページ要求も)を `d->eq_mask` に入れる。\n* `CREATE_EQ` を出し、返った EQ の番号を `d->eqn` に入れ、`d->eq_cc` を 0 にする。\n\n割り込みは使わない(arm しない)。中身は `mlx5_eq_poll()` で読む。",
       "args": {"d": "デバイスの状態(`eq_buf` / `eq_uarn` / `eq_mask` / `eqn` / `eq_cc` を埋める)"},
       "ret": "`BFM_OK`: 作った。`BFM_E_PARAM`: EQ の領域が 4 ページを超える(`BFM_EQ_LOG` が 8 を超える)。`BFM_E_NOMEM`: DMA 領域が足りない。そのほか `mlx5_alloc_uar()` / `mlx5_cmd()` の戻り値。",
       "pre": "`mlx5_cmd_init()` が成功し、HCA が動いていること。",
@@ -196,7 +193,7 @@
         {"if": "npages > 4 ?", "then": [{"return": "BFM_E_PARAM"}]},
         {"call": "d->eq_buf = bfm_mem_alloc(bytes, 4KiB) を呼ぶ"},
         {"if": "d->eq_buf == NULL ?", "then": [{"return": "BFM_E_NOMEM"}]},
-        {"do": "全 EQE の最後のバイト(owner)を 1 にし、bfm_port_cache_flush() で書き戻す"},
+        {"do": "全 EQE の最後のバイト(owner)を 1 にする"},
         {"call": "rc = mlx5_alloc_uar(d, &d->eq_uarn) を呼ぶ"},
         {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
         {"do": "d->eq_mask に PATH_MIG・COMM_EST・SQ_DRAINED・CQ_ERROR・WQ_CATAS_ERROR・PATH_MIG_FAILED・WQ_INVAL_REQ・WQ_ACCESS_ERROR・PORT_CHANGE・SRQ_CATAS_ERROR・SRQ_LAST_WQE・SRQ_RQ_LIMIT のビットを入れる"},
@@ -233,7 +230,7 @@
         {"if": "d->eq_buf == NULL ?", "then": [{"return": "0"}]},
         {"do": "nent = 2^BFM_EQ_LOG、n = 0、page_n = 0、page_func = 0、page_req = 0"},
         {"while": "n < nent ?", "body": [
-          {"do": "e = eq_cc の位置の EQE。bfm_port_cache_inval() で読み直す"},
+          {"do": "e = eq_cc の位置の EQE"},
           {"do": "want = (eq_cc & nent) ? 1 : 0"},
           {"if": "EQE の owner のビット != want ?", "then": [{"break": true}]},
           {"do": "bfm_rmb()。type = e[1]、sub = e[3]、data = e + 32"},

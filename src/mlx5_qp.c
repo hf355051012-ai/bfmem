@@ -70,8 +70,6 @@ int mlx5_qp_create(bfm_dev_t *d, bfm_qp_t *qp, uint8_t st, uint8_t cs_req)
     memset((void *)(uintptr_t)qp->wq, 0, wq_bytes);
     qp->dbr[0] = 0;
     qp->dbr[1] = 0;
-    bfm_port_cache_flush(qp->wq, wq_bytes);
-    bfm_port_cache_flush(qp->dbr, 8u);
 
     memset(in, 0, sizeof(in));
     bfm_wr16be(&in[0], MLX5_CMD_CREATE_QP);
