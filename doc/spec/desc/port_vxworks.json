@@ -1,6 +1,6 @@
 {
   "file": "port/vxworks/port_vxworks.c",
-  "summary": "移植層の x86-64 VxWorks 版(論理アドレス = 物理アドレス)。**この版は未検証(VxWorks の機材で動かしていない)。** 使う VxWorks の API は `printf`・`tick64Get`・`sysClkRateGet`・`taskDelay` だけ。DMA 領域・公開メモリ(論理 = 物理・ライトバック)と BAR0(論理 = 物理・キャッシュしない属性)を張るのは BSP 側の役目で、この版はアドレスをそのまま返す。x86 の DMA はキャッシュと一貫しているので、キャッシュの操作はしない。PCIe の設定空間は ECAM(`g_bfm_pcie_ecam_base`)を直接読み書きする(設定空間はリトルエンディアンなので、バイト順はそのまま)。BlueFlame には、BSP が PAT の WC で張った BAR0 全体の write-combining の別名(`g_bfm_bar0_wc_va`)を使う。",
+  "summary": "移植層の x86-64 VxWorks 版(論理アドレス = 物理アドレス)。**この版は未検証(VxWorks の機材で動かしていない)。** VxWorks 固有の関数は使わない(使うのは C の `vprintf` だけ)。時刻と待ちは TSC で作る(`port/x86/bfm_x86.c`)。MSR は `rdmsr` 命令で読むので、bfmem はカーネル(DKM)のタスクから使う。DMA 領域・公開メモリ(論理 = 物理・ライトバック)と BAR0(論理 = 物理・キャッシュしない属性)を張るのは BSP 側の役目で、この版はアドレスをそのまま返す。x86 の DMA はキャッシュと一貫しているので、キャッシュの操作はしない。PCIe の設定空間は ECAM(`g_bfm_pcie_ecam_base`)を直接読み書きする(設定空間はリトルエンディアンなので、バイト順はそのまま)。BlueFlame には、BSP が PAT の WC で張った BAR0 全体の write-combining の別名(`g_bfm_bar0_wc_va`)を使う。",
   "functions": [
     {
       "func": "bfm_port_log",
@@ -17,50 +17,54 @@
     },
     {
       "func": "bfm_port_time_ns",
-      "summary": "`tick64Get()` の tick の数に、1 tick のナノ秒(`10^9 / sysClkRateGet()`)を掛けて時刻を返す。",
+      "summary": "TSC から作った時刻を返す(`bfm_x86_time_ns()`)。",
       "args": {},
-      "ret": "時刻(ナノ秒)。分解能は 1 tick。",
-      "pre": "特になし。",
-      "notes": "* 時間切れの判定にしか使わない前提で、分解能は 1 tick。\n* `tick64Get()` は 64bit なので一周しない。\n* `sysClkRateGet()` が 0 を返したときは 60Hz として計算する。\n* VxWorks の実機で未検証。",
+      "ret": "時刻(ナノ秒)。",
+      "pre": "`bfm_port_init()` が成功していること(TSC の周波数をそこで決める)。",
+      "notes": "* TSC の周波数の誤差がそのまま時刻の誤差になる(CPUID 16h の名目の値を使うと 0.3% ほどずれることがある。正確にするなら `g_bfm_tsc_hz`)。\n* VxWorks の実機で未検証。",
       "flow": [
-        {"do": "hz = sysClkRateGet()"},
-        {"if": "hz != 0 ?", "then": [
-          {"do": "1 tick = 10^9 / hz ナノ秒"}
-        ], "else": [
-          {"do": "1 tick = 10^9 / 60 ナノ秒"}
-        ]},
-        {"return": "tick64Get() × 1 tick のナノ秒"}
+        {"call": "bfm_x86_time_ns() を呼ぶ"},
+        {"return": "その値"}
       ]
     },
     {
       "func": "bfm_port_delay_us",
-      "summary": "`us` マイクロ秒を tick の数に切り上げて `taskDelay` で待つ。最低 1 tick 待つ。",
+      "summary": "TSC を見ながら空回りで `us` マイクロ秒待つ(`bfm_x86_delay_us()`)。",
       "args": {"us": "待つ時間(マイクロ秒)"},
       "ret": "なし",
-      "pre": "タスクから呼ぶこと(`taskDelay` を使う)。",
-      "notes": "* 分解能は 1 tick なので、短い待ちでも 1 tick 待つ。\n* `taskDelay` の戻り値は見ない。\n* VxWorks の実機で未検証。",
+      "pre": "`bfm_port_init()` が成功していること。",
+      "notes": "* CPU を他のタスクに譲らない(待つのは立ち上げ・接続・切断の間だけ)。\n* VxWorks の実機で未検証。",
       "flow": [
-        {"do": "hz = sysClkRateGet()"},
-        {"do": "ticks = (us × hz + 999999) / 1000000(切り上げ)"},
-        {"if": "ticks == 0 ?", "then": [
-          {"do": "ticks = 1"}
-        ]},
-        {"do": "taskDelay(ticks)"}
+        {"call": "bfm_x86_delay_us(us) を呼ぶ"}
+      ]
+    },
+    {
+      "func": "vx_rdmsr",
+      "summary": "`rdmsr` 命令(`bfm_x86_rdmsr()`)で MSR を読む。`bfm_x86_init()` に渡す、MSR を読む関数。",
+      "args": {"msr": "MSR の番号", "val": "読んだ値を入れる先"},
+      "ret": "0(常に読めたとする)。",
+      "pre": "リング 0(カーネルのタスク)で動いていること。その CPU にある MSR であること(`bfm_x86.c` の `msr_read()` が CPUID で確かめてから呼ぶ)。",
+      "notes": "* 存在しない MSR を読むと #GP で落ちる。\n* VxWorks の実機で未検証。",
+      "entry_note": "bfm_x86_init() に渡し、msr_read() が関数ポインタで呼ぶ",
+      "flow": [
+        {"call": "*val = bfm_x86_rdmsr(msr) を呼ぶ"},
+        {"return": "0"}
       ]
     },
     {
       "func": "bfm_port_init",
-      "summary": "移植層を立ち上げる。ECAM の位置 `g_bfm_pcie_ecam_base` が設定されているかだけを確かめる。DMA 領域・公開メモリは BSP が論理 = 物理で張ってある前提で、ここでは何もしない。",
+      "summary": "移植層を立ち上げる。ECAM の位置 `g_bfm_pcie_ecam_base` が設定されているかを確かめ、`bfm_x86_init()` で TSC の周波数を決める(MSR を読む関数として `vx_rdmsr()` を渡す)。DMA 領域・公開メモリは BSP が論理 = 物理で張ってある前提で、ここでは何もしない。",
       "args": {},
-      "ret": "0: 成功。-1: `g_bfm_pcie_ecam_base` が 0(理由を表示する)。",
-      "pre": "`g_bfm_dma_*` と `g_bfm_mr_*` の物理メモリが OS に使われず、論理 = 物理・ライトバックで張られていること(BSP の役目)。`g_bfm_pcie_ecam_base` を設定してあること。",
-      "notes": "* `g_bfm_cpu_awake` はこの版では何もしない(深い C-state は BIOS / BSP で止める)。\n* VxWorks の実機で未検証。",
+      "ret": "0: 成功。-1: `g_bfm_pcie_ecam_base` が 0、または TSC の周波数が分からない(理由を表示する)。",
+      "pre": "`g_bfm_dma_*` と `g_bfm_mr_*` の物理メモリが OS に使われず、論理 = 物理・ライトバックで張られていること(BSP の役目)。`g_bfm_pcie_ecam_base` を設定してあること。カーネルのタスクから呼ぶこと。",
+      "notes": "* `g_bfm_cpu_awake` はこの版では何もしない(深い C-state は BIOS / BSP で止める)。\n* `g_bfm_verbose` なら CPU の名前・TSC・周波数・パッケージ C-state の上限を表示する。\n* VxWorks の実機で未検証。",
       "flow": [
         {"if": "g_bfm_pcie_ecam_base == 0 ?", "then": [
           {"call": "bfm_port_log() で理由を表示"},
           {"return": "-1"}
         ]},
-        {"return": "0"}
+        {"call": "bfm_x86_init(vx_rdmsr) を呼ぶ"},
+        {"return": "bfm_x86_init() の戻り値"}
       ]
     },
     {

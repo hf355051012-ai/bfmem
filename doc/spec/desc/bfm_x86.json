@@ -1,0 +1,177 @@
+{
+  "file": "port/x86/bfm_x86.c",
+  "summary": "x86-64 の CPU を直接触る部品(Linux 版と VxWorks 版の移植層の両方から使う。OS の機能は使わず、表示だけ `bfm_port_log()`)。CPU の命令はアセンブラの関数(`port/x86/bfm_x86_asm.S`、下の表)で出す。TSC の周波数を `g_bfm_tsc_hz` → CPUID 15h → CPUID 16h → `MSR_PLATFORM_INFO` の順に決め、TSC から時刻(ナノ秒)と空回りの待ちを作る(VxWorks 版の `bfm_port_time_ns()` / `bfm_port_delay_us()` はこれ)。`g_bfm_verbose` のとき、CPU の名前・TSC・周波数(基準・最小・ターボの最大・今の倍率・APERF / MPERF で測った実効)・パッケージ C-state の上限を MSR で読んで表示する。MSR は移植層が渡す関数で読む(VxWorks 版は `rdmsr` 命令、Linux 版は `/dev/cpu/N/msr`)。存在しない MSR を読むと #GP で落ちるので、CPUID で機能を確かめ、機種ごとの MSR は Intel の family 6 のときだけ読む。",
+  "functions": [
+    {
+      "func": "cpu_probe",
+      "summary": "CPUID で CPU の種類(Intel かどうか・family・model・名前)と、使える機能(CPUID の最大の番号、leaf 1 の ecx、leaf 6 の eax / ecx、TSC が invariant か)を調べて、ファイルの中の変数に覚える。",
+      "args": {},
+      "ret": "なし",
+      "pre": "特になし(CPUID はどの特権でも使える)。",
+      "notes": "* family が 0xf なら拡張 family を足し、family が 6 か 0xf なら拡張 model を上位 4bit に足す(Intel SDM の規則)。\n* 名前(CPUID 8000_0002h〜8000_0004h)が無い CPU では空の文字列にする。",
+      "flow": [
+        {"call": "bfm_x86_cpuid(0) を呼ぶ: s_max_leaf = eax、s_intel = ベンダ名が \"GenuineIntel\""},
+        {"call": "bfm_x86_cpuid(1) を呼ぶ: s_family = eax[11:8]、s_model = eax[7:4]"},
+        {"if": "s_family == 0xf ?", "then": [
+          {"do": "s_family += eax[27:20](拡張 family)"}
+        ]},
+        {"if": "s_family == 6 または 0xf ?", "then": [
+          {"do": "s_model |= eax[19:16] << 4(拡張 model)"}
+        ]},
+        {"do": "s_leaf1_ecx = ecx"},
+        {"do": "s_leaf6_eax = s_leaf6_ecx = 0"},
+        {"if": "s_max_leaf >= 6 ?", "then": [
+          {"call": "bfm_x86_cpuid(6) を呼ぶ: s_leaf6_eax = eax、s_leaf6_ecx = ecx"}
+        ]},
+        {"call": "bfm_x86_cpuid(0x80000000) を呼ぶ: s_max_ext = eax"},
+        {"do": "s_invariant = 0"},
+        {"if": "s_max_ext >= 0x80000007 ?", "then": [
+          {"call": "bfm_x86_cpuid(0x80000007) を呼ぶ: s_invariant = edx[8]"}
+        ]},
+        {"do": "s_brand[0] = '\\0'"},
+        {"if": "s_max_ext >= 0x80000004 ?", "then": [
+          {"while": "i = 0〜2 ?", "body": [
+            {"call": "bfm_x86_cpuid(0x80000002 + i) を呼ぶ"},
+            {"do": "memcpy(s_brand + 16 × i, 結果, 16)"}
+          ]},
+          {"do": "s_brand[48] = '\\0'"}
+        ]}
+      ]
+    },
+    {
+      "func": "msr_read",
+      "summary": "移植層が渡した関数(`s_rdmsr`)で MSR を読む。読む関数が無いとき、Intel の family 6 でないときは読まずに -1 を返す。",
+      "args": {"msr": "MSR の番号", "val": "読んだ値を入れる先"},
+      "ret": "0: 読めた。-1: 読まなかった・読めなかった。",
+      "pre": "`cpu_probe()` が済んでいること(`bfm_x86_init()` の中から呼ぶ)。",
+      "notes": "* MSR がその CPU にあるかは呼び出し側が CPUID で確かめる。ここで見るのは Intel の family 6 かどうかだけ。\n* `s_rdmsr` は VxWorks 版では `vx_rdmsr()`(`rdmsr` 命令)、Linux 版では `linux_rdmsr()`(`/dev/cpu/N/msr`)。",
+      "indirect": ["vx_rdmsr", "linux_rdmsr"],
+      "flow": [
+        {"if": "s_rdmsr == NULL、Intel でない、または s_family != 6 ?", "then": [
+          {"return": "-1"}
+        ]},
+        {"return": "s_rdmsr(msr, val) の戻り値"}
+      ]
+    },
+    {
+      "func": "tsc_hz_find",
+      "summary": "TSC の周波数(Hz)を決める。`g_bfm_tsc_hz` → CPUID 15h(水晶の周波数 × ebx / eax)→ CPUID 16h(基準の周波数 MHz)→ `MSR_PLATFORM_INFO`(基準の倍率 × 100MHz)の順に、最初に得られたものを使い、どれを使ったかを `s_tsc_src` に覚える。",
+      "args": {},
+      "ret": "TSC の周波数(Hz)。0 = 分からない。",
+      "pre": "`cpu_probe()` が済んでいること。",
+      "notes": "* CPUID 16h と `MSR_PLATFORM_INFO` は 100MHz 単位の名目の値で、実際の TSC とずれることがある(Xeon W-2245 で 3900 MHz に対し実際は 3911.99 MHz)。\n* CPUID 15h の水晶の周波数(ecx)が 0 の CPU では 16h へ進む(Core i3-8100・Xeon W-2245 はどちらも 0)。",
+      "flow": [
+        {"if": "g_bfm_tsc_hz != 0 ?", "then": [
+          {"do": "s_tsc_src = \"g_bfm_tsc_hz\""},
+          {"return": "g_bfm_tsc_hz"}
+        ]},
+        {"if": "s_max_leaf >= 0x15 ?", "then": [
+          {"call": "bfm_x86_cpuid(0x15) を呼ぶ"},
+          {"if": "eax・ebx・ecx がどれも 0 でない?", "then": [
+            {"do": "s_tsc_src = \"CPUID 15h\""},
+            {"return": "ecx × ebx / eax"}
+          ]}
+        ]},
+        {"if": "s_max_leaf >= 0x16 ?", "then": [
+          {"call": "bfm_x86_cpuid(0x16) を呼ぶ"},
+          {"if": "eax[15:0] != 0 ?", "then": [
+            {"do": "s_tsc_src = \"CPUID 16h\""},
+            {"return": "eax[15:0] × 1000000"}
+          ]}
+        ]},
+        {"if": "msr_read(MSR_PLATFORM_INFO) が読めて、倍率 [15:8] が 0 でない?", "then": [
+          {"do": "s_tsc_src = \"MSR_PLATFORM_INFO\""},
+          {"return": "倍率 × 100MHz"}
+        ]},
+        {"return": "0"}
+      ]
+    },
+    {
+      "func": "bfm_x86_init",
+      "summary": "CPU を調べ(`cpu_probe()`)、TSC の周波数を決めて(`tsc_hz_find()`)、TSC からナノ秒へ直す係数(`s_ns_mult` = 10^9 × 2^32 / 周波数)を求める。TSC が invariant でなければ注意を表示する。`g_bfm_verbose` なら `bfm_x86_report()` で CPU の情報を表示する。",
+      "args": {"rdmsr": "MSR を読む関数(移植層が渡す)。NULL なら MSR を読まない"},
+      "ret": "0: 成功。-1: TSC の周波数が分からない(理由を表示する)。",
+      "pre": "`bfm_x86_time_ns()` / `bfm_x86_delay_us()` を使う前に 1 度呼ぶこと(移植層の `bfm_port_init()` から呼ぶ)。",
+      "notes": "* VxWorks 版は失敗すると `bfm_port_init()` も失敗する(時刻が作れないため)。Linux 版は時刻に OS の時計を使うので、失敗しても続ける。\n* invariant でない TSC は省電力で速さが変わり、時間切れの判定がずれうる(止めはしない)。",
+      "flow": [
+        {"do": "s_rdmsr = rdmsr"},
+        {"call": "cpu_probe() を呼ぶ"},
+        {"call": "s_tsc_hz = tsc_hz_find() を呼ぶ"},
+        {"if": "s_tsc_hz == 0 ?", "then": [
+          {"call": "bfm_port_log() で「TSC の周波数が分からない」を表示"},
+          {"return": "-1"}
+        ]},
+        {"do": "s_ns_mult = (10^9 << 32) / s_tsc_hz(128bit で計算)"},
+        {"if": "TSC が invariant でない?", "then": [
+          {"call": "bfm_port_log() で注意を表示"}
+        ]},
+        {"if": "g_bfm_verbose ?", "then": [
+          {"call": "bfm_x86_report() を呼ぶ"}
+        ]},
+        {"return": "0"}
+      ]
+    },
+    {
+      "func": "bfm_x86_time_ns",
+      "summary": "TSC を読み、`s_ns_mult` を掛けて 32bit 右へずらし、ナノ秒にして返す(128bit で計算)。",
+      "args": {},
+      "ret": "時刻(ナノ秒)。TSC が 0 のときを 0 とする単調な値。",
+      "pre": "`bfm_x86_init()` が成功していること(前は `s_ns_mult` が 0 なので常に 0 を返す)。",
+      "notes": "* 係数の誤差は 2^-32 程度で、時間切れの判定には十分。\n* 周波数の誤差(`tsc_hz_find()` の注意事項)はそのまま時刻の誤差になる。",
+      "flow": [
+        {"call": "bfm_x86_rdtsc() を呼ぶ"},
+        {"return": "TSC × s_ns_mult >> 32"}
+      ]
+    },
+    {
+      "func": "bfm_x86_delay_us",
+      "summary": "`us` マイクロ秒ぶんの TSC の数を求め、TSC がそれだけ進むまで `pause` を挟んで空回りする。",
+      "args": {"us": "待つ時間(マイクロ秒)"},
+      "ret": "なし",
+      "pre": "`bfm_x86_init()` が成功していること(前は周波数が 0 なのですぐ戻る)。",
+      "notes": "* CPU を他のタスクに譲らない。bfmem が待つのは立ち上げ・接続・切断の間だけ。\n* TSC の差で比べるので、TSC が一周しても正しく待つ。",
+      "flow": [
+        {"call": "t0 = bfm_x86_rdtsc() を呼ぶ"},
+        {"do": "n = us × s_tsc_hz / 1000000"},
+        {"while": "bfm_x86_rdtsc() - t0 < n ?", "body": [
+          {"call": "bfm_x86_pause() を呼ぶ"}
+        ]}
+      ]
+    },
+    {
+      "func": "bfm_x86_report",
+      "summary": "CPU の名前・family・model と、TSC の周波数(どこから求めたか・invariant か)を表示する。MSR を読めるなら、基準と最小の周波数(`MSR_PLATFORM_INFO`)、ターボの最大(`MSR_TURBO_RATIO_LIMIT`、1 コア)、今の倍率(`IA32_PERF_STATUS`)、実効の周波数(10ms 空回りする間の `IA32_APERF` / `IA32_MPERF` の増え方の比 × TSC の周波数)、パッケージ C-state の上限と固定されているか(`MSR_PKG_CST_CONFIG_CONTROL`)も表示する。",
+      "args": {},
+      "ret": "なし",
+      "pre": "`bfm_x86_init()` が成功していること(`bfm_x86_init()` が `g_bfm_verbose` のときに呼ぶ)。",
+      "notes": "* ターボの最大は CPUID 6 の eax[1]、今の倍率は CPUID 1 の ecx[7](EIST)、APERF / MPERF は CPUID 6 の ecx[0] があるときだけ読む。\n* パッケージ C-state の上限の符号は機種ごとに違うので、数をそのまま出す。\n* 実効の周波数を測るために 10ms 空回りする。\n* Linux 版の MSR は開いたときの CPU のもので、空回りしている CPU と違うことがある。",
+      "flow": [
+        {"call": "bfm_port_log() で名前・family・model を表示"},
+        {"call": "bfm_port_log() で TSC の周波数と invariant かを表示"},
+        {"if": "s_rdmsr == NULL ?", "then": [
+          {"call": "bfm_port_log() で「MSR は読まない」を表示"},
+          {"return": ""}
+        ]},
+        {"if": "msr_read(MSR_PLATFORM_INFO) が読めた?", "then": [
+          {"call": "bfm_port_log() で基準 [15:8] と最小 [47:40] の周波数を表示"}
+        ]},
+        {"if": "ターボがあり、msr_read(MSR_TURBO_RATIO_LIMIT) が読めた?", "then": [
+          {"call": "bfm_port_log() でターボの最大(1 コア)を表示"}
+        ]},
+        {"if": "EIST があり、msr_read(IA32_PERF_STATUS) が読めた?", "then": [
+          {"call": "bfm_port_log() で今の倍率を表示"}
+        ]},
+        {"if": "APERF / MPERF があり、msr_read で MPERF・APERF が読めた?", "then": [
+          {"call": "bfm_x86_delay_us(10000) を呼ぶ"},
+          {"if": "msr_read で MPERF・APERF をもう 1 度読めて、MPERF が増えた?", "then": [
+            {"do": "実効 = s_tsc_hz × APERF の増え / MPERF の増え"},
+            {"call": "bfm_port_log() で実効の周波数を表示"}
+          ]}
+        ]},
+        {"if": "msr_read(MSR_PKG_CST_CONFIG) が読めた?", "then": [
+          {"call": "bfm_port_log() でパッケージ C-state の上限 [3:0] と固定 [15] を表示"}
+        ]}
+      ]
+    }
+  ]
+}

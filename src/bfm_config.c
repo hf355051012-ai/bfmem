@@ -67,4 +67,5 @@ uint8_t  g_bfm_retry_count        = 7u;
 uint32_t g_bfm_op_timeout_ms      = 5000u;
 uint32_t g_bfm_signal_every       = 32u;
 uint32_t g_bfm_cpu_awake          = 1u;
+uint64_t g_bfm_tsc_hz             = 0u;             /* CPUID / MSR から求める */
 uint32_t g_bfm_verbose            = 0u;

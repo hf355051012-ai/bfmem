@@ -16,10 +16,12 @@
 #define _GNU_SOURCE
 #include "bfm_port.h"
 #include "bfm_config.h"
+#include "bfm_x86.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/vfio.h>
+#include <sched.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +38,7 @@
 
 static int s_container = -1, s_group = -1, s_device = -1;
 static int s_dma_latency_fd = -1;   /* /dev/cpu_dma_latency(開いている間だけ効く)*/
+static int s_msr_fd = -1;           /* /dev/cpu/N/msr(modprobe msr が要る)*/
 static uint64_t s_cfg_off;
 static uint8_t *s_bar0;
 static uint64_t s_bar0_size;
@@ -69,6 +72,42 @@ void bfm_port_delay_us(uint32_t us)
 {
     struct timespec ts = { (time_t)(us / 1000000u), (long)(us % 1000000u) * 1000L };
     while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
+    }
+}
+
+/* ---------------------------------------------------------------------
+ * CPU(port/x86/bfm_x86.c)
+ *
+ * Linux の時刻と待ちは OS のもの(clock_gettime・nanosleep)を使う。TSC の周波数の求め方と
+ * MSR の読み方を VxWorks と同じコードで確かめるため、bfm_x86_init() も呼んでおく。
+ * ユーザ空間では rdmsr 命令を使えないので、MSR は /dev/cpu/N/msr から読む。
+ * ------------------------------------------------------------------- */
+
+static int linux_rdmsr(uint32_t msr, uint64_t *val)
+{
+    return pread(s_msr_fd, val, sizeof(*val), (off_t)msr) == (ssize_t)sizeof(*val) ? 0 : -1;
+}
+
+static void cpu_init(void)
+{
+    char path[64];
+    const int cpu = sched_getcpu();
+
+    snprintf(path, sizeof(path), "/dev/cpu/%d/msr", cpu < 0 ? 0 : cpu);
+    s_msr_fd = open(path, O_RDONLY);
+    if (s_msr_fd < 0 && g_bfm_verbose) {
+        bfm_port_log("port: %s を開けない (errno=%d)。MSR は読まない(modprobe msr)\n", path, errno);
+    }
+    if (bfm_x86_init(s_msr_fd >= 0 ? linux_rdmsr : NULL) != 0 || !g_bfm_verbose) return;
+
+    /* TSC の周波数を、OS の時計で 100ms 測った値と比べる */
+    {
+        const uint64_t c0 = bfm_x86_rdtsc(), t0 = bfm_port_time_ns();
+        uint64_t hz;
+        bfm_port_delay_us(100000u);
+        hz = (bfm_x86_rdtsc() - c0) * 1000000000ull / (bfm_port_time_ns() - t0);
+        bfm_port_log("port: TSC を OS の時計で測ると %llu.%03llu MHz(CPU %d)\n",
+                     (unsigned long long)(hz / 1000000u), (unsigned long long)(hz / 1000u % 1000u), cpu);
     }
 }
 
@@ -174,6 +213,7 @@ int bfm_port_init(void)
         bfm_port_fini();
         return -1;
     }
+    cpu_init();
     if (g_bfm_cpu_awake) {
         /* PM QoS: 0 を書いた fd を開いている間、CPU は深い C-state に入らない(閉じれば元に戻る)。 */
         const int32_t zero = 0;
@@ -200,6 +240,8 @@ void bfm_port_fini(void)
     s_dma_va = s_mr_va = NULL;
     if (s_dma_latency_fd >= 0) close(s_dma_latency_fd);
     s_dma_latency_fd = -1;
+    if (s_msr_fd >= 0) close(s_msr_fd);
+    s_msr_fd = -1;
 }
 
 uint32_t bfm_port_pci_read32(uint32_t off)

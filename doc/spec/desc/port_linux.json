@@ -43,6 +43,44 @@
       ]
     },
     {
+      "func": "linux_rdmsr",
+      "summary": "`/dev/cpu/N/msr`(`cpu_init()` が開いた `s_msr_fd`)を、MSR の番号の位置から 8 バイト読む。`bfm_x86_init()` に渡す、MSR を読む関数。",
+      "args": {"msr": "MSR の番号", "val": "読んだ値を入れる先"},
+      "ret": "0: 読めた。-1: 読めなかった。",
+      "pre": "`s_msr_fd` が開いていること(開けなかったときは `bfm_x86_init()` に NULL を渡すので呼ばれない)。",
+      "notes": "ユーザ空間では `rdmsr` 命令を使えないので、カーネルの msr ドライバ(`modprobe msr`)を通して読む。root が要る。",
+      "entry_note": "bfm_x86_init() に渡し、msr_read() が関数ポインタで呼ぶ",
+      "flow": [
+        {"if": "pread(s_msr_fd, val, 8, msr) が 8 バイト読めた?", "then": [
+          {"return": "0"}
+        ], "else": [
+          {"return": "-1"}
+        ]}
+      ]
+    },
+    {
+      "func": "cpu_init",
+      "summary": "今いる CPU の `/dev/cpu/N/msr` を開き、`bfm_x86_init()` で CPU を調べて TSC の周波数を決める(開けたら `linux_rdmsr()` を、開けなければ NULL を渡す)。`g_bfm_verbose` なら、TSC を OS の時計で 100ms 測った周波数も表示して、求めた値と比べられるようにする。",
+      "args": {},
+      "ret": "なし",
+      "pre": "特になし(`bfm_port_init()` から呼ぶ)。",
+      "notes": "* Linux の時刻と待ちは OS のもの(`clock_gettime`・`nanosleep`)を使う。ここは TSC の周波数の求め方と MSR の読み方を、VxWorks と同じコードで確かめるためのもの。\n* `bfm_x86_init()` が失敗しても続ける(表示だけ)。\n* `/dev/cpu/N/msr` を開けないとき(msr ドライバが無い・root でない)は、`g_bfm_verbose` なら理由を表示して MSR を読まずに進む。",
+      "flow": [
+        {"do": "cpu = sched_getcpu()"},
+        {"do": "s_msr_fd = open(\"/dev/cpu/<cpu>/msr\", O_RDONLY)(cpu < 0 なら 0)"},
+        {"if": "s_msr_fd < 0 かつ g_bfm_verbose ?", "then": [
+          {"call": "bfm_port_log() で開けない理由を表示"}
+        ]},
+        {"if": "bfm_x86_init(開けたなら linux_rdmsr、でなければ NULL) が失敗、または g_bfm_verbose でない?", "then": [
+          {"return": ""}
+        ]},
+        {"call": "c0 = bfm_x86_rdtsc()、t0 = bfm_port_time_ns() を呼ぶ"},
+        {"call": "bfm_port_delay_us(100000) を呼ぶ"},
+        {"do": "hz = (bfm_x86_rdtsc() - c0) × 10^9 / (bfm_port_time_ns() - t0)"},
+        {"call": "bfm_port_log() で測った周波数を表示"}
+      ]
+    },
+    {
       "func": "vfio_open_device",
       "summary": "PCI アドレス `bdf` の装置を VFIO で掴む。sysfs の `iommu_group` からグループ番号を読み、`/dev/vfio/vfio`(コンテナ)と `/dev/vfio/<グループ>` を開いて Type1 IOMMU を設定し、装置の fd を取る。あわせて設定空間と BAR0 の領域の位置(`s_cfg_off`・`s_bar0_vfio_off`)と BAR0 の大きさ(`s_bar0_size`)を読む。",
       "args": {"bdf": "装置の PCI アドレス(`\"0000:01:00.0\"` の形)"},
@@ -123,7 +161,7 @@
     },
     {
       "func": "bfm_port_init",
-      "summary": "移植層を立ち上げる。`g_bfm_linux_pci_bdf` の装置を VFIO で掴み(`vfio_open_device()`)、DMA 領域と公開メモリを `g_bfm_dma_base` / `g_bfm_mr_base` に張って IOVA に対応づける(`map_region()`)。`g_bfm_cpu_awake` が 0 でなければ `/dev/cpu_dma_latency` に 0 を書いて fd を開いたままにし、CPU を深い C-state に入れない。",
+      "summary": "移植層を立ち上げる。`g_bfm_linux_pci_bdf` の装置を VFIO で掴み(`vfio_open_device()`)、DMA 領域と公開メモリを `g_bfm_dma_base` / `g_bfm_mr_base` に張って IOVA に対応づける(`map_region()`)。`cpu_init()` で CPU を調べる(TSC の周波数・MSR。時刻と待ちには使わない)。`g_bfm_cpu_awake` が 0 でなければ `/dev/cpu_dma_latency` に 0 を書いて fd を開いたままにし、CPU を深い C-state に入れない。",
       "args": {},
       "ret": "0: 成功。-1: 失敗(取ったものは `bfm_port_fini()` で返してある)。",
       "pre": "`g_bfm_linux_pci_bdf`・`g_bfm_dma_base` / `g_bfm_dma_size`・`g_bfm_mr_base` / `g_bfm_mr_size` を設定してあること。装置を vfio-pci に結びつけてあること。",
@@ -148,6 +186,7 @@
           {"call": "bfm_port_fini() を呼ぶ"},
           {"return": "-1"}
         ]},
+        {"call": "cpu_init() を呼ぶ"},
         {"if": "g_bfm_cpu_awake ?", "then": [
           {"do": "s_dma_latency_fd = open(\"/dev/cpu_dma_latency\", O_WRONLY)"},
           {"if": "開けない、または 0(int32_t)を 4 バイト書けない?", "then": [
@@ -163,7 +202,7 @@
     },
     {
       "func": "bfm_port_fini",
-      "summary": "移植層が取ったものを返す。BAR0 を張っていれば外し、VFIO の装置・グループ・コンテナの fd を閉じ(IOMMU の対応づけもここで外れる)、DMA 領域と公開メモリを外し、`/dev/cpu_dma_latency` を閉じる。",
+      "summary": "移植層が取ったものを返す。BAR0 を張っていれば外し、VFIO の装置・グループ・コンテナの fd を閉じ(IOMMU の対応づけもここで外れる)、DMA 領域と公開メモリを外し、`/dev/cpu_dma_latency` と `/dev/cpu/N/msr` を閉じる。",
       "args": {},
       "ret": "なし",
       "pre": "Bus Master を落としてあること(NIC がメモリへ DMA しないこと)。",
@@ -180,7 +219,9 @@
         {"if": "s_mr_va != NULL ?", "then": [{"do": "munmap(s_mr_va, g_bfm_mr_size)"}]},
         {"do": "s_dma_va = s_mr_va = NULL"},
         {"if": "s_dma_latency_fd >= 0 ?", "then": [{"do": "close(s_dma_latency_fd)"}]},
-        {"do": "s_dma_latency_fd = -1"}
+        {"do": "s_dma_latency_fd = -1"},
+        {"if": "s_msr_fd >= 0 ?", "then": [{"do": "close(s_msr_fd)"}]},
+        {"do": "s_msr_fd = -1"}
       ]
     },
     {

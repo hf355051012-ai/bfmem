@@ -30,7 +30,9 @@ WQE を UAR の BlueFlame の窓へ MMIO で書き込んで送る。相手の CP
 | `src/bfm_ops.c` | データ経路(BlueFlame で WQE を送る、完了を拾う)|
 | `src/bfm_mem.c` | DMA 領域からの静的な切り出し |
 | `port/linux_vfio/port_linux.c` | 移植層: Linux + VFIO(試験環境)|
-| `port/vxworks/port_vxworks.c` | 移植層: VxWorks(**未検証**)|
+| `port/vxworks/port_vxworks.c` | 移植層: VxWorks(**未検証**。VxWorks 固有の関数は使わない)|
+| `port/x86/bfm_x86_asm.S` | x86-64 の命令の関数(`rdtsc`・`cpuid`・`rdmsr`・`wrmsr`・`pause`)。アセンブラ |
+| `port/x86/bfm_x86.c` | TSC の周波数を CPUID / MSR から求め、TSC で時刻と待ちを作る。CPU の周波数を MSR で読んで表示する |
 | `test/bfm_test.c` | 試験プログラム(server / client / bench / info)|
 | `doc/spec/bfmem_spec.adoc` | **関数仕様書**(全ソースの全関数。表・フロー図・関係図。図は `doc/spec/images/*.drawio.svg`)。`doc/spec/gen.py` で作る。HTML 版は `docs/spec.html`(図を埋め込んだ 1 ファイル。asciidoctor があれば gen.py が一緒に作る)。**Web で見られる: https://hf355051012-ai.github.io/bfmem/spec.html**(GitHub Pages、master の `docs/`)|
 
@@ -68,6 +70,40 @@ bfm_shutdown();
 ライブラリの本体(`src/`)は OS の機能を何も使わない。使うのは移植層(`include/bfm_port.h`)の
 10 個ほどの関数だけ: 設定空間の読み書き、BAR0 を張る、BAR0 の一部を write-combining で張る、
 時刻、待つ、表示。x86 の DMA はキャッシュと一貫しているので、キャッシュの操作は持たない。
+
+VxWorks の移植層も **VxWorks 固有の関数を使わない**(使うのは C の `vprintf` だけ)。
+時刻と待ちは CPU の TSC で作る(下の「時刻と CPU の周波数」)。
+
+### 時刻と CPU の周波数(`port/x86/`)
+
+CPU の命令を 1 つずつ包んだ関数をアセンブラで持つ(`bfm_x86_asm.S`: `bfm_x86_rdtsc()`・`bfm_x86_cpuid()`・
+`bfm_x86_rdmsr()`・`bfm_x86_wrmsr()`・`bfm_x86_pause()`)。`bfm_x86.c` がそれを使って:
+
+- **TSC の周波数を決める。** `g_bfm_tsc_hz`(0 でなければ)→ CPUID 15h(水晶の周波数 x 比)→
+  CPUID 16h(基準の周波数)→ `MSR_PLATFORM_INFO`(基準の倍率 x 100MHz)の順。TSC が invariant
+  (CPUID 8000_0007h)でなければ注意を表示する。
+- **時刻(ナノ秒)と待ち(空回り + `pause`)を TSC から作る。** VxWorks の `bfm_port_time_ns()` /
+  `bfm_port_delay_us()` はこれ。待ちは CPU を他のタスクに譲らない(待つのは立ち上げ・接続・切断の間だけ)。
+- **CPU の名前・TSC・周波数を表示する**(`g_bfm_verbose` のとき): 基準と最小(`MSR_PLATFORM_INFO`)、
+  ターボの最大(`MSR_TURBO_RATIO_LIMIT`)、今の倍率(`IA32_PERF_STATUS`)、実効の周波数
+  (10ms 空回りする間の `IA32_APERF` / `IA32_MPERF` の比)、パッケージ C-state の上限(`MSR_PKG_CST_CONFIG_CONTROL`)。
+
+`rdmsr` / `wrmsr` はリング 0 の命令なので、**VxWorks ではカーネル(DKM)のタスクから使う**。存在しない MSR を
+読むと #GP で落ちるので、CPUID で機能を確かめ、機種ごとの MSR は Intel の family 6(Nehalem 以降の Core / Xeon)
+のときだけ読む。Linux のユーザ空間では `rdmsr` を使えないので、Linux の移植層は `/dev/cpu/N/msr` から読み
+(`modprobe msr` が要る)、時刻と待ちは OS のもの(`clock_gettime`・`nanosleep`)のまま使う。
+Linux でも `bfm_x86_init()` を呼ぶので、`-v` を付けると同じ表示が出て、TSC を OS の時計で測った値と比べられる。
+
+実機で読んだ値(Linux、`modprobe msr`):
+
+| 機械 | TSC(求めた値)| OS の時計で測った TSC | 基準 / 最小 | ターボの最大 | 実効(空回り中)|
+|---|---|---|---|---|---|
+| OptiPlex(Core i3-8100)| 3600.000 MHz(CPUID 16h)| 3600.02 MHz | 3600 / 800 MHz | なし | 3600 MHz |
+| Precision(Xeon W-2245)| 3900.000 MHz(CPUID 16h)| **3911.99 MHz** | 3900 / 1200 MHz | 4700 MHz | 4500 MHz |
+
+**CPUID 16h と MSR の基準の周波数は 100MHz 単位の名目の値で、実際の TSC とずれることがある**(Precision で
+0.3%。Linux も起動のときに 3911.999 MHz と測り直している)。時間切れの判定にしか使わないので差し支えないが、
+正確な時刻が要るなら `g_bfm_tsc_hz` に測った値を入れる。どちらの CPU も CPUID 15h の水晶の周波数は 0 だった。
 
 **アドレスの約束: NIC に渡すアドレス = CPU のポインタの値。** VxWorks は論理 = 物理なので
 そのまま成り立つ。Linux では、移植層が DMA 領域と公開メモリを `g_bfm_dma_base` / `g_bfm_mr_base`
@@ -176,6 +212,7 @@ REP が落ちたら掛け側が REQ を送り直し、受け側は確立済み�
 | `g_bfm_bf_enable` / `g_bfm_scatter_cqe` | 機能の入り切り |
 | `g_bfm_ack_timeout` / `g_bfm_retry_count` / `g_bfm_op_timeout_ms` | 再送と時間切れ |
 | `g_bfm_cpu_awake` | CPU を深い省電力状態に入れない(相手からの read / atomic の遅延に効く。VxWorks では下の 6)|
+| `g_bfm_tsc_hz` | TSC の周波数(Hz)。0 なら CPUID / MSR から求める。求められない CPU では入れる |
 | `g_bfm_link_wait_ms` / `g_bfm_signal_every` / `g_bfm_verbose` | そのほか |
 
 `BFM_MAX_CONN`(接続の数)は配列の大きさになるのでコンパイル時の定数。
@@ -194,12 +231,15 @@ REP が落ちたら掛け側が REQ を送り直し、受け側は確立済み�
 6. **受け側の CPU の深い C-state(パッケージの C-state、C1E)を BIOS / BSP で止める。** 相手からの read / atomic は
    受け側の NIC がメモリを読んで応答するので、CPU が深く眠っているとその分待たされる(ConnectX-4 Lx + Core i3-8100 で
    約 300ns。`TEST_PLAN.md`「調査」)。VxWorks の移植層は `g_bfm_cpu_awake` を見ない。
+   `g_bfm_verbose = 1` で立ち上げると、MSR から読んだパッケージ C-state の上限が表示される。
+7. **bfmem はカーネル(DKM)のタスクから使う。** 物理アドレスをそのまま触り、MSR を `rdmsr` 命令で読むため。
 
 ### ビルド
 
-`src/*.c` と `port/vxworks/port_vxworks.c` を DKM などのソースに入れ、`include/` をインクルードパスに足す。
-`BFM_PORT_LINUX` は定義しない。64bit(x86-64)でビルドすること(それ以外は `#error` で止まる)。
-手元では `make vxcheck` で、仮のヘッダ(`tools/vxstub/`)を使って文法だけを確かめられる。
+`src/*.c`・`port/vxworks/port_vxworks.c`・`port/x86/bfm_x86.c`・`port/x86/bfm_x86_asm.S` を DKM のソースに入れ、
+`include/` と `port/x86/` をインクルードパスに足す。`BFM_PORT_LINUX` は定義しない。64bit(x86-64)でビルドすること
+(それ以外は `#error` で止まる)。アセンブラは GNU as の書き方(AT&T、System V AMD64 の呼び出し規約)。
+VxWorks のヘッダは使わないので、手元の `make vxcheck` で gcc の文法の検査とアセンブルができる。
 
 ## 試験(Linux + VFIO)
 

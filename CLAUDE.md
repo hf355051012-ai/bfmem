@@ -19,6 +19,9 @@ ConnectX(mlx5)の BlueFlame で、ノード間のメモリへ write / read / ato
 - **移植のときに設定する値は `include/bfm_config.h` に集める**(ユーザの指示)。設定を足すときは、
   宣言をここに、実体と既定値を `src/bfm_config.c` に置き、README の表にも足す。
 - **本体(`src/`)は OS の機能を使わない。** OS に依存するものは移植層(`include/bfm_port.h` の関数)へ。
+- **VxWorks の移植層も VxWorks 固有の関数を使わない**(ユーザの指示。使うのは C の `vprintf` だけ)。
+  時刻・待ち・CPU の情報は `port/x86/`(命令はアセンブラの `bfm_x86_asm.S`、TSC と MSR の扱いは `bfm_x86.c`)で CPU を直接触る。
+  存在しない MSR を読むと #GP で落ちるので、CPUID で確かめてから読む。
 - NIC に渡すアドレス = CPU のポインタの値(VxWorks は論理 = 物理、Linux は仮想 = IOVA に張る)。
   アドレスの変換を本体に持ち込まない。
 - ConnectX-7 でも動く前提で書く(README「ConnectX-7 への備え」)。CX-4 だけで通る書き方をしない。
@@ -51,6 +54,8 @@ wsl.exe -d Ubuntu-22.04 -- bash -c "cd /mnt/c/Users/fukud/Documents/bfmem && pyt
 - **フローの検査はできない**(書いた流れがソースと合っているかは、人が突き合わせる)。直したらその関数のフローも見直すこと。
 - switch の case の終わりの `break` はフローに書かない(書くと外側のループを抜ける意味になる)。
 - 関数ポインタ経由の呼び出しは解析で拾えないので、記述の `indirect` / `entry_note` で書く。
+- アセンブラの関数は `.globl` から拾い、宣言と説明は `port/x86/bfm_x86.h` の宣言と直前のコメントから取る
+  (`port/x86/bfm_x86.c` の章の表)。関数ポインタの変数(引数でないもの)は gen.py の `FUNC_PTR_VARS` に足す。
 
 ## 実機の試験
 

@@ -142,6 +142,10 @@ extern uint32_t g_bfm_signal_every;
  * BIOS / BSP で深い C-state を止めること(README「VxWorks への移植」)。 */
 extern uint32_t g_bfm_cpu_awake;
 
+/* TSC の周波数(Hz)。0 なら CPUID(15h・16h)か MSR_PLATFORM_INFO から求める(port/x86/bfm_x86.c)。
+ * VxWorks の時刻と待ちは TSC で作るので、求められない CPU ではここに入れる。Linux では表示にだけ使う。 */
+extern uint64_t g_bfm_tsc_hz;
+
 /* 1 = 立ち上げと接続の経過を細かく表示する。 */
 extern uint32_t g_bfm_verbose;
 

@@ -74,7 +74,8 @@ bfmem の関数のうち、外から使うもの。関数名を押すと、そ�
 * 各関数の節には、*表*(関数名・処理内容・引数・戻り値・前提条件・注意事項・使用関数)、*フロー図*、*関係図* を置く。
 ** *使用関数* は、その関数が呼ぶ関数を呼ぶ順に並べたもの(ソースの解析から作る。関係図の右側と同じ)。
    このソースの関数は名前を押すとその節へ飛ぶ。移植層の関数は Linux 版・VxWorks 版のそれぞれへ飛べる。
-   (外部)は C の標準ライブラリ・OS の関数、(マクロ)はバリアなどのマクロ。
+   (外部)は C の標準ライブラリ・OS の関数、(マクロ)はバリアなどのマクロ、
+   (アセンブラ)は `port/x86/bfm_x86_asm.S` の関数(名前を押すと `port/x86/bfm_x86.c` の章のアセンブラの関数の表へ飛ぶ)。
 * *フロー図* はソースの制御の流れ(if・ループ・break・continue・goto・return)をそのまま写したもの。
 ** 角の丸い箱 = 開始・終了・戻る(戻り値)、四角 = 処理、両側に線のある箱 = このソースの関数の呼び出し、
    ひし形 = 判断(下へ「はい」、右へ「いいえ」)、六角形 = 終わりの条件を持たない繰り返し、緑の楕円 = goto の行き先。
@@ -83,7 +84,7 @@ bfmem の関数のうち、外から使うもの。関数名を押すと、そ�
    その処理、当てはまらなければ下(「いいえ」)の判断へ。各処理の終わりは右端の線でまとまって下へ続く。
    どれにも当てはまらないときの処理(switch の default・最後の else)は、左の列のいちばん下。
 * *関係図* は、左がこの関数を呼ぶ関数、右がこの関数が呼ぶ関数。ソースを解析して作った。
-** 白 = このソースの関数(下の小さい字は定義しているファイル)、灰色 = 外部の関数(C の標準ライブラリ・OS・コンパイラ組み込み)とバリアのマクロ、
+** 白 = このソースの関数(下の小さい字は定義しているファイル)、灰色 = 外部の関数(C の標準ライブラリ・OS・コンパイラ組み込み)・マクロ・アセンブラの関数、
    破線 = 関数ポインタ経由・OS から呼ばれるもの。
 ** `BFM_LOG()` / `BFM_DBG()` は `bfm_port_log()` の呼び出しとして数える。
 ** 移植層(`bfm_port_*`)は Linux 版と VxWorks 版の 2 つの実装がある。ライブラリの関数の関係図には両方を出す(下の小さい字のファイル名で見分ける)。
@@ -3873,7 +3874,7 @@ image::call_src_bfm_ops-bfm_strerror.drawio.svg[bfm_strerror() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_port_log()
 |===
-|関数名 |`bfm_port_log`(`port/linux_vfio/port_linux.c` 52 行目)
+|関数名 |`bfm_port_log`(`port/linux_vfio/port_linux.c` 55 行目)
 |宣言 |`void bfm_port_log(const char *fmt, ...)`
 |処理内容 a|`printf` と同じ書式で標準出力に表示し、すぐに `fflush` する。
 |引数 a|
@@ -3903,7 +3904,7 @@ image::call_port_linux_vfio_port_linux-bfm_port_log.drawio.svg[bfm_port_log() �
 [cols="1,5",options="autowidth"]
 .bfm_port_time_ns()
 |===
-|関数名 |`bfm_port_time_ns`(`port/linux_vfio/port_linux.c` 61 行目)
+|関数名 |`bfm_port_time_ns`(`port/linux_vfio/port_linux.c` 64 行目)
 |宣言 |`uint64_t bfm_port_time_ns(void)`
 |処理内容 a|`clock_gettime(CLOCK_MONOTONIC)` で単調に増える時刻をナノ秒で返す。
 |引数 |なし
@@ -3924,7 +3925,7 @@ image::call_port_linux_vfio_port_linux-bfm_port_time_ns.drawio.svg[bfm_port_time
 [cols="1,5",options="autowidth"]
 .bfm_port_delay_us()
 |===
-|関数名 |`bfm_port_delay_us`(`port/linux_vfio/port_linux.c` 68 行目)
+|関数名 |`bfm_port_delay_us`(`port/linux_vfio/port_linux.c` 71 行目)
 |宣言 |`void bfm_port_delay_us(uint32_t us)`
 |処理内容 a|`nanosleep` で `us` マイクロ秒待つ。シグナルで起こされたら残りの時間を眠り直す。
 |引数 a|
@@ -3945,12 +3946,69 @@ image::flow_port_linux_vfio_port_linux-bfm_port_delay_us.drawio.svg[bfm_port_del
 .bfm_port_delay_us() の関係図
 image::call_port_linux_vfio_port_linux-bfm_port_delay_us.drawio.svg[bfm_port_delay_us() の関係図]
 
+[[port_linux_vfio_port_linux-linux_rdmsr]]
+=== `linux_rdmsr()`
+[cols="1,5",options="autowidth"]
+.linux_rdmsr()
+|===
+|関数名 |`linux_rdmsr`(`port/linux_vfio/port_linux.c` 86 行目)
+|宣言 |`static int linux_rdmsr(uint32_t msr, uint64_t *val)`
+|処理内容 a|`/dev/cpu/N/msr`(`cpu_init()` が開いた `s_msr_fd`)を、MSR の番号の位置から 8 バイト読む。`bfm_x86_init()` に渡す、MSR を読む関数。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`msr` !MSR の番号
+!`uint64_t *` !`val` !読んだ値を入れる先
+!===
+|戻り値 a|0: 読めた。-1: 読めなかった。
+|前提条件 a|`s_msr_fd` が開いていること(開けなかったときは `bfm_x86_init()` に NULL を渡すので呼ばれない)。
+|注意事項 a|ユーザ空間では `rdmsr` 命令を使えないので、カーネルの msr ドライバ(`modprobe msr`)を通して読む。root が要る。
+|使用関数 a|* `pread()`(外部)
+|===
+
+.linux_rdmsr() のフロー図
+image::flow_port_linux_vfio_port_linux-linux_rdmsr.drawio.svg[linux_rdmsr() のフロー図]
+
+.linux_rdmsr() の関係図
+image::call_port_linux_vfio_port_linux-linux_rdmsr.drawio.svg[linux_rdmsr() の関係図]
+
+[[port_linux_vfio_port_linux-cpu_init]]
+=== `cpu_init()`
+[cols="1,5",options="autowidth"]
+.cpu_init()
+|===
+|関数名 |`cpu_init`(`port/linux_vfio/port_linux.c` 91 行目)
+|宣言 |`static void cpu_init(void)`
+|処理内容 a|今いる CPU の `/dev/cpu/N/msr` を開き、`bfm_x86_init()` で CPU を調べて TSC の周波数を決める(開けたら `linux_rdmsr()` を、開けなければ NULL を渡す)。`g_bfm_verbose` なら、TSC を OS の時計で 100ms 測った周波数も表示して、求めた値と比べられるようにする。
+|引数 |なし
+|戻り値 a|なし
+|前提条件 a|特になし(`bfm_port_init()` から呼ぶ)。
+|注意事項 a|* Linux の時刻と待ちは OS のもの(`clock_gettime`・`nanosleep`)を使う。ここは TSC の周波数の求め方と MSR の読み方を、VxWorks と同じコードで確かめるためのもの。
+* `bfm_x86_init()` が失敗しても続ける(表示だけ)。
+* `/dev/cpu/N/msr` を開けないとき(msr ドライバが無い・root でない)は、`g_bfm_verbose` なら理由を表示して MSR を読まずに進む。
+|使用関数 a|* `sched_getcpu()`(外部)
+* `snprintf()`(外部)
+* `open()`(外部)
+* <<port_linux_vfio_port_linux-bfm_port_log,`bfm_port_log()`>>
+* <<port_x86_bfm_x86-bfm_x86_init,`bfm_x86_init()`>>
+* <<asm-bfm_x86_rdtsc,`bfm_x86_rdtsc()`>>(アセンブラ)
+* <<port_linux_vfio_port_linux-bfm_port_time_ns,`bfm_port_time_ns()`>>
+* <<port_linux_vfio_port_linux-bfm_port_delay_us,`bfm_port_delay_us()`>>
+|===
+
+.cpu_init() のフロー図
+image::flow_port_linux_vfio_port_linux-cpu_init.drawio.svg[cpu_init() のフロー図]
+
+.cpu_init() の関係図
+image::call_port_linux_vfio_port_linux-cpu_init.drawio.svg[cpu_init() の関係図]
+
 [[port_linux_vfio_port_linux-vfio_open_device]]
 === `vfio_open_device()`
 [cols="1,5",options="autowidth"]
 .vfio_open_device()
 |===
-|関数名 |`vfio_open_device`(`port/linux_vfio/port_linux.c` 79 行目)
+|関数名 |`vfio_open_device`(`port/linux_vfio/port_linux.c` 118 行目)
 |宣言 |`static int vfio_open_device(const char *bdf)`
 |処理内容 a|PCI アドレス `bdf` の装置を VFIO で掴む。sysfs の `iommu_group` からグループ番号を読み、`/dev/vfio/vfio`(コンテナ)と `/dev/vfio/<グループ>` を開いて Type1 IOMMU を設定し、装置の fd を取る。あわせて設定空間と BAR0 の領域の位置(`s_cfg_off`・`s_bar0_vfio_off`)と BAR0 の大きさ(`s_bar0_size`)を読む。
 |引数 a|
@@ -3983,7 +4041,7 @@ image::call_port_linux_vfio_port_linux-vfio_open_device.drawio.svg[vfio_open_dev
 [cols="1,5",options="autowidth"]
 .map_region()
 |===
-|関数名 |`map_region`(`port/linux_vfio/port_linux.c` 133 行目)
+|関数名 |`map_region`(`port/linux_vfio/port_linux.c` 172 行目)
 |宣言 |`static void *map_region(uint64_t va, uint64_t size, const char *what)`
 |処理内容 a|仮想アドレス `va` の位置に `size` バイトの無名メモリを張り(`va` と `size` が 2MiB の境界・倍数なら hugepage を先に試す)、同じ値を IOVA にして `VFIO_IOMMU_MAP_DMA` で NIC から見えるようにする。
 |引数 a|
@@ -4016,9 +4074,9 @@ image::call_port_linux_vfio_port_linux-map_region.drawio.svg[map_region() の関
 [cols="1,5",options="autowidth"]
 .bfm_port_init()
 |===
-|関数名 |`bfm_port_init`(`port/linux_vfio/port_linux.c` 161 行目)
+|関数名 |`bfm_port_init`(`port/linux_vfio/port_linux.c` 200 行目)
 |宣言 |`int bfm_port_init(void)`
-|処理内容 a|移植層を立ち上げる。`g_bfm_linux_pci_bdf` の装置を VFIO で掴み(`vfio_open_device()`)、DMA 領域と公開メモリを `g_bfm_dma_base` / `g_bfm_mr_base` に張って IOVA に対応づける(`map_region()`)。`g_bfm_cpu_awake` が 0 でなければ `/dev/cpu_dma_latency` に 0 を書いて fd を開いたままにし、CPU を深い C-state に入れない。
+|処理内容 a|移植層を立ち上げる。`g_bfm_linux_pci_bdf` の装置を VFIO で掴み(`vfio_open_device()`)、DMA 領域と公開メモリを `g_bfm_dma_base` / `g_bfm_mr_base` に張って IOVA に対応づける(`map_region()`)。`cpu_init()` で CPU を調べる(TSC の周波数・MSR。時刻と待ちには使わない)。`g_bfm_cpu_awake` が 0 でなければ `/dev/cpu_dma_latency` に 0 を書いて fd を開いたままにし、CPU を深い C-state に入れない。
 |引数 |なし
 |戻り値 a|0: 成功。-1: 失敗(取ったものは `bfm_port_fini()` で返してある)。
 |前提条件 a|`g_bfm_linux_pci_bdf`・`g_bfm_dma_base` / `g_bfm_dma_size`・`g_bfm_mr_base` / `g_bfm_mr_size` を設定してあること。装置を vfio-pci に結びつけてあること。
@@ -4028,6 +4086,7 @@ image::call_port_linux_vfio_port_linux-map_region.drawio.svg[map_region() の関
 * <<port_linux_vfio_port_linux-vfio_open_device,`vfio_open_device()`>>
 * <<port_linux_vfio_port_linux-bfm_port_fini,`bfm_port_fini()`>>
 * <<port_linux_vfio_port_linux-map_region,`map_region()`>>
+* <<port_linux_vfio_port_linux-cpu_init,`cpu_init()`>>
 * `open()`(外部)
 * `write()`(外部)
 * `close()`(外部)
@@ -4044,9 +4103,9 @@ image::call_port_linux_vfio_port_linux-bfm_port_init.drawio.svg[bfm_port_init() 
 [cols="1,5",options="autowidth"]
 .bfm_port_fini()
 |===
-|関数名 |`bfm_port_fini`(`port/linux_vfio/port_linux.c` 191 行目)
+|関数名 |`bfm_port_fini`(`port/linux_vfio/port_linux.c` 231 行目)
 |宣言 |`void bfm_port_fini(void)`
-|処理内容 a|移植層が取ったものを返す。BAR0 を張っていれば外し、VFIO の装置・グループ・コンテナの fd を閉じ(IOMMU の対応づけもここで外れる)、DMA 領域と公開メモリを外し、`/dev/cpu_dma_latency` を閉じる。
+|処理内容 a|移植層が取ったものを返す。BAR0 を張っていれば外し、VFIO の装置・グループ・コンテナの fd を閉じ(IOMMU の対応づけもここで外れる)、DMA 領域と公開メモリを外し、`/dev/cpu_dma_latency` と `/dev/cpu/N/msr` を閉じる。
 |引数 |なし
 |戻り値 a|なし
 |前提条件 a|Bus Master を落としてあること(NIC がメモリへ DMA しないこと)。
@@ -4067,7 +4126,7 @@ image::call_port_linux_vfio_port_linux-bfm_port_fini.drawio.svg[bfm_port_fini() 
 [cols="1,5",options="autowidth"]
 .bfm_port_pci_read32()
 |===
-|関数名 |`bfm_port_pci_read32`(`port/linux_vfio/port_linux.c` 205 行目)
+|関数名 |`bfm_port_pci_read32`(`port/linux_vfio/port_linux.c` 247 行目)
 |宣言 |`uint32_t bfm_port_pci_read32(uint32_t off)`
 |処理内容 a|PCIe の設定空間の `off` から 32bit を読む。VFIO の装置の fd の設定空間の領域を `pread` する。
 |引数 a|
@@ -4094,7 +4153,7 @@ image::call_port_linux_vfio_port_linux-bfm_port_pci_read32.drawio.svg[bfm_port_p
 [cols="1,5",options="autowidth"]
 .bfm_port_pci_write32()
 |===
-|関数名 |`bfm_port_pci_write32`(`port/linux_vfio/port_linux.c` 213 行目)
+|関数名 |`bfm_port_pci_write32`(`port/linux_vfio/port_linux.c` 255 行目)
 |宣言 |`void bfm_port_pci_write32(uint32_t off, uint32_t val)`
 |処理内容 a|PCIe の設定空間の `off` へ 32bit を書く。VFIO の装置の fd の設定空間の領域へ `pwrite` する。
 |引数 a|
@@ -4122,7 +4181,7 @@ image::call_port_linux_vfio_port_linux-bfm_port_pci_write32.drawio.svg[bfm_port_
 [cols="1,5",options="autowidth"]
 .bar_map_uc()
 |===
-|関数名 |`bar_map_uc`(`port/linux_vfio/port_linux.c` 224 行目)
+|関数名 |`bar_map_uc`(`port/linux_vfio/port_linux.c` 266 行目)
 |宣言 |`static void *bar_map_uc(void *va, uint64_t off, uint64_t len, int fixed)`
 |処理内容 a|BAR0 の `[off, off+len)` を UC で `va` に張る。`s_bar0_sysfs` が 0 でなければ sysfs の `resource0` を `O_SYNC` で開いて張り、0 なら VFIO の装置の fd の BAR0 の領域から張る。
 |引数 a|
@@ -4154,7 +4213,7 @@ image::call_port_linux_vfio_port_linux-bar_map_uc.drawio.svg[bar_map_uc() の関
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_map()
 |===
-|関数名 |`bfm_port_bar0_map`(`port/linux_vfio/port_linux.c` 242 行目)
+|関数名 |`bfm_port_bar0_map`(`port/linux_vfio/port_linux.c` 284 行目)
 |宣言 |`volatile uint8_t *bfm_port_bar0_map(uint64_t bar_phys, uint64_t bar_size)`
 |処理内容 a|BAR0 全体(VFIO から読んだ大きさ `s_bar0_size`)を UC で張って先頭を返す。まず sysfs の `resource0` から張り、だめなら VFIO の fd から張る(このときは BlueFlame を使えない)。
 |引数 a|
@@ -4183,7 +4242,7 @@ image::call_port_linux_vfio_port_linux-bfm_port_bar0_map.drawio.svg[bfm_port_bar
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_unmap()
 |===
-|関数名 |`bfm_port_bar0_unmap`(`port/linux_vfio/port_linux.c` 260 行目)
+|関数名 |`bfm_port_bar0_unmap`(`port/linux_vfio/port_linux.c` 302 行目)
 |宣言 |`void bfm_port_bar0_unmap(void)`
 |処理内容 a|BAR0 の窓を外し、UC の窓の mmap の一覧を空にする。
 |引数 |なし
@@ -4204,7 +4263,7 @@ image::call_port_linux_vfio_port_linux-bfm_port_bar0_unmap.drawio.svg[bfm_port_b
 [cols="1,5",options="autowidth"]
 .seg_add()
 |===
-|関数名 |`seg_add`(`port/linux_vfio/port_linux.c` 268 行目)
+|関数名 |`seg_add`(`port/linux_vfio/port_linux.c` 310 行目)
 |宣言 |`static void seg_add(uint64_t off, uint64_t len)`
 |処理内容 a|UC で張った BAR0 の区間 `[off, off+len)` を、UC の mmap の一覧 `s_seg` に足す。一覧が満杯なら足さない。
 |引数 a|
@@ -4231,7 +4290,7 @@ image::call_port_linux_vfio_port_linux-seg_add.drawio.svg[seg_add() の関係図
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_wc()
 |===
-|関数名 |`bfm_port_bar0_wc`(`port/linux_vfio/port_linux.c` 281 行目)
+|関数名 |`bfm_port_bar0_wc`(`port/linux_vfio/port_linux.c` 323 行目)
 |宣言 |`volatile uint8_t *bfm_port_bar0_wc(uint64_t off, uint64_t len)`
 |処理内容 a|BAR0 の `[off, off+len)`(UAR の 1 ページ)を、同じ仮想アドレスのまま write-combining に張り替えて先頭を返す。その範囲を含む UC の mmap を探し、範囲の前と後を UC で張り直して元の mmap をその範囲だけに縮め、その範囲を外してから sysfs の `resource0_wc` で張る。失敗したらその範囲を UC に戻して NULL を返す。
 |引数 a|
@@ -4270,7 +4329,7 @@ image::call_port_linux_vfio_port_linux-bfm_port_bar0_wc.drawio.svg[bfm_port_bar0
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_wc_release()
 |===
-|関数名 |`bfm_port_bar0_wc_release`(`port/linux_vfio/port_linux.c` 320 行目)
+|関数名 |`bfm_port_bar0_wc_release`(`port/linux_vfio/port_linux.c` 362 行目)
 |宣言 |`void bfm_port_bar0_wc_release(uint64_t off, uint64_t len)`
 |処理内容 a|`bfm_port_bar0_wc()` で WC に張り替えた BAR0 の `[off, off+len)` を外し、同じ仮想アドレスに UC で張り直して、UC の mmap の一覧に足す。
 |引数 a|
@@ -4297,14 +4356,14 @@ image::call_port_linux_vfio_port_linux-bfm_port_bar0_wc_release.drawio.svg[bfm_p
 
 == `port/vxworks/port_vxworks.c`
 
-移植層の x86-64 VxWorks 版(論理アドレス = 物理アドレス)。**この版は未検証(VxWorks の機材で動かしていない)。** 使う VxWorks の API は `printf`・`tick64Get`・`sysClkRateGet`・`taskDelay` だけ。DMA 領域・公開メモリ(論理 = 物理・ライトバック)と BAR0(論理 = 物理・キャッシュしない属性)を張るのは BSP 側の役目で、この版はアドレスをそのまま返す。x86 の DMA はキャッシュと一貫しているので、キャッシュの操作はしない。PCIe の設定空間は ECAM(`g_bfm_pcie_ecam_base`)を直接読み書きする(設定空間はリトルエンディアンなので、バイト順はそのまま)。BlueFlame には、BSP が PAT の WC で張った BAR0 全体の write-combining の別名(`g_bfm_bar0_wc_va`)を使う。
+移植層の x86-64 VxWorks 版(論理アドレス = 物理アドレス)。**この版は未検証(VxWorks の機材で動かしていない)。** VxWorks 固有の関数は使わない(使うのは C の `vprintf` だけ)。時刻と待ちは TSC で作る(`port/x86/bfm_x86.c`)。MSR は `rdmsr` 命令で読むので、bfmem はカーネル(DKM)のタスクから使う。DMA 領域・公開メモリ(論理 = 物理・ライトバック)と BAR0(論理 = 物理・キャッシュしない属性)を張るのは BSP 側の役目で、この版はアドレスをそのまま返す。x86 の DMA はキャッシュと一貫しているので、キャッシュの操作はしない。PCIe の設定空間は ECAM(`g_bfm_pcie_ecam_base`)を直接読み書きする(設定空間はリトルエンディアンなので、バイト順はそのまま)。BlueFlame には、BSP が PAT の WC で張った BAR0 全体の write-combining の別名(`g_bfm_bar0_wc_va`)を使う。
 
 [[port_vxworks_port_vxworks-bfm_port_log]]
 === `bfm_port_log()`
 [cols="1,5",options="autowidth"]
 .bfm_port_log()
 |===
-|関数名 |`bfm_port_log`(`port/vxworks/port_vxworks.c` 26 行目)
+|関数名 |`bfm_port_log`(`port/vxworks/port_vxworks.c` 31 行目)
 |宣言 |`void bfm_port_log(const char *fmt, ...)`
 |処理内容 a|`printf` と同じ書式で表示する(`vprintf`)。
 |引数 a|
@@ -4333,18 +4392,15 @@ image::call_port_vxworks_port_vxworks-bfm_port_log.drawio.svg[bfm_port_log() の
 [cols="1,5",options="autowidth"]
 .bfm_port_time_ns()
 |===
-|関数名 |`bfm_port_time_ns`(`port/vxworks/port_vxworks.c` 35 行目)
+|関数名 |`bfm_port_time_ns`(`port/vxworks/port_vxworks.c` 40 行目)
 |宣言 |`uint64_t bfm_port_time_ns(void)`
-|処理内容 a|`tick64Get()` の tick の数に、1 tick のナノ秒(`10^9 / sysClkRateGet()`)を掛けて時刻を返す。
+|処理内容 a|TSC から作った時刻を返す(`bfm_x86_time_ns()`)。
 |引数 |なし
-|戻り値 a|時刻(ナノ秒)。分解能は 1 tick。
-|前提条件 a|特になし。
-|注意事項 a|* 時間切れの判定にしか使わない前提で、分解能は 1 tick。
-* `tick64Get()` は 64bit なので一周しない。
-* `sysClkRateGet()` が 0 を返したときは 60Hz として計算する。
+|戻り値 a|時刻(ナノ秒)。
+|前提条件 a|`bfm_port_init()` が成功していること(TSC の周波数をそこで決める)。
+|注意事項 a|* TSC の周波数の誤差がそのまま時刻の誤差になる(CPUID 16h の名目の値を使うと 0.3% ほどずれることがある。正確にするなら `g_bfm_tsc_hz`)。
 * VxWorks の実機で未検証。
-|使用関数 a|* `sysClkRateGet()`(外部)
-* `tick64Get()`(外部)
+|使用関数 a|* <<port_x86_bfm_x86-bfm_x86_time_ns,`bfm_x86_time_ns()`>>
 |===
 
 .bfm_port_time_ns() のフロー図
@@ -4358,9 +4414,9 @@ image::call_port_vxworks_port_vxworks-bfm_port_time_ns.drawio.svg[bfm_port_time_
 [cols="1,5",options="autowidth"]
 .bfm_port_delay_us()
 |===
-|関数名 |`bfm_port_delay_us`(`port/vxworks/port_vxworks.c` 41 行目)
+|関数名 |`bfm_port_delay_us`(`port/vxworks/port_vxworks.c` 45 行目)
 |宣言 |`void bfm_port_delay_us(uint32_t us)`
-|処理内容 a|`us` マイクロ秒を tick の数に切り上げて `taskDelay` で待つ。最低 1 tick 待つ。
+|処理内容 a|TSC を見ながら空回りで `us` マイクロ秒待つ(`bfm_x86_delay_us()`)。
 |引数 a|
 [cols="2,1,4"]
 !===
@@ -4368,12 +4424,10 @@ image::call_port_vxworks_port_vxworks-bfm_port_time_ns.drawio.svg[bfm_port_time_
 !`uint32_t` !`us` !待つ時間(マイクロ秒)
 !===
 |戻り値 a|なし
-|前提条件 a|タスクから呼ぶこと(`taskDelay` を使う)。
-|注意事項 a|* 分解能は 1 tick なので、短い待ちでも 1 tick 待つ。
-* `taskDelay` の戻り値は見ない。
+|前提条件 a|`bfm_port_init()` が成功していること。
+|注意事項 a|* CPU を他のタスクに譲らない(待つのは立ち上げ・接続・切断の間だけ)。
 * VxWorks の実機で未検証。
-|使用関数 a|* `sysClkRateGet()`(外部)
-* `taskDelay()`(外部)
+|使用関数 a|* <<port_x86_bfm_x86-bfm_x86_delay_us,`bfm_x86_delay_us()`>>
 |===
 
 .bfm_port_delay_us() のフロー図
@@ -4382,20 +4436,50 @@ image::flow_port_vxworks_port_vxworks-bfm_port_delay_us.drawio.svg[bfm_port_dela
 .bfm_port_delay_us() の関係図
 image::call_port_vxworks_port_vxworks-bfm_port_delay_us.drawio.svg[bfm_port_delay_us() の関係図]
 
+[[port_vxworks_port_vxworks-vx_rdmsr]]
+=== `vx_rdmsr()`
+[cols="1,5",options="autowidth"]
+.vx_rdmsr()
+|===
+|関数名 |`vx_rdmsr`(`port/vxworks/port_vxworks.c` 51 行目)
+|宣言 |`static int vx_rdmsr(uint32_t msr, uint64_t *val)`
+|処理内容 a|`rdmsr` 命令(`bfm_x86_rdmsr()`)で MSR を読む。`bfm_x86_init()` に渡す、MSR を読む関数。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`msr` !MSR の番号
+!`uint64_t *` !`val` !読んだ値を入れる先
+!===
+|戻り値 a|0(常に読めたとする)。
+|前提条件 a|リング 0(カーネルのタスク)で動いていること。その CPU にある MSR であること(`bfm_x86.c` の `msr_read()` が CPUID で確かめてから呼ぶ)。
+|注意事項 a|* 存在しない MSR を読むと #GP で落ちる。
+* VxWorks の実機で未検証。
+|使用関数 a|* <<asm-bfm_x86_rdmsr,`bfm_x86_rdmsr()`>>(アセンブラ)
+|===
+
+.vx_rdmsr() のフロー図
+image::flow_port_vxworks_port_vxworks-vx_rdmsr.drawio.svg[vx_rdmsr() のフロー図]
+
+.vx_rdmsr() の関係図
+image::call_port_vxworks_port_vxworks-vx_rdmsr.drawio.svg[vx_rdmsr() の関係図]
+
 [[port_vxworks_port_vxworks-bfm_port_init]]
 === `bfm_port_init()`
 [cols="1,5",options="autowidth"]
 .bfm_port_init()
 |===
-|関数名 |`bfm_port_init`(`port/vxworks/port_vxworks.c` 49 行目)
+|関数名 |`bfm_port_init`(`port/vxworks/port_vxworks.c` 57 行目)
 |宣言 |`int bfm_port_init(void)`
-|処理内容 a|移植層を立ち上げる。ECAM の位置 `g_bfm_pcie_ecam_base` が設定されているかだけを確かめる。DMA 領域・公開メモリは BSP が論理 = 物理で張ってある前提で、ここでは何もしない。
+|処理内容 a|移植層を立ち上げる。ECAM の位置 `g_bfm_pcie_ecam_base` が設定されているかを確かめ、`bfm_x86_init()` で TSC の周波数を決める(MSR を読む関数として `vx_rdmsr()` を渡す)。DMA 領域・公開メモリは BSP が論理 = 物理で張ってある前提で、ここでは何もしない。
 |引数 |なし
-|戻り値 a|0: 成功。-1: `g_bfm_pcie_ecam_base` が 0(理由を表示する)。
-|前提条件 a|`g_bfm_dma_*` と `g_bfm_mr_*` の物理メモリが OS に使われず、論理 = 物理・ライトバックで張られていること(BSP の役目)。`g_bfm_pcie_ecam_base` を設定してあること。
+|戻り値 a|0: 成功。-1: `g_bfm_pcie_ecam_base` が 0、または TSC の周波数が分からない(理由を表示する)。
+|前提条件 a|`g_bfm_dma_*` と `g_bfm_mr_*` の物理メモリが OS に使われず、論理 = 物理・ライトバックで張られていること(BSP の役目)。`g_bfm_pcie_ecam_base` を設定してあること。カーネルのタスクから呼ぶこと。
 |注意事項 a|* `g_bfm_cpu_awake` はこの版では何もしない(深い C-state は BIOS / BSP で止める)。
+* `g_bfm_verbose` なら CPU の名前・TSC・周波数・パッケージ C-state の上限を表示する。
 * VxWorks の実機で未検証。
 |使用関数 a|* <<port_vxworks_port_vxworks-bfm_port_log,`bfm_port_log()`>>
+* <<port_x86_bfm_x86-bfm_x86_init,`bfm_x86_init()`>>
 |===
 
 .bfm_port_init() のフロー図
@@ -4409,7 +4493,7 @@ image::call_port_vxworks_port_vxworks-bfm_port_init.drawio.svg[bfm_port_init() �
 [cols="1,5",options="autowidth"]
 .bfm_port_fini()
 |===
-|関数名 |`bfm_port_fini`(`port/vxworks/port_vxworks.c` 58 行目)
+|関数名 |`bfm_port_fini`(`port/vxworks/port_vxworks.c` 66 行目)
 |宣言 |`void bfm_port_fini(void)`
 |処理内容 a|移植層が取ったものを返す。この版は何も取らないので何もしない。
 |引数 |なし
@@ -4430,7 +4514,7 @@ image::call_port_vxworks_port_vxworks-bfm_port_fini.drawio.svg[bfm_port_fini() �
 [cols="1,5",options="autowidth"]
 .ecam()
 |===
-|関数名 |`ecam`(`port/vxworks/port_vxworks.c` 62 行目)
+|関数名 |`ecam`(`port/vxworks/port_vxworks.c` 70 行目)
 |宣言 |`static volatile uint32_t *ecam(uint32_t off)`
 |処理内容 a|設定空間の `off` に対応する ECAM のアドレスを計算して返す(`g_bfm_pcie_ecam_base` + bus << 20 + dev << 15 + func << 12 + (`off` の下位 12 ビットを 4 の倍数に揃えたもの))。
 |引数 a|
@@ -4457,7 +4541,7 @@ image::call_port_vxworks_port_vxworks-ecam.drawio.svg[ecam() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_port_pci_read32()
 |===
-|関数名 |`bfm_port_pci_read32`(`port/vxworks/port_vxworks.c` 70 行目)
+|関数名 |`bfm_port_pci_read32`(`port/vxworks/port_vxworks.c` 78 行目)
 |宣言 |`uint32_t bfm_port_pci_read32(uint32_t off)`
 |処理内容 a|PCIe の設定空間の `off` から 32bit を ECAM で直接読む。設定空間はリトルエンディアンなので、x86 ではそのまま返す。
 |引数 a|
@@ -4483,7 +4567,7 @@ image::call_port_vxworks_port_vxworks-bfm_port_pci_read32.drawio.svg[bfm_port_pc
 [cols="1,5",options="autowidth"]
 .bfm_port_pci_write32()
 |===
-|関数名 |`bfm_port_pci_write32`(`port/vxworks/port_vxworks.c` 75 行目)
+|関数名 |`bfm_port_pci_write32`(`port/vxworks/port_vxworks.c` 83 行目)
 |宣言 |`void bfm_port_pci_write32(uint32_t off, uint32_t val)`
 |処理内容 a|PCIe の設定空間の `off` へ 32bit を ECAM で直接書き(設定空間はリトルエンディアンなので、x86 ではそのまま書く)、`bfm_mb()` で順序を保つ。
 |引数 a|
@@ -4511,7 +4595,7 @@ image::call_port_vxworks_port_vxworks-bfm_port_pci_write32.drawio.svg[bfm_port_p
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_map()
 |===
-|関数名 |`bfm_port_bar0_map`(`port/vxworks/port_vxworks.c` 83 行目)
+|関数名 |`bfm_port_bar0_map`(`port/vxworks/port_vxworks.c` 91 行目)
 |宣言 |`volatile uint8_t *bfm_port_bar0_map(uint64_t bar_phys, uint64_t bar_size)`
 |処理内容 a|BAR0 の先頭を返す。論理 = 物理なので、設定空間から読んだ BAR0 の値をそのままポインタにする。`bar_size` は `bfm_port_bar0_wc()` の範囲の検査のために静的変数 `s_bar_size` に覚えておく。
 |引数 a|
@@ -4538,7 +4622,7 @@ image::call_port_vxworks_port_vxworks-bfm_port_bar0_map.drawio.svg[bfm_port_bar0
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_unmap()
 |===
-|関数名 |`bfm_port_bar0_unmap`(`port/vxworks/port_vxworks.c` 89 行目)
+|関数名 |`bfm_port_bar0_unmap`(`port/vxworks/port_vxworks.c` 97 行目)
 |宣言 |`void bfm_port_bar0_unmap(void)`
 |処理内容 a|BAR0 の窓を外す。この版は張っていないので、覚えておいた BAR0 の大きさ `s_bar_size` を 0 に戻すだけ。
 |引数 |なし
@@ -4560,7 +4644,7 @@ image::call_port_vxworks_port_vxworks-bfm_port_bar0_unmap.drawio.svg[bfm_port_ba
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_wc()
 |===
-|関数名 |`bfm_port_bar0_wc`(`port/vxworks/port_vxworks.c` 94 行目)
+|関数名 |`bfm_port_bar0_wc`(`port/vxworks/port_vxworks.c` 102 行目)
 |宣言 |`volatile uint8_t *bfm_port_bar0_wc(uint64_t off, uint64_t len)`
 |処理内容 a|BAR0 の `[off, off+len)` を write-combining で触れるアドレスを返す。範囲が BAR0(`bfm_port_bar0_map()` で覚えた大きさ `s_bar_size`)の中にあることを確かめ、BSP が用意した BAR0 全体の WC の別名 `g_bfm_bar0_wc_va` に `off` を足す。
 |引数 a|
@@ -4589,7 +4673,7 @@ image::call_port_vxworks_port_vxworks-bfm_port_bar0_wc.drawio.svg[bfm_port_bar0_
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_wc_release()
 |===
-|関数名 |`bfm_port_bar0_wc_release`(`port/vxworks/port_vxworks.c` 105 行目)
+|関数名 |`bfm_port_bar0_wc_release`(`port/vxworks/port_vxworks.c` 113 行目)
 |宣言 |`void bfm_port_bar0_wc_release(uint64_t off, uint64_t len)`
 |処理内容 a|`bfm_port_bar0_wc()` で得た WC の範囲を返す。この版は張り替えていないので何もしない。
 |引数 a|
@@ -4610,6 +4694,207 @@ image::flow_port_vxworks_port_vxworks-bfm_port_bar0_wc_release.drawio.svg[bfm_po
 
 .bfm_port_bar0_wc_release() の関係図
 image::call_port_vxworks_port_vxworks-bfm_port_bar0_wc_release.drawio.svg[bfm_port_bar0_wc_release() の関係図]
+
+== `port/x86/bfm_x86.c`
+
+x86-64 の CPU を直接触る部品(Linux 版と VxWorks 版の移植層の両方から使う。OS の機能は使わず、表示だけ `bfm_port_log()`)。CPU の命令はアセンブラの関数(`port/x86/bfm_x86_asm.S`、下の表)で出す。TSC の周波数を `g_bfm_tsc_hz` → CPUID 15h → CPUID 16h → `MSR_PLATFORM_INFO` の順に決め、TSC から時刻(ナノ秒)と空回りの待ちを作る(VxWorks 版の `bfm_port_time_ns()` / `bfm_port_delay_us()` はこれ)。`g_bfm_verbose` のとき、CPU の名前・TSC・周波数(基準・最小・ターボの最大・今の倍率・APERF / MPERF で測った実効)・パッケージ C-state の上限を MSR で読んで表示する。MSR は移植層が渡す関数で読む(VxWorks 版は `rdmsr` 命令、Linux 版は `/dev/cpu/N/msr`)。存在しない MSR を読むと #GP で落ちるので、CPUID で機能を確かめ、機種ごとの MSR は Intel の family 6 のときだけ読む。
+
+=== アセンブラの関数(`port/x86/bfm_x86_asm.S`)
+
+命令 1 つずつを包んだ関数。宣言は `port/x86/bfm_x86.h`。呼び出し規約は System V AMD64(引数は edi / rdi・esi / rsi・rdx の順、戻り値は rax)。フロー図と関係図は無い。
+
+[cols="2,3,4",options="autowidth"]
+.アセンブラの関数
+|===
+|関数 |宣言 |処理内容
+|[[asm-bfm_x86_rdtsc]]`bfm_x86_rdtsc()` |`uint64_t bfm_x86_rdtsc(void)` |TSC を読む(rdtsc)。
+|[[asm-bfm_x86_cpuid]]`bfm_x86_cpuid()` |`void bfm_x86_cpuid(uint32_t leaf, uint32_t sub, uint32_t out[4])` |CPUID(eax = leaf, ecx = sub)。out[0..3] = eax, ebx, ecx, edx。
+|[[asm-bfm_x86_rdmsr]]`bfm_x86_rdmsr()` |`uint64_t bfm_x86_rdmsr(uint32_t msr)` |MSR を読む(rdmsr。リング 0 でだけ使える)。
+|[[asm-bfm_x86_wrmsr]]`bfm_x86_wrmsr()` |`void bfm_x86_wrmsr(uint32_t msr, uint64_t val)` |MSR に書く(wrmsr。リング 0 でだけ使える)。
+|[[asm-bfm_x86_pause]]`bfm_x86_pause()` |`void bfm_x86_pause(void)` |待ちのループの中で呼ぶ(pause)。
+|===
+
+[[port_x86_bfm_x86-cpu_probe]]
+=== `cpu_probe()`
+[cols="1,5",options="autowidth"]
+.cpu_probe()
+|===
+|関数名 |`cpu_probe`(`port/x86/bfm_x86.c` 32 行目)
+|宣言 |`static void cpu_probe(void)`
+|処理内容 a|CPUID で CPU の種類(Intel かどうか・family・model・名前)と、使える機能(CPUID の最大の番号、leaf 1 の ecx、leaf 6 の eax / ecx、TSC が invariant か)を調べて、ファイルの中の変数に覚える。
+|引数 |なし
+|戻り値 a|なし
+|前提条件 a|特になし(CPUID はどの特権でも使える)。
+|注意事項 a|* family が 0xf なら拡張 family を足し、family が 6 か 0xf なら拡張 model を上位 4bit に足す(Intel SDM の規則)。
+* 名前(CPUID 8000_0002h〜8000_0004h)が無い CPU では空の文字列にする。
+|使用関数 a|* <<asm-bfm_x86_cpuid,`bfm_x86_cpuid()`>>(アセンブラ)
+* `memcpy()`(外部)
+|===
+
+.cpu_probe() のフロー図
+image::flow_port_x86_bfm_x86-cpu_probe.drawio.svg[cpu_probe() のフロー図]
+
+.cpu_probe() の関係図
+image::call_port_x86_bfm_x86-cpu_probe.drawio.svg[cpu_probe() の関係図]
+
+[[port_x86_bfm_x86-msr_read]]
+=== `msr_read()`
+[cols="1,5",options="autowidth"]
+.msr_read()
+|===
+|関数名 |`msr_read`(`port/x86/bfm_x86.c` 74 行目)
+|宣言 |`static int msr_read(uint32_t msr, uint64_t *val)`
+|処理内容 a|移植層が渡した関数(`s_rdmsr`)で MSR を読む。読む関数が無いとき、Intel の family 6 でないときは読まずに -1 を返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`msr` !MSR の番号
+!`uint64_t *` !`val` !読んだ値を入れる先
+!===
+|戻り値 a|0: 読めた。-1: 読まなかった・読めなかった。
+|前提条件 a|`cpu_probe()` が済んでいること(`bfm_x86_init()` の中から呼ぶ)。
+|注意事項 a|* MSR がその CPU にあるかは呼び出し側が CPUID で確かめる。ここで見るのは Intel の family 6 かどうかだけ。
+* `s_rdmsr` は VxWorks 版では `vx_rdmsr()`(`rdmsr` 命令)、Linux 版では `linux_rdmsr()`(`/dev/cpu/N/msr`)。
+|使用関数 a|* `vx_rdmsr()`(関数ポインタ経由)
+* `linux_rdmsr()`(関数ポインタ経由)
+|===
+
+.msr_read() のフロー図
+image::flow_port_x86_bfm_x86-msr_read.drawio.svg[msr_read() のフロー図]
+
+.msr_read() の関係図
+image::call_port_x86_bfm_x86-msr_read.drawio.svg[msr_read() の関係図]
+
+[[port_x86_bfm_x86-tsc_hz_find]]
+=== `tsc_hz_find()`
+[cols="1,5",options="autowidth"]
+.tsc_hz_find()
+|===
+|関数名 |`tsc_hz_find`(`port/x86/bfm_x86.c` 81 行目)
+|宣言 |`static uint64_t tsc_hz_find(void)`
+|処理内容 a|TSC の周波数(Hz)を決める。`g_bfm_tsc_hz` → CPUID 15h(水晶の周波数 × ebx / eax)→ CPUID 16h(基準の周波数 MHz)→ `MSR_PLATFORM_INFO`(基準の倍率 × 100MHz)の順に、最初に得られたものを使い、どれを使ったかを `s_tsc_src` に覚える。
+|引数 |なし
+|戻り値 a|TSC の周波数(Hz)。0 = 分からない。
+|前提条件 a|`cpu_probe()` が済んでいること。
+|注意事項 a|* CPUID 16h と `MSR_PLATFORM_INFO` は 100MHz 単位の名目の値で、実際の TSC とずれることがある(Xeon W-2245 で 3900 MHz に対し実際は 3911.99 MHz)。
+* CPUID 15h の水晶の周波数(ecx)が 0 の CPU では 16h へ進む(Core i3-8100・Xeon W-2245 はどちらも 0)。
+|使用関数 a|* <<asm-bfm_x86_cpuid,`bfm_x86_cpuid()`>>(アセンブラ)
+* <<port_x86_bfm_x86-msr_read,`msr_read()`>>
+|===
+
+.tsc_hz_find() のフロー図
+image::flow_port_x86_bfm_x86-tsc_hz_find.drawio.svg[tsc_hz_find() のフロー図]
+
+.tsc_hz_find() の関係図
+image::call_port_x86_bfm_x86-tsc_hz_find.drawio.svg[tsc_hz_find() の関係図]
+
+[[port_x86_bfm_x86-bfm_x86_init]]
+=== `bfm_x86_init()`
+[cols="1,5",options="autowidth"]
+.bfm_x86_init()
+|===
+|関数名 |`bfm_x86_init`(`port/x86/bfm_x86.c` 111 行目)
+|宣言 |`int bfm_x86_init(bfm_x86_msr_reader rdmsr)`
+|処理内容 a|CPU を調べ(`cpu_probe()`)、TSC の周波数を決めて(`tsc_hz_find()`)、TSC からナノ秒へ直す係数(`s_ns_mult` = 10^9 × 2^32 / 周波数)を求める。TSC が invariant でなければ注意を表示する。`g_bfm_verbose` なら `bfm_x86_report()` で CPU の情報を表示する。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_x86_msr_reader` !`rdmsr` !MSR を読む関数(移植層が渡す)。NULL なら MSR を読まない
+!===
+|戻り値 a|0: 成功。-1: TSC の周波数が分からない(理由を表示する)。
+|前提条件 a|`bfm_x86_time_ns()` / `bfm_x86_delay_us()` を使う前に 1 度呼ぶこと(移植層の `bfm_port_init()` から呼ぶ)。
+|注意事項 a|* VxWorks 版は失敗すると `bfm_port_init()` も失敗する(時刻が作れないため)。Linux 版は時刻に OS の時計を使うので、失敗しても続ける。
+* invariant でない TSC は省電力で速さが変わり、時間切れの判定がずれうる(止めはしない)。
+|使用関数 a|* <<port_x86_bfm_x86-cpu_probe,`cpu_probe()`>>
+* <<port_x86_bfm_x86-tsc_hz_find,`tsc_hz_find()`>>
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* <<port_x86_bfm_x86-bfm_x86_report,`bfm_x86_report()`>>
+|===
+
+.bfm_x86_init() のフロー図
+image::flow_port_x86_bfm_x86-bfm_x86_init.drawio.svg[bfm_x86_init() のフロー図]
+
+.bfm_x86_init() の関係図
+image::call_port_x86_bfm_x86-bfm_x86_init.drawio.svg[bfm_x86_init() の関係図]
+
+[[port_x86_bfm_x86-bfm_x86_time_ns]]
+=== `bfm_x86_time_ns()`
+[cols="1,5",options="autowidth"]
+.bfm_x86_time_ns()
+|===
+|関数名 |`bfm_x86_time_ns`(`port/x86/bfm_x86.c` 128 行目)
+|宣言 |`uint64_t bfm_x86_time_ns(void)`
+|処理内容 a|TSC を読み、`s_ns_mult` を掛けて 32bit 右へずらし、ナノ秒にして返す(128bit で計算)。
+|引数 |なし
+|戻り値 a|時刻(ナノ秒)。TSC が 0 のときを 0 とする単調な値。
+|前提条件 a|`bfm_x86_init()` が成功していること(前は `s_ns_mult` が 0 なので常に 0 を返す)。
+|注意事項 a|* 係数の誤差は 2^-32 程度で、時間切れの判定には十分。
+* 周波数の誤差(`tsc_hz_find()` の注意事項)はそのまま時刻の誤差になる。
+|使用関数 a|* <<asm-bfm_x86_rdtsc,`bfm_x86_rdtsc()`>>(アセンブラ)
+|===
+
+.bfm_x86_time_ns() のフロー図
+image::flow_port_x86_bfm_x86-bfm_x86_time_ns.drawio.svg[bfm_x86_time_ns() のフロー図]
+
+.bfm_x86_time_ns() の関係図
+image::call_port_x86_bfm_x86-bfm_x86_time_ns.drawio.svg[bfm_x86_time_ns() の関係図]
+
+[[port_x86_bfm_x86-bfm_x86_delay_us]]
+=== `bfm_x86_delay_us()`
+[cols="1,5",options="autowidth"]
+.bfm_x86_delay_us()
+|===
+|関数名 |`bfm_x86_delay_us`(`port/x86/bfm_x86.c` 133 行目)
+|宣言 |`void bfm_x86_delay_us(uint32_t us)`
+|処理内容 a|`us` マイクロ秒ぶんの TSC の数を求め、TSC がそれだけ進むまで `pause` を挟んで空回りする。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`us` !待つ時間(マイクロ秒)
+!===
+|戻り値 a|なし
+|前提条件 a|`bfm_x86_init()` が成功していること(前は周波数が 0 なのですぐ戻る)。
+|注意事項 a|* CPU を他のタスクに譲らない。bfmem が待つのは立ち上げ・接続・切断の間だけ。
+* TSC の差で比べるので、TSC が一周しても正しく待つ。
+|使用関数 a|* <<asm-bfm_x86_rdtsc,`bfm_x86_rdtsc()`>>(アセンブラ)
+* <<asm-bfm_x86_pause,`bfm_x86_pause()`>>(アセンブラ)
+|===
+
+.bfm_x86_delay_us() のフロー図
+image::flow_port_x86_bfm_x86-bfm_x86_delay_us.drawio.svg[bfm_x86_delay_us() のフロー図]
+
+.bfm_x86_delay_us() の関係図
+image::call_port_x86_bfm_x86-bfm_x86_delay_us.drawio.svg[bfm_x86_delay_us() の関係図]
+
+[[port_x86_bfm_x86-bfm_x86_report]]
+=== `bfm_x86_report()`
+[cols="1,5",options="autowidth"]
+.bfm_x86_report()
+|===
+|関数名 |`bfm_x86_report`(`port/x86/bfm_x86.c` 143 行目)
+|宣言 |`void bfm_x86_report(void)`
+|処理内容 a|CPU の名前・family・model と、TSC の周波数(どこから求めたか・invariant か)を表示する。MSR を読めるなら、基準と最小の周波数(`MSR_PLATFORM_INFO`)、ターボの最大(`MSR_TURBO_RATIO_LIMIT`、1 コア)、今の倍率(`IA32_PERF_STATUS`)、実効の周波数(10ms 空回りする間の `IA32_APERF` / `IA32_MPERF` の増え方の比 × TSC の周波数)、パッケージ C-state の上限と固定されているか(`MSR_PKG_CST_CONFIG_CONTROL`)も表示する。
+|引数 |なし
+|戻り値 a|なし
+|前提条件 a|`bfm_x86_init()` が成功していること(`bfm_x86_init()` が `g_bfm_verbose` のときに呼ぶ)。
+|注意事項 a|* ターボの最大は CPUID 6 の eax[1]、今の倍率は CPUID 1 の ecx[7](EIST)、APERF / MPERF は CPUID 6 の ecx[0] があるときだけ読む。
+* パッケージ C-state の上限の符号は機種ごとに違うので、数をそのまま出す。
+* 実効の周波数を測るために 10ms 空回りする。
+* Linux 版の MSR は開いたときの CPU のもので、空回りしている CPU と違うことがある。
+|使用関数 a|* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* `MHZ()`(マクロ)
+* <<port_x86_bfm_x86-msr_read,`msr_read()`>>
+* <<port_x86_bfm_x86-bfm_x86_delay_us,`bfm_x86_delay_us()`>>
+|===
+
+.bfm_x86_report() のフロー図
+image::flow_port_x86_bfm_x86-bfm_x86_report.drawio.svg[bfm_x86_report() のフロー図]
+
+.bfm_x86_report() の関係図
+image::call_port_x86_bfm_x86-bfm_x86_report.drawio.svg[bfm_x86_report() の関係図]
 
 == `test/bfm_test.c`
 

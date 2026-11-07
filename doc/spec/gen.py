@@ -45,8 +45,24 @@ FILES = [
     ("src/bfm_ops.c", ["linux", "vxworks"]),
     ("port/linux_vfio/port_linux.c", ["linux"]),
     ("port/vxworks/port_vxworks.c", ["vxworks"]),
+    ("port/x86/bfm_x86.c", ["linux", "vxworks"]),
     ("test/bfm_test.c", ["linux"]),
 ]
+
+# アセンブラの関数(C の解析では拾えない)。.globl の名前をここから取り、宣言とコメントはヘッダから取る。
+# 表は ASM_CHAPTER の章の最初に置き、呼び出し側の「使用関数」からそこへリンクする。
+ASM_SRC = "port/x86/bfm_x86_asm.S"
+ASM_HDR = "port/x86/bfm_x86.h"
+ASM_CHAPTER = "port/x86/bfm_x86.c"
+
+
+def asm_funcs():
+    """アセンブラのソースの .globl の名前を、書いてある順に返す。"""
+    src = open(os.path.join(ROOT, ASM_SRC), encoding="utf-8").read()
+    return re.findall(r"^\s*\.globl\s+(\w+)", src, re.M)
+
+
+ASM_FUNCS = set(asm_funcs())
 
 # 関数として扱うマクロ(呼び出しの関係図では、展開先の関数を呼んだことにする)。
 MACRO_ALIAS = {
@@ -55,7 +71,9 @@ MACRO_ALIAS = {
 }
 # 関数ではないマクロ(バリアとバイト順)。関係図には「マクロ」として出す。
 MACROS = {"bfm_dma_wmb", "bfm_wc_flush", "bfm_mb", "bfm_rmb",
-          "bfm_cpu_to_be32", "bfm_cpu_to_be64", "bfm_be32_to_cpu", "bfm_be64_to_cpu"}
+          "bfm_cpu_to_be32", "bfm_cpu_to_be64", "bfm_be32_to_cpu", "bfm_be64_to_cpu", "MHZ"}
+# 関数ポインタの変数(引数ではないもの)。呼び出し先は記述の indirect で補う。
+FUNC_PTR_VARS = {"s_rdmsr"}
 KEYWORDS = {"if", "for", "while", "switch", "return", "sizeof", "volatile", "__asm__", "asm",
             "_Static_assert", "__attribute__", "defined", "case", "do", "else"}
 
@@ -225,8 +243,13 @@ def build_graph():
                     f["callees"].append((nm, None, "macro"))
                     seen.add(key)
                 continue
-            if nm in pnames:
-                continue  # 関数ポインタの引数(記述の indirect で補う)
+            if nm in pnames or nm in FUNC_PTR_VARS:
+                continue  # 関数ポインタの引数・変数(記述の indirect で補う)
+            if nm in ASM_FUNCS:
+                if ("a", nm) not in seen:
+                    f["callees"].append((nm, None, "asm"))
+                    seen.add(("a", nm))
+                continue
             targets = []
             for g in f["groups"]:
                 t = resolve(f, nm, g)
@@ -696,7 +719,9 @@ def layout_call(f, extra_callers, extra_callees, entry_note):
         if kind == "func":
             rows_r.append(("%s()" % nm, t["file"], "func", False))
         elif kind == "macro":
-            rows_r.append(("%s()" % nm, "マクロ(バリア)", "ext", False))
+            rows_r.append(("%s()" % nm, "マクロ", "ext", False))
+        elif kind == "asm":
+            rows_r.append(("%s()" % nm, "アセンブラ", "ext", False))
         else:
             rows_r.append(("%s()" % nm, "外部", "ext", False))
     for nm in extra_callees:
@@ -933,6 +958,10 @@ def fslug(f):
 def check(allf, descs, partial=False):
     errs = []
     files = {rel for rel, _ in FILES}
+    hdr = open(os.path.join(ROOT, ASM_HDR), encoding="utf-8").read()
+    for nm in asm_funcs():
+        if not re.search(r"\b%s\s*\([^;]*\);" % nm, hdr):
+            errs.append("%s:%s: %s に宣言が無い" % (ASM_SRC, nm, ASM_HDR))
     for rel in files:
         if rel not in descs and not partial:
             errs.append("%s: 記述のファイルが無い" % rel)
@@ -1110,6 +1139,8 @@ def used_functions(f, e):
             items.append("`%s()`(%s)" % (nm, impls))
         elif kinds[nm] == "macro":
             items.append("`%s()`(マクロ)" % nm)
+        elif kinds[nm] == "asm":
+            items.append("<<asm-%s,`%s()`>>(アセンブラ)" % (nm, nm))
         else:
             items.append("`%s()`(外部)" % nm)
     for nm in e.get("indirect", []):
@@ -1117,6 +1148,22 @@ def used_functions(f, e):
     if not items:
         return "なし"
     return "\n".join("* %s" % x for x in items)
+
+
+def asm_section():
+    """アセンブラの関数の表(宣言と説明はヘッダの宣言と直前のコメント)。"""
+    hdr = open(os.path.join(ROOT, ASM_HDR), encoding="utf-8").read()
+    notes = {nm: c for _, fs in header_api(ASM_HDR) for nm, c in fs}
+    out = ["\n=== アセンブラの関数(`%s`)\n\n" % ASM_SRC,
+           "命令 1 つずつを包んだ関数。宣言は `%s`。呼び出し規約は System V AMD64"
+           "(引数は edi / rdi・esi / rsi・rdx の順、戻り値は rax)。フロー図と関係図は無い。\n\n" % ASM_HDR,
+           '[cols="2,3,4",options="autowidth"]\n.アセンブラの関数\n|===\n|関数 |宣言 |処理内容\n']
+    for nm in asm_funcs():
+        m = re.search(r"^([^\n;]*\b%s\s*\([^;]*\));" % nm, hdr, re.M)
+        decl = " ".join(m.group(1).split()) if m else ""
+        out.append("|[[asm-%s]]`%s()` |`%s` |%s\n" % (nm, nm, a_esc(decl), api_text(notes.get(nm, ""))))
+    out.append("|===\n")
+    return "".join(out)
 
 
 def write_adoc(allf, descs):
@@ -1143,7 +1190,8 @@ bfmem(ConnectX の BlueFlame でノード間のメモリへ write / read / atomi
 * 各関数の節には、*表*(関数名・処理内容・引数・戻り値・前提条件・注意事項・使用関数)、*フロー図*、*関係図* を置く。
 ** *使用関数* は、その関数が呼ぶ関数を呼ぶ順に並べたもの(ソースの解析から作る。関係図の右側と同じ)。
    このソースの関数は名前を押すとその節へ飛ぶ。移植層の関数は Linux 版・VxWorks 版のそれぞれへ飛べる。
-   (外部)は C の標準ライブラリ・OS の関数、(マクロ)はバリアなどのマクロ。
+   (外部)は C の標準ライブラリ・OS の関数、(マクロ)はバリアなどのマクロ、
+   (アセンブラ)は `port/x86/bfm_x86_asm.S` の関数(名前を押すと `port/x86/bfm_x86.c` の章のアセンブラの関数の表へ飛ぶ)。
 * *フロー図* はソースの制御の流れ(if・ループ・break・continue・goto・return)をそのまま写したもの。
 ** 角の丸い箱 = 開始・終了・戻る(戻り値)、四角 = 処理、両側に線のある箱 = このソースの関数の呼び出し、
    ひし形 = 判断(下へ「はい」、右へ「いいえ」)、六角形 = 終わりの条件を持たない繰り返し、緑の楕円 = goto の行き先。
@@ -1152,7 +1200,7 @@ bfmem(ConnectX の BlueFlame でノード間のメモリへ write / read / atomi
    その処理、当てはまらなければ下(「いいえ」)の判断へ。各処理の終わりは右端の線でまとまって下へ続く。
    どれにも当てはまらないときの処理(switch の default・最後の else)は、左の列のいちばん下。
 * *関係図* は、左がこの関数を呼ぶ関数、右がこの関数が呼ぶ関数。ソースを解析して作った。
-** 白 = このソースの関数(下の小さい字は定義しているファイル)、灰色 = 外部の関数(C の標準ライブラリ・OS・コンパイラ組み込み)とバリアのマクロ、
+** 白 = このソースの関数(下の小さい字は定義しているファイル)、灰色 = 外部の関数(C の標準ライブラリ・OS・コンパイラ組み込み)・マクロ・アセンブラの関数、
    破線 = 関数ポインタ経由・OS から呼ばれるもの。
 ** `BFM_LOG()` / `BFM_DBG()` は `bfm_port_log()` の呼び出しとして数える。
 ** 移植層(`bfm_port_*`)は Linux 版と VxWorks 版の 2 つの実装がある。ライブラリの関数の関係図には両方を出す(下の小さい字のファイル名で見分ける)。
@@ -1164,6 +1212,8 @@ bfmem(ConnectX の BlueFlame でノード間のメモリへ write / read / atomi
             continue
         d = descs[rel]
         out.append("\n== `%s`\n\n%s\n" % (rel, d["summary"].strip()))
+        if rel == ASM_CHAPTER:
+            out.append(asm_section())
         fs = sorted([f for f in allf if f["file"] == rel], key=lambda f: f["line"])
         dmap = {e["func"]: e for e in d["functions"]}
         for f in fs:
