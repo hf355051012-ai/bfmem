@@ -26,27 +26,27 @@ bfmem の関数のうち、外から使うもの。関数名を押すと、そ�
 |===
 |関数 |説明
 2+h|立ち上げ
-|<<src_bfm_core__bfm_init,`bfm_init()`>> |PCIe の設定(FLR・BAR0・Bus Master)と HCA の立ち上げ、RoCE の準備 (GID の登録・GSI QP)までを行う。
-|<<src_bfm_core__bfm_shutdown,`bfm_shutdown()`>> |全部の接続を畳み、FW を止め(`TEARDOWN_HCA`)、Bus Master を落とす。
-|<<src_bfm_core__bfm_poll,`bfm_poll()`>> |相手からの切断の知らせ(BYE)と FW の非同期イベント(ページ要求など)を処理する。 データの経路では呼ばれないので、アプリケーションがときどき呼ぶこと。 戻り値: 処理したイベントの数。
+|<<src_bfm_core-bfm_init,`bfm_init()`>> |PCIe の設定(FLR・BAR0・Bus Master)と HCA の立ち上げ、RoCE の準備 (GID の登録・GSI QP)までを行う。
+|<<src_bfm_core-bfm_shutdown,`bfm_shutdown()`>> |全部の接続を畳み、FW を止め(`TEARDOWN_HCA`)、Bus Master を落とす。
+|<<src_bfm_core-bfm_poll,`bfm_poll()`>> |相手からの切断の知らせ(BYE)と FW の非同期イベント(ページ要求など)を処理する。 データの経路では呼ばれないので、アプリケーションがときどき呼ぶこと。 戻り値: 処理したイベントの数。
 2+h|接続
-|<<src_bfm_cm__bfm_connect,`bfm_connect()`>> |相手へ接続する。`peer_ip` が 0 なら `g_bfm_peer_ip` / `g_bfm_peer_mac` を、 port が 0 なら `g_bfm_cm_port` を使う。失敗なら NULL(理由は表示する)。
-|<<src_bfm_cm__bfm_accept,`bfm_accept()`>> |port 宛ての接続要求を待って受ける(`timeout_ms` = 0 なら待ち続ける)。
-|<<src_bfm_cm__bfm_disconnect,`bfm_disconnect()`>> |相手へ切断の知らせ(BYE)を送って畳み、QP などを返す。c はこの後使えない。
-|<<src_bfm_ops__bfm_is_up,`bfm_is_up()`>> |1 = 使える。0 = エラーか相手から切断された(`bfm_disconnect()` で返すこと)。
-|<<src_bfm_ops__bfm_remote_size,`bfm_remote_size()`>> |相手の公開メモリの大きさ(off の上限)。
+|<<src_bfm_cm-bfm_connect,`bfm_connect()`>> |相手へ接続する。`peer_ip` が 0 なら `g_bfm_peer_ip` / `g_bfm_peer_mac` を、 port が 0 なら `g_bfm_cm_port` を使う。失敗なら NULL(理由は表示する)。
+|<<src_bfm_cm-bfm_accept,`bfm_accept()`>> |port 宛ての接続要求を待って受ける(`timeout_ms` = 0 なら待ち続ける)。
+|<<src_bfm_cm-bfm_disconnect,`bfm_disconnect()`>> |相手へ切断の知らせ(BYE)を送って畳み、QP などを返す。c はこの後使えない。
+|<<src_bfm_ops-bfm_is_up,`bfm_is_up()`>> |1 = 使える。0 = エラーか相手から切断された(`bfm_disconnect()` で返すこと)。
+|<<src_bfm_ops-bfm_remote_size,`bfm_remote_size()`>> |相手の公開メモリの大きさ(off の上限)。
 2+h|メモリ操作(相手の公開メモリ + off)
-|<<src_bfm_ops__bfm_write,`bfm_write()`>> |書いて、相手の NIC が受け取った(ACK が返った)ところで戻る。 `bfm_inline_max()` バイトまではデータを WQE に埋め込み、BlueFlame で 1 回の MMIO 書き込みにする。それより長いものは中継バッファから送る。
-|<<src_bfm_ops__bfm_write_post,`bfm_write_post()`>> |書いて、完了を待たずに戻る(len <= `bfm_inline_max()`)。後で `bfm_flush()` で待つ。 送る順に相手のメモリへ届く(RC の順序保証)。
-|<<src_bfm_ops__bfm_flush,`bfm_flush()`>> |`bfm_write_post()` で出したものが全部終わるまで待つ。
-|<<src_bfm_ops__bfm_read,`bfm_read()`>> |読む。32 バイトまでは応答が CQE に入るので、dst へ CPU で写す。
-|<<src_bfm_ops__bfm_cas,`bfm_cas()`>> |8 バイトの compare-and-swap。off は 8 の倍数。`*old` に元の値が入る (`*old` == expect なら置き換わった)。
-|<<src_bfm_ops__bfm_faa,`bfm_faa()`>> |8 バイトの fetch-and-add。off は 8 の倍数。`*old` に足す前の値が入る。
+|<<src_bfm_ops-bfm_write,`bfm_write()`>> |書いて、相手の NIC が受け取った(ACK が返った)ところで戻る。 `bfm_inline_max()` バイトまではデータを WQE に埋め込み、BlueFlame で 1 回の MMIO 書き込みにする。それより長いものは中継バッファから送る。
+|<<src_bfm_ops-bfm_write_post,`bfm_write_post()`>> |書いて、完了を待たずに戻る(len <= `bfm_inline_max()`)。後で `bfm_flush()` で待つ。 送る順に相手のメモリへ届く(RC の順序保証)。
+|<<src_bfm_ops-bfm_flush,`bfm_flush()`>> |`bfm_write_post()` で出したものが全部終わるまで待つ。
+|<<src_bfm_ops-bfm_read,`bfm_read()`>> |読む。32 バイトまでは応答が CQE に入るので、dst へ CPU で写す。
+|<<src_bfm_ops-bfm_cas,`bfm_cas()`>> |8 バイトの compare-and-swap。off は 8 の倍数。`*old` に元の値が入る (`*old` == expect なら置き換わった)。
+|<<src_bfm_ops-bfm_faa,`bfm_faa()`>> |8 バイトの fetch-and-add。off は 8 の倍数。`*old` に足す前の値が入る。
 2+h|情報
-|<<src_bfm_ops__bfm_inline_max,`bfm_inline_max()`>> |WQE に埋め込める write の最大バイト数。
-|<<src_bfm_ops__bfm_bf_active,`bfm_bf_active()`>> |1 = BlueFlame で WQE を送っている(WC の窓が取れた)。
-|<<src_bfm_ops__bfm_last_syndrome,`bfm_last_syndrome()`>> |直前のエラー完了の syndrome(0 = なし)。
-|<<src_bfm_ops__bfm_strerror,`bfm_strerror()`>> |戻り値の説明。
+|<<src_bfm_ops-bfm_inline_max,`bfm_inline_max()`>> |WQE に埋め込める write の最大バイト数。
+|<<src_bfm_ops-bfm_bf_active,`bfm_bf_active()`>> |1 = BlueFlame で WQE を送っている(WC の窓が取れた)。
+|<<src_bfm_ops-bfm_last_syndrome,`bfm_last_syndrome()`>> |直前のエラー完了の syndrome(0 = なし)。
+|<<src_bfm_ops-bfm_strerror,`bfm_strerror()`>> |戻り値の説明。
 |===
 
 === 移植層が実装する関数(`include/bfm_port.h`)
@@ -56,22 +56,25 @@ bfmem の関数のうち、外から使うもの。関数名を押すと、そ�
 [cols="3,1,1,6",options="header"]
 |===
 |関数 |Linux |VxWorks |説明
-|`bfm_port_init()` |<<port_linux_vfio_port_linux__bfm_port_init,節へ>> |<<port_vxworks_port_vxworks__bfm_port_init,節へ>> |装置を使えるようにし(Linux: VFIO で掴む)、DMA 領域と公開メモリ (`g_bfm_dma_*` / `g_bfm_mr_*`)を CPU と NIC の両方から同じアドレスで触れるようにする。 0 = 成功。
-|`bfm_port_fini()` |<<port_linux_vfio_port_linux__bfm_port_fini,節へ>> |<<port_vxworks_port_vxworks__bfm_port_fini,節へ>> |`bfm_port_init()` で取ったものを返す。呼ぶ前に Bus Master は落としてある。
-|`bfm_port_pci_read32()` |<<port_linux_vfio_port_linux__bfm_port_pci_read32,節へ>> |<<port_vxworks_port_vxworks__bfm_port_pci_read32,節へ>> |PCIe の設定空間の 32bit 読み書き(off は 4 の倍数)。
-|`bfm_port_pci_write32()` |<<port_linux_vfio_port_linux__bfm_port_pci_write32,節へ>> |<<port_vxworks_port_vxworks__bfm_port_pci_write32,節へ>> |PCIe の設定空間の `off` へ 32bit を書く。
-|`bfm_port_bar0_map()` |<<port_linux_vfio_port_linux__bfm_port_bar0_map,節へ>> |<<port_vxworks_port_vxworks__bfm_port_bar0_map,節へ>> |BAR0 を UC(キャッシュしない)で CPU から触れるようにして先頭を返す。 `bar_phys` は設定空間から読んだ BAR0 の値(Linux では使わない)。NULL = 失敗。
-|`bfm_port_bar0_unmap()` |<<port_linux_vfio_port_linux__bfm_port_bar0_unmap,節へ>> |<<port_vxworks_port_vxworks__bfm_port_bar0_unmap,節へ>> |BAR0 の窓を外し、UC の窓の mmap の一覧を空にする。
-|`bfm_port_bar0_wc()` |<<port_linux_vfio_port_linux__bfm_port_bar0_wc,節へ>> |<<port_vxworks_port_vxworks__bfm_port_bar0_wc,節へ>> |BAR0 の [off, off+len)(UAR の 1 ページ)を write-combining で触れるようにして 先頭を返す。BlueFlame の書き込み先。NULL = WC は使えない(BlueFlame を使わない)。 Linux は UC の窓のそのページを同じ仮想アドレスのまま WC に張り替えるので、 返った後は `bfm_port_bar0_map()` の窓のそのページも WC になっている。
-|`bfm_port_bar0_wc_release()` |<<port_linux_vfio_port_linux__bfm_port_bar0_wc_release,節へ>> |<<port_vxworks_port_vxworks__bfm_port_bar0_wc_release,節へ>> |`bfm_port_bar0_wc()` で WC に張り替えた BAR0 の `[off, off+len)` を外し、同じ仮想アドレスに UC で張り直して、UC の mmap の一覧に足す。
-|`bfm_port_time_ns()` |<<port_linux_vfio_port_linux__bfm_port_time_ns,節へ>> |<<port_vxworks_port_vxworks__bfm_port_time_ns,節へ>> |単調に増える時刻(ナノ秒)。分解能は粗くてよい(時間切れの判定に使う)。
-|`bfm_port_delay_us()` |<<port_linux_vfio_port_linux__bfm_port_delay_us,節へ>> |<<port_vxworks_port_vxworks__bfm_port_delay_us,節へ>> |待つ(マイクロ秒)。
-|`bfm_port_log()` |<<port_linux_vfio_port_linux__bfm_port_log,節へ>> |<<port_vxworks_port_vxworks__bfm_port_log,節へ>> |表示(printf と同じ書式)。
+|`bfm_port_init()` |<<port_linux_vfio_port_linux-bfm_port_init,節へ>> |<<port_vxworks_port_vxworks-bfm_port_init,節へ>> |装置を使えるようにし(Linux: VFIO で掴む)、DMA 領域と公開メモリ (`g_bfm_dma_*` / `g_bfm_mr_*`)を CPU と NIC の両方から同じアドレスで触れるようにする。 0 = 成功。
+|`bfm_port_fini()` |<<port_linux_vfio_port_linux-bfm_port_fini,節へ>> |<<port_vxworks_port_vxworks-bfm_port_fini,節へ>> |`bfm_port_init()` で取ったものを返す。呼ぶ前に Bus Master は落としてある。
+|`bfm_port_pci_read32()` |<<port_linux_vfio_port_linux-bfm_port_pci_read32,節へ>> |<<port_vxworks_port_vxworks-bfm_port_pci_read32,節へ>> |PCIe の設定空間の 32bit 読み書き(off は 4 の倍数)。
+|`bfm_port_pci_write32()` |<<port_linux_vfio_port_linux-bfm_port_pci_write32,節へ>> |<<port_vxworks_port_vxworks-bfm_port_pci_write32,節へ>> |PCIe の設定空間の `off` へ 32bit を書く。
+|`bfm_port_bar0_map()` |<<port_linux_vfio_port_linux-bfm_port_bar0_map,節へ>> |<<port_vxworks_port_vxworks-bfm_port_bar0_map,節へ>> |BAR0 を UC(キャッシュしない)で CPU から触れるようにして先頭を返す。 `bar_phys` は設定空間から読んだ BAR0 の値(Linux では使わない)。NULL = 失敗。
+|`bfm_port_bar0_unmap()` |<<port_linux_vfio_port_linux-bfm_port_bar0_unmap,節へ>> |<<port_vxworks_port_vxworks-bfm_port_bar0_unmap,節へ>> |BAR0 の窓を外し、UC の窓の mmap の一覧を空にする。
+|`bfm_port_bar0_wc()` |<<port_linux_vfio_port_linux-bfm_port_bar0_wc,節へ>> |<<port_vxworks_port_vxworks-bfm_port_bar0_wc,節へ>> |BAR0 の [off, off+len)(UAR の 1 ページ)を write-combining で触れるようにして 先頭を返す。BlueFlame の書き込み先。NULL = WC は使えない(BlueFlame を使わない)。 Linux は UC の窓のそのページを同じ仮想アドレスのまま WC に張り替えるので、 返った後は `bfm_port_bar0_map()` の窓のそのページも WC になっている。
+|`bfm_port_bar0_wc_release()` |<<port_linux_vfio_port_linux-bfm_port_bar0_wc_release,節へ>> |<<port_vxworks_port_vxworks-bfm_port_bar0_wc_release,節へ>> |`bfm_port_bar0_wc()` で WC に張り替えた BAR0 の `[off, off+len)` を外し、同じ仮想アドレスに UC で張り直して、UC の mmap の一覧に足す。
+|`bfm_port_time_ns()` |<<port_linux_vfio_port_linux-bfm_port_time_ns,節へ>> |<<port_vxworks_port_vxworks-bfm_port_time_ns,節へ>> |単調に増える時刻(ナノ秒)。分解能は粗くてよい(時間切れの判定に使う)。
+|`bfm_port_delay_us()` |<<port_linux_vfio_port_linux-bfm_port_delay_us,節へ>> |<<port_vxworks_port_vxworks-bfm_port_delay_us,節へ>> |待つ(マイクロ秒)。
+|`bfm_port_log()` |<<port_linux_vfio_port_linux-bfm_port_log,節へ>> |<<port_vxworks_port_vxworks-bfm_port_log,節へ>> |表示(printf と同じ書式)。
 |===
 
 == この文書の読み方
 
-* 各関数の節には、*表*(関数名・処理内容・引数・戻り値・前提条件・注意事項)、*フロー図*、*関係図* を置く。
+* 各関数の節には、*表*(関数名・処理内容・引数・戻り値・前提条件・注意事項・使用関数)、*フロー図*、*関係図* を置く。
+** *使用関数* は、その関数が呼ぶ関数を呼ぶ順に並べたもの(ソースの解析から作る。関係図の右側と同じ)。
+   このソースの関数は名前を押すとその節へ飛ぶ。移植層の関数は Linux 版・VxWorks 版のそれぞれへ飛べる。
+   (外部)は C の標準ライブラリ・OS の関数、(マクロ)はバリアなどのマクロ。
 * *フロー図* はソースの制御の流れ(if・ループ・break・continue・goto・return)をそのまま写したもの。
 ** 角の丸い箱 = 開始・終了・戻る(戻り値)、四角 = 処理、両側に線のある箱 = このソースの関数の呼び出し、
    ひし形 = 判断(下へ「はい」、右へ「いいえ」)、六角形 = 終わりの条件を持たない繰り返し、緑の楕円 = goto の行き先。
@@ -91,7 +94,7 @@ bfmem の関数のうち、外から使うもの。関数名を押すと、そ�
 
 移植層の宣言と、バリア・バイト順の道具。CPU は x86-64(Intel)だけを対象にし、x86-64 以外でコンパイルすると `#error` で止める。前提はリトルエンディアン、DMA がキャッシュと一貫していること(キャッシュの flush / invalidate は要らない)、TSO(書き込みどうしの順序が保たれる)、64bit の MMIO 書き込みが 1 回で出ること。プラットフォームごとに `port/<名前>/` で実装する関数(`bfm_port_*`。`port/linux_vfio/` = x86-64 Linux + VFIO、`port/vxworks/` = x86-64 VxWorks)を宣言し、x86-64 のバリアのマクロ(`bfm_dma_wmb()` はコンパイラ障壁、`bfm_wc_flush()` は `sfence`、`bfm_mb()` は `mfence`、`bfm_rmb()` はコンパイラ障壁)と、バイト順の入れ替えのマクロ(`bfm_cpu_to_be32()` / `bfm_cpu_to_be64()` / `bfm_be32_to_cpu()` / `bfm_be64_to_cpu()`。`__builtin_bswap32()` / `__builtin_bswap64()`)、バイト列の読み書き・MMIO・DMA のアドレスの `static inline` の関数をここで定義する。ConnectX の構造(コマンド・WQE・CQE)はすべてビッグエンディアン。DMA に使うアドレス(NIC に渡すアドレス)は CPU のポインタの値そのもの(VxWorks は論理 = 物理、Linux はポート層が仮想アドレス = IOVA になるよう張る)。
 
-[[include_bfm_port__bfm_rd16be]]
+[[include_bfm_port-bfm_rd16be]]
 === `bfm_rd16be()`
 [cols="1,5",options="autowidth"]
 .bfm_rd16be()
@@ -108,15 +111,16 @@ bfmem の関数のうち、外から使うもの。関数名を押すと、そ�
 |戻り値 a|読んだ値(CPU のバイト順)。
 |前提条件 a|`p` から 2 バイトが読めること。
 |注意事項 a|1 バイトずつ `volatile` で読むので、CPU のバイト順にも位置の揃いにもよらない。
+|使用関数 a|なし
 |===
 
 .bfm_rd16be() のフロー図
-image::flow_include_bfm_port__bfm_rd16be.drawio.svg[bfm_rd16be() のフロー図]
+image::flow_include_bfm_port-bfm_rd16be.drawio.svg[bfm_rd16be() のフロー図]
 
 .bfm_rd16be() の関係図
-image::call_include_bfm_port__bfm_rd16be.drawio.svg[bfm_rd16be() の関係図]
+image::call_include_bfm_port-bfm_rd16be.drawio.svg[bfm_rd16be() の関係図]
 
-[[include_bfm_port__bfm_rd24be]]
+[[include_bfm_port-bfm_rd24be]]
 === `bfm_rd24be()`
 [cols="1,5",options="autowidth"]
 .bfm_rd24be()
@@ -133,15 +137,16 @@ image::call_include_bfm_port__bfm_rd16be.drawio.svg[bfm_rd16be() の関係図]
 |戻り値 a|読んだ値(下位 24bit。CPU のバイト順)。
 |前提条件 a|`p` から 3 バイトが読めること。
 |注意事項 a|1 バイトずつ `volatile` で読む。
+|使用関数 a|なし
 |===
 
 .bfm_rd24be() のフロー図
-image::flow_include_bfm_port__bfm_rd24be.drawio.svg[bfm_rd24be() のフロー図]
+image::flow_include_bfm_port-bfm_rd24be.drawio.svg[bfm_rd24be() のフロー図]
 
 .bfm_rd24be() の関係図
-image::call_include_bfm_port__bfm_rd24be.drawio.svg[bfm_rd24be() の関係図]
+image::call_include_bfm_port-bfm_rd24be.drawio.svg[bfm_rd24be() の関係図]
 
-[[include_bfm_port__bfm_rd32be]]
+[[include_bfm_port-bfm_rd32be]]
 === `bfm_rd32be()`
 [cols="1,5",options="autowidth"]
 .bfm_rd32be()
@@ -158,15 +163,16 @@ image::call_include_bfm_port__bfm_rd24be.drawio.svg[bfm_rd24be() の関係図]
 |戻り値 a|読んだ値(CPU のバイト順)。
 |前提条件 a|`p` から 4 バイトが読めること。
 |注意事項 a|1 バイトずつ `volatile` で読む(1 回の 32bit の読みにはならない)。
+|使用関数 a|なし
 |===
 
 .bfm_rd32be() のフロー図
-image::flow_include_bfm_port__bfm_rd32be.drawio.svg[bfm_rd32be() のフロー図]
+image::flow_include_bfm_port-bfm_rd32be.drawio.svg[bfm_rd32be() のフロー図]
 
 .bfm_rd32be() の関係図
-image::call_include_bfm_port__bfm_rd32be.drawio.svg[bfm_rd32be() の関係図]
+image::call_include_bfm_port-bfm_rd32be.drawio.svg[bfm_rd32be() の関係図]
 
-[[include_bfm_port__bfm_rd64be]]
+[[include_bfm_port-bfm_rd64be]]
 === `bfm_rd64be()`
 [cols="1,5",options="autowidth"]
 .bfm_rd64be()
@@ -183,15 +189,16 @@ image::call_include_bfm_port__bfm_rd32be.drawio.svg[bfm_rd32be() の関係図]
 |戻り値 a|読んだ値(CPU のバイト順)。
 |前提条件 a|`p` から 8 バイトが読めること。
 |注意事項 a|`bfm_rd32be()` を 2 回呼ぶ(1 回の 64bit の読みにはならない)。
+|使用関数 a|* <<include_bfm_port-bfm_rd32be,`bfm_rd32be()`>>
 |===
 
 .bfm_rd64be() のフロー図
-image::flow_include_bfm_port__bfm_rd64be.drawio.svg[bfm_rd64be() のフロー図]
+image::flow_include_bfm_port-bfm_rd64be.drawio.svg[bfm_rd64be() のフロー図]
 
 .bfm_rd64be() の関係図
-image::call_include_bfm_port__bfm_rd64be.drawio.svg[bfm_rd64be() の関係図]
+image::call_include_bfm_port-bfm_rd64be.drawio.svg[bfm_rd64be() の関係図]
 
-[[include_bfm_port__bfm_wr16be]]
+[[include_bfm_port-bfm_wr16be]]
 === `bfm_wr16be()`
 [cols="1,5",options="autowidth"]
 .bfm_wr16be()
@@ -209,15 +216,16 @@ image::call_include_bfm_port__bfm_rd64be.drawio.svg[bfm_rd64be() の関係図]
 |戻り値 a|なし
 |前提条件 a|`p` から 2 バイトが書けること。
 |注意事項 a|1 バイトずつ `volatile` で書く。
+|使用関数 a|なし
 |===
 
 .bfm_wr16be() のフロー図
-image::flow_include_bfm_port__bfm_wr16be.drawio.svg[bfm_wr16be() のフロー図]
+image::flow_include_bfm_port-bfm_wr16be.drawio.svg[bfm_wr16be() のフロー図]
 
 .bfm_wr16be() の関係図
-image::call_include_bfm_port__bfm_wr16be.drawio.svg[bfm_wr16be() の関係図]
+image::call_include_bfm_port-bfm_wr16be.drawio.svg[bfm_wr16be() の関係図]
 
-[[include_bfm_port__bfm_wr24be]]
+[[include_bfm_port-bfm_wr24be]]
 === `bfm_wr24be()`
 [cols="1,5",options="autowidth"]
 .bfm_wr24be()
@@ -235,15 +243,16 @@ image::call_include_bfm_port__bfm_wr16be.drawio.svg[bfm_wr16be() の関係図]
 |戻り値 a|なし
 |前提条件 a|`p` から 3 バイトが書けること。
 |注意事項 a|1 バイトずつ `volatile` で書く。`v` の上位 8bit は捨てる。
+|使用関数 a|なし
 |===
 
 .bfm_wr24be() のフロー図
-image::flow_include_bfm_port__bfm_wr24be.drawio.svg[bfm_wr24be() のフロー図]
+image::flow_include_bfm_port-bfm_wr24be.drawio.svg[bfm_wr24be() のフロー図]
 
 .bfm_wr24be() の関係図
-image::call_include_bfm_port__bfm_wr24be.drawio.svg[bfm_wr24be() の関係図]
+image::call_include_bfm_port-bfm_wr24be.drawio.svg[bfm_wr24be() の関係図]
 
-[[include_bfm_port__bfm_wr32be]]
+[[include_bfm_port-bfm_wr32be]]
 === `bfm_wr32be()`
 [cols="1,5",options="autowidth"]
 .bfm_wr32be()
@@ -261,15 +270,16 @@ image::call_include_bfm_port__bfm_wr24be.drawio.svg[bfm_wr24be() の関係図]
 |戻り値 a|なし
 |前提条件 a|`p` から 4 バイトが書けること。
 |注意事項 a|1 バイトずつ `volatile` で書く(1 回の 32bit の書き込みにはならない)。
+|使用関数 a|なし
 |===
 
 .bfm_wr32be() のフロー図
-image::flow_include_bfm_port__bfm_wr32be.drawio.svg[bfm_wr32be() のフロー図]
+image::flow_include_bfm_port-bfm_wr32be.drawio.svg[bfm_wr32be() のフロー図]
 
 .bfm_wr32be() の関係図
-image::call_include_bfm_port__bfm_wr32be.drawio.svg[bfm_wr32be() の関係図]
+image::call_include_bfm_port-bfm_wr32be.drawio.svg[bfm_wr32be() の関係図]
 
-[[include_bfm_port__bfm_wr64be]]
+[[include_bfm_port-bfm_wr64be]]
 === `bfm_wr64be()`
 [cols="1,5",options="autowidth"]
 .bfm_wr64be()
@@ -287,15 +297,16 @@ image::call_include_bfm_port__bfm_wr32be.drawio.svg[bfm_wr32be() の関係図]
 |戻り値 a|なし
 |前提条件 a|`p` から 8 バイトが書けること。
 |注意事項 a|`bfm_wr32be()` を 2 回呼ぶ(1 回の 64bit の書き込みにはならない)。
+|使用関数 a|* <<include_bfm_port-bfm_wr32be,`bfm_wr32be()`>>
 |===
 
 .bfm_wr64be() のフロー図
-image::flow_include_bfm_port__bfm_wr64be.drawio.svg[bfm_wr64be() のフロー図]
+image::flow_include_bfm_port-bfm_wr64be.drawio.svg[bfm_wr64be() のフロー図]
 
 .bfm_wr64be() の関係図
-image::call_include_bfm_port__bfm_wr64be.drawio.svg[bfm_wr64be() の関係図]
+image::call_include_bfm_port-bfm_wr64be.drawio.svg[bfm_wr64be() の関係図]
 
-[[include_bfm_port__bfm_mmio_rd32be]]
+[[include_bfm_port-bfm_mmio_rd32be]]
 === `bfm_mmio_rd32be()`
 [cols="1,5",options="autowidth"]
 .bfm_mmio_rd32be()
@@ -313,15 +324,16 @@ image::call_include_bfm_port__bfm_wr64be.drawio.svg[bfm_wr64be() の関係図]
 |戻り値 a|読んだ値(CPU のバイト順)。
 |前提条件 a|`base + off` が 4 バイトの境界に揃っていて、張った窓の中にあること。
 |注意事項 a|`volatile` の 32bit の読みを 1 回だけ出す。
+|使用関数 a|* `bfm_be32_to_cpu()`(マクロ)
 |===
 
 .bfm_mmio_rd32be() のフロー図
-image::flow_include_bfm_port__bfm_mmio_rd32be.drawio.svg[bfm_mmio_rd32be() のフロー図]
+image::flow_include_bfm_port-bfm_mmio_rd32be.drawio.svg[bfm_mmio_rd32be() のフロー図]
 
 .bfm_mmio_rd32be() の関係図
-image::call_include_bfm_port__bfm_mmio_rd32be.drawio.svg[bfm_mmio_rd32be() の関係図]
+image::call_include_bfm_port-bfm_mmio_rd32be.drawio.svg[bfm_mmio_rd32be() の関係図]
 
-[[include_bfm_port__bfm_mmio_wr32be]]
+[[include_bfm_port-bfm_mmio_wr32be]]
 === `bfm_mmio_wr32be()`
 [cols="1,5",options="autowidth"]
 .bfm_mmio_wr32be()
@@ -340,15 +352,16 @@ image::call_include_bfm_port__bfm_mmio_rd32be.drawio.svg[bfm_mmio_rd32be() の�
 |戻り値 a|なし
 |前提条件 a|`base + off` が 4 バイトの境界に揃っていて、張った窓の中にあること。
 |注意事項 a|`volatile` の 32bit の書き込みを 1 回だけ出す。前のメモリの書き込みとの順序はバリア(`bfm_dma_wmb()` など)で呼び出し側が守る。
+|使用関数 a|* `bfm_cpu_to_be32()`(マクロ)
 |===
 
 .bfm_mmio_wr32be() のフロー図
-image::flow_include_bfm_port__bfm_mmio_wr32be.drawio.svg[bfm_mmio_wr32be() のフロー図]
+image::flow_include_bfm_port-bfm_mmio_wr32be.drawio.svg[bfm_mmio_wr32be() のフロー図]
 
 .bfm_mmio_wr32be() の関係図
-image::call_include_bfm_port__bfm_mmio_wr32be.drawio.svg[bfm_mmio_wr32be() の関係図]
+image::call_include_bfm_port-bfm_mmio_wr32be.drawio.svg[bfm_mmio_wr32be() の関係図]
 
-[[include_bfm_port__bfm_mmio_wr64_raw]]
+[[include_bfm_port-bfm_mmio_wr64_raw]]
 === `bfm_mmio_wr64_raw()`
 [cols="1,5",options="autowidth"]
 .bfm_mmio_wr64_raw()
@@ -366,15 +379,16 @@ image::call_include_bfm_port__bfm_mmio_wr32be.drawio.svg[bfm_mmio_wr32be() の�
 |戻り値 a|なし
 |前提条件 a|`dst` が 8 バイトの境界に揃っていること。
 |注意事項 a|32bit 2 回に分けると PCIe 上で分かれうるので 1 回で書く(x86-64 では 64bit の MMIO 書き込みが 1 回で出る)。
+|使用関数 a|なし
 |===
 
 .bfm_mmio_wr64_raw() のフロー図
-image::flow_include_bfm_port__bfm_mmio_wr64_raw.drawio.svg[bfm_mmio_wr64_raw() のフロー図]
+image::flow_include_bfm_port-bfm_mmio_wr64_raw.drawio.svg[bfm_mmio_wr64_raw() のフロー図]
 
 .bfm_mmio_wr64_raw() の関係図
-image::call_include_bfm_port__bfm_mmio_wr64_raw.drawio.svg[bfm_mmio_wr64_raw() の関係図]
+image::call_include_bfm_port-bfm_mmio_wr64_raw.drawio.svg[bfm_mmio_wr64_raw() の関係図]
 
-[[include_bfm_port__bfm_dma_addr]]
+[[include_bfm_port-bfm_dma_addr]]
 === `bfm_dma_addr()`
 [cols="1,5",options="autowidth"]
 .bfm_dma_addr()
@@ -391,19 +405,20 @@ image::call_include_bfm_port__bfm_mmio_wr64_raw.drawio.svg[bfm_mmio_wr64_raw() �
 |戻り値 a|DMA のアドレス(`p` の値を 64bit にしたもの)。
 |前提条件 a|`p` が、移植層が CPU と NIC の両方から同じアドレスで触れるようにした領域(DMA 領域・公開メモリ)の中を指していること。
 |注意事項 a|VxWorks は論理 = 物理、Linux はポート層が仮想アドレス = IOVA になるよう張るので、変換はしない。
+|使用関数 a|なし
 |===
 
 .bfm_dma_addr() のフロー図
-image::flow_include_bfm_port__bfm_dma_addr.drawio.svg[bfm_dma_addr() のフロー図]
+image::flow_include_bfm_port-bfm_dma_addr.drawio.svg[bfm_dma_addr() のフロー図]
 
 .bfm_dma_addr() の関係図
-image::call_include_bfm_port__bfm_dma_addr.drawio.svg[bfm_dma_addr() の関係図]
+image::call_include_bfm_port-bfm_dma_addr.drawio.svg[bfm_dma_addr() の関係図]
 
 == `src/bfm_core.c`
 
 ライブラリの入口。設定の検査、移植層・PCIe・HCA・接続管理の順の立ち上げ(`bfm_init()`)、その逆順の停止(`bfm_shutdown()`)、非同期の処理(`bfm_poll()`)を持つ。立ち上げ済みかどうかを静的変数 `s_inited` で持つ。
 
-[[src_bfm_core__check_config]]
+[[src_bfm_core-check_config]]
 === `check_config()`
 [cols="1,5",options="autowidth"]
 .check_config()
@@ -421,15 +436,16 @@ image::call_include_bfm_port__bfm_dma_addr.drawio.svg[bfm_dma_addr() の関係�
 |戻り値 a|`BFM_OK`: 使える設定。`BFM_E_PARAM`: 使えない設定(理由を表示する)。
 |前提条件 a|特になし。
 |注意事項 a|`g_bfm_stage_size` と `g_bfm_signal_every` は、範囲外ならこの関数が書き換える(呼び出し側が入れた値が変わる)。
+|使用関数 a|* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
 |===
 
 .check_config() のフロー図
-image::flow_src_bfm_core__check_config.drawio.svg[check_config() のフロー図]
+image::flow_src_bfm_core-check_config.drawio.svg[check_config() のフロー図]
 
 .check_config() の関係図
-image::call_src_bfm_core__check_config.drawio.svg[check_config() の関係図]
+image::call_src_bfm_core-check_config.drawio.svg[check_config() の関係図]
 
-[[src_bfm_core__cleanup]]
+[[src_bfm_core-cleanup]]
 === `cleanup()`
 [cols="1,5",options="autowidth"]
 .cleanup()
@@ -446,15 +462,19 @@ image::call_src_bfm_core__check_config.drawio.svg[check_config() の関係図]
 |戻り値 a|なし
 |前提条件 a|`g_bfm` の `hca_enabled` / `bar0` が、そのときの状態を正しく表していること。
 |注意事項 a|Bus Master を落としてから BAR0 を外すので、この後 NIC はメモリへ DMA しない。`hca_enabled` が 1 のときは FW を止めてから Bus Master を落とす。
+|使用関数 a|* <<src_mlx5_hca-mlx5_hca_teardown,`mlx5_hca_teardown()`>>
+* <<src_bfm_pci-bfm_pci_bus_master,`bfm_pci_bus_master()`>>
+* `bfm_port_bar0_unmap()`(<<port_linux_vfio_port_linux-bfm_port_bar0_unmap,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_bar0_unmap,VxWorks 版>>)
+* `bfm_port_fini()`(<<port_linux_vfio_port_linux-bfm_port_fini,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_fini,VxWorks 版>>)
 |===
 
 .cleanup() のフロー図
-image::flow_src_bfm_core__cleanup.drawio.svg[cleanup() のフロー図]
+image::flow_src_bfm_core-cleanup.drawio.svg[cleanup() のフロー図]
 
 .cleanup() の関係図
-image::call_src_bfm_core__cleanup.drawio.svg[cleanup() の関係図]
+image::call_src_bfm_core-cleanup.drawio.svg[cleanup() の関係図]
 
-[[src_bfm_core__bfm_init]]
+[[src_bfm_core-bfm_init]]
 === `bfm_init()`
 [cols="1,5",options="autowidth"]
 .bfm_init()
@@ -468,15 +488,27 @@ image::call_src_bfm_core__cleanup.drawio.svg[cleanup() の関係図]
 |注意事項 a|* 2 回目以降の呼び出しは何もせず `BFM_OK` を返す。
 * 途中で失敗したら `cleanup(1)` で取ったものを返してから戻る(移植層の初期化そのものの失敗は除く)。
 * `g_bfm` と `g_bfm_conn` を 0 で初期化する。
+|使用関数 a|* <<src_bfm_core-check_config,`check_config()`>>
+* `memset()`(外部)
+* `bfm_port_init()`(<<port_linux_vfio_port_linux-bfm_port_init,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_init,VxWorks 版>>)
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* <<src_bfm_mem-bfm_mem_reset,`bfm_mem_reset()`>>
+* <<src_bfm_pci-bfm_pci_setup,`bfm_pci_setup()`>>
+* <<src_bfm_core-cleanup,`cleanup()`>>
+* `bfm_port_bar0_map()`(<<port_linux_vfio_port_linux-bfm_port_bar0_map,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_bar0_map,VxWorks 版>>)
+* <<src_mlx5_hca-mlx5_hca_init,`mlx5_hca_init()`>>
+* <<src_bfm_cm-bfm_cm_init,`bfm_cm_init()`>>
+* <<src_bfm_mem-bfm_mem_used,`bfm_mem_used()`>>
+* <<src_bfm_ops-bfm_inline_max,`bfm_inline_max()`>>
 |===
 
 .bfm_init() のフロー図
-image::flow_src_bfm_core__bfm_init.drawio.svg[bfm_init() のフロー図]
+image::flow_src_bfm_core-bfm_init.drawio.svg[bfm_init() のフロー図]
 
 .bfm_init() の関係図
-image::call_src_bfm_core__bfm_init.drawio.svg[bfm_init() の関係図]
+image::call_src_bfm_core-bfm_init.drawio.svg[bfm_init() の関係図]
 
-[[src_bfm_core__bfm_shutdown]]
+[[src_bfm_core-bfm_shutdown]]
 === `bfm_shutdown()`
 [cols="1,5",options="autowidth"]
 .bfm_shutdown()
@@ -488,15 +520,18 @@ image::call_src_bfm_core__bfm_init.drawio.svg[bfm_init() の関係図]
 |戻り値 a|なし
 |前提条件 a|`bfm_init()` と同じタスクから呼ぶこと。
 |注意事項 a|立ち上がっていなければ何もしない。接続が残っていれば `bfm_cm_fini()` が相手へ BYE を送ってから畳む。
+|使用関数 a|* <<src_bfm_cm-bfm_cm_fini,`bfm_cm_fini()`>>
+* <<src_bfm_core-cleanup,`cleanup()`>>
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
 |===
 
 .bfm_shutdown() のフロー図
-image::flow_src_bfm_core__bfm_shutdown.drawio.svg[bfm_shutdown() のフロー図]
+image::flow_src_bfm_core-bfm_shutdown.drawio.svg[bfm_shutdown() のフロー図]
 
 .bfm_shutdown() の関係図
-image::call_src_bfm_core__bfm_shutdown.drawio.svg[bfm_shutdown() の関係図]
+image::call_src_bfm_core-bfm_shutdown.drawio.svg[bfm_shutdown() の関係図]
 
-[[src_bfm_core__bfm_poll]]
+[[src_bfm_core-bfm_poll]]
 === `bfm_poll()`
 [cols="1,5",options="autowidth"]
 .bfm_poll()
@@ -508,19 +543,21 @@ image::call_src_bfm_core__bfm_shutdown.drawio.svg[bfm_shutdown() の関係図]
 |戻り値 a|処理したイベントとメッセージの数の合計。立ち上がっていなければ 0。
 |前提条件 a|`bfm_init()` と同じタスクから呼ぶこと(データ経路の関数とも同時に呼ばないこと)。
 |注意事項 a|データ経路の関数はこれを呼ばない。相手からの切断や FW のページ要求に答えるため、アプリケーションがときどき呼ぶこと。
+|使用関数 a|* <<src_mlx5_cmd-mlx5_eq_poll,`mlx5_eq_poll()`>>
+* <<src_bfm_cm-bfm_cm_poll,`bfm_cm_poll()`>>
 |===
 
 .bfm_poll() のフロー図
-image::flow_src_bfm_core__bfm_poll.drawio.svg[bfm_poll() のフロー図]
+image::flow_src_bfm_core-bfm_poll.drawio.svg[bfm_poll() のフロー図]
 
 .bfm_poll() の関係図
-image::call_src_bfm_core__bfm_poll.drawio.svg[bfm_poll() の関係図]
+image::call_src_bfm_core-bfm_poll.drawio.svg[bfm_poll() の関係図]
 
 == `src/bfm_mem.c`
 
 DMA 領域(`g_bfm_dma_base` / `g_bfm_dma_size`)からの静的な切り出し。切り出した量を静的変数 `s_next`(領域の先頭からのバイト数)で持つ。切り出したものを個別に返すことはせず、`bfm_init()` のたびに `bfm_mem_reset()` で先頭から切り直す。接続ごとの資源は `bfm_init()` のときに `BFM_MAX_CONN` 本ぶんを先に切り出しておく。
 
-[[src_bfm_mem__bfm_mem_reset]]
+[[src_bfm_mem-bfm_mem_reset]]
 === `bfm_mem_reset()`
 [cols="1,5",options="autowidth"]
 .bfm_mem_reset()
@@ -532,15 +569,16 @@ DMA 領域(`g_bfm_dma_base` / `g_bfm_dma_size`)からの静的な切り出し。
 |戻り値 a|なし
 |前提条件 a|それまでに切り出した領域を、もう誰も使っていないこと(NIC も含む)。
 |注意事項 a|領域の中身は消さない(0 で埋めるのは `bfm_mem_alloc()` が切り出すとき)。`bfm_init()` が移植層の初期化の直後に呼ぶ。
+|使用関数 a|なし
 |===
 
 .bfm_mem_reset() のフロー図
-image::flow_src_bfm_mem__bfm_mem_reset.drawio.svg[bfm_mem_reset() のフロー図]
+image::flow_src_bfm_mem-bfm_mem_reset.drawio.svg[bfm_mem_reset() のフロー図]
 
 .bfm_mem_reset() の関係図
-image::call_src_bfm_mem__bfm_mem_reset.drawio.svg[bfm_mem_reset() の関係図]
+image::call_src_bfm_mem-bfm_mem_reset.drawio.svg[bfm_mem_reset() の関係図]
 
-[[src_bfm_mem__bfm_mem_alloc]]
+[[src_bfm_mem-bfm_mem_alloc]]
 === `bfm_mem_alloc()`
 [cols="1,5",options="autowidth"]
 .bfm_mem_alloc()
@@ -562,15 +600,17 @@ image::call_src_bfm_mem__bfm_mem_reset.drawio.svg[bfm_mem_reset() の関係図]
 * 足りるかどうかは、`at + size` を作らずに残りの大きさ(`end - at`)と比べる(足し算の桁あふれを避ける)。境界合わせで `at` が領域の外(`at < base` または `at > end`)になったときも足りないとみなし、足りない量は `size` と表示する。
 * 境界合わせで空いた隙間は使わずに捨てる。
 * 返すための関数は無い。
+|使用関数 a|* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* `memset()`(外部)
 |===
 
 .bfm_mem_alloc() のフロー図
-image::flow_src_bfm_mem__bfm_mem_alloc.drawio.svg[bfm_mem_alloc() のフロー図]
+image::flow_src_bfm_mem-bfm_mem_alloc.drawio.svg[bfm_mem_alloc() のフロー図]
 
 .bfm_mem_alloc() の関係図
-image::call_src_bfm_mem__bfm_mem_alloc.drawio.svg[bfm_mem_alloc() の関係図]
+image::call_src_bfm_mem-bfm_mem_alloc.drawio.svg[bfm_mem_alloc() の関係図]
 
-[[src_bfm_mem__bfm_mem_used]]
+[[src_bfm_mem-bfm_mem_used]]
 === `bfm_mem_used()`
 [cols="1,5",options="autowidth"]
 .bfm_mem_used()
@@ -582,13 +622,14 @@ image::call_src_bfm_mem__bfm_mem_alloc.drawio.svg[bfm_mem_alloc() の関係図]
 |戻り値 a|使った量(バイト。`s_next`)。
 |前提条件 a|特になし。
 |注意事項 a|`bfm_init()` が立ち上げの終わりに、使った量を表示するのに使う。
+|使用関数 a|なし
 |===
 
 .bfm_mem_used() のフロー図
-image::flow_src_bfm_mem__bfm_mem_used.drawio.svg[bfm_mem_used() のフロー図]
+image::flow_src_bfm_mem-bfm_mem_used.drawio.svg[bfm_mem_used() のフロー図]
 
 .bfm_mem_used() の関係図
-image::call_src_bfm_mem__bfm_mem_used.drawio.svg[bfm_mem_used() の関係図]
+image::call_src_bfm_mem-bfm_mem_used.drawio.svg[bfm_mem_used() の関係図]
 
 == `src/bfm_pci.c`
 
@@ -602,7 +643,7 @@ PCIe の設定空間を自分で設定する(VxWorks では OS もドライバ�
 
 設定空間の読み書きは移植層(`bfm_port_pci_read32()` / `bfm_port_pci_write32()`)を通す。Linux では VFIO の設定空間を通るので、BAR への書き込みは VFIO の中だけで効く(実際の BAR はカーネルが割り当てたまま)。そのため Linux では `g_bfm_bar0_addr` を 0 にしておく。
 
-[[src_bfm_pci__pci_cmd_read]]
+[[src_bfm_pci-pci_cmd_read]]
 === `pci_cmd_read()`
 [cols="1,5",options="autowidth"]
 .pci_cmd_read()
@@ -614,15 +655,16 @@ PCIe の設定空間を自分で設定する(VxWorks では OS もドライバ�
 |戻り値 a|Command レジスタの値。
 |前提条件 a|移植層が初期化されていること(`bfm_port_init()`)。
 |注意事項 a|32bit で読み、上位 16bit(Status)を捨てる。
+|使用関数 a|* `bfm_port_pci_read32()`(<<port_linux_vfio_port_linux-bfm_port_pci_read32,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_pci_read32,VxWorks 版>>)
 |===
 
 .pci_cmd_read() のフロー図
-image::flow_src_bfm_pci__pci_cmd_read.drawio.svg[pci_cmd_read() のフロー図]
+image::flow_src_bfm_pci-pci_cmd_read.drawio.svg[pci_cmd_read() のフロー図]
 
 .pci_cmd_read() の関係図
-image::call_src_bfm_pci__pci_cmd_read.drawio.svg[pci_cmd_read() の関係図]
+image::call_src_bfm_pci-pci_cmd_read.drawio.svg[pci_cmd_read() の関係図]
 
-[[src_bfm_pci__pci_cmd_write]]
+[[src_bfm_pci-pci_cmd_write]]
 === `pci_cmd_write()`
 [cols="1,5",options="autowidth"]
 .pci_cmd_write()
@@ -639,15 +681,16 @@ image::call_src_bfm_pci__pci_cmd_read.drawio.svg[pci_cmd_read() の関係図]
 |戻り値 a|なし
 |前提条件 a|移植層が初期化されていること(`bfm_port_init()`)。
 |注意事項 a|32bit で書き、上位 16bit(Status)には 0 を書く。Status は 1 を書くと消えるビットなので、0 を書いて触らない。
+|使用関数 a|* `bfm_port_pci_write32()`(<<port_linux_vfio_port_linux-bfm_port_pci_write32,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_pci_write32,VxWorks 版>>)
 |===
 
 .pci_cmd_write() のフロー図
-image::flow_src_bfm_pci__pci_cmd_write.drawio.svg[pci_cmd_write() のフロー図]
+image::flow_src_bfm_pci-pci_cmd_write.drawio.svg[pci_cmd_write() のフロー図]
 
 .pci_cmd_write() の関係図
-image::call_src_bfm_pci__pci_cmd_write.drawio.svg[pci_cmd_write() の関係図]
+image::call_src_bfm_pci-pci_cmd_write.drawio.svg[pci_cmd_write() の関係図]
 
-[[src_bfm_pci__pci_find_pcie_cap]]
+[[src_bfm_pci-pci_find_pcie_cap]]
 === `pci_find_pcie_cap()`
 [cols="1,5",options="autowidth"]
 .pci_find_pcie_cap()
@@ -659,15 +702,16 @@ image::call_src_bfm_pci__pci_cmd_write.drawio.svg[pci_cmd_write() の関係図]
 |戻り値 a|PCI Express の capability の設定空間の位置。無ければ 0。
 |前提条件 a|移植層が初期化されていること(`bfm_port_init()`)。
 |注意事項 a|Status の Capabilities List ビットが立っていなければ探さない。リストが壊れていても止まるよう、たどるのは 48 個までにする。
+|使用関数 a|* `bfm_port_pci_read32()`(<<port_linux_vfio_port_linux-bfm_port_pci_read32,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_pci_read32,VxWorks 版>>)
 |===
 
 .pci_find_pcie_cap() のフロー図
-image::flow_src_bfm_pci__pci_find_pcie_cap.drawio.svg[pci_find_pcie_cap() のフロー図]
+image::flow_src_bfm_pci-pci_find_pcie_cap.drawio.svg[pci_find_pcie_cap() のフロー図]
 
 .pci_find_pcie_cap() の関係図
-image::call_src_bfm_pci__pci_find_pcie_cap.drawio.svg[pci_find_pcie_cap() の関係図]
+image::call_src_bfm_pci-pci_find_pcie_cap.drawio.svg[pci_find_pcie_cap() の関係図]
 
-[[src_bfm_pci__pci_wait_present]]
+[[src_bfm_pci-pci_wait_present]]
 === `pci_wait_present()`
 [cols="1,5",options="autowidth"]
 .pci_wait_present()
@@ -684,15 +728,18 @@ image::call_src_bfm_pci__pci_find_pcie_cap.drawio.svg[pci_find_pcie_cap() の関
 |戻り値 a|0: 読めた。-1: 時間切れ。
 |前提条件 a|移植層が初期化されていること(`bfm_port_init()`)。
 |注意事項 a|FLR の後に使う。時間は `bfm_port_time_ns()` で測る。
+|使用関数 a|* `bfm_port_time_ns()`(<<port_linux_vfio_port_linux-bfm_port_time_ns,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_time_ns,VxWorks 版>>)
+* `bfm_port_pci_read32()`(<<port_linux_vfio_port_linux-bfm_port_pci_read32,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_pci_read32,VxWorks 版>>)
+* `bfm_port_delay_us()`(<<port_linux_vfio_port_linux-bfm_port_delay_us,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_delay_us,VxWorks 版>>)
 |===
 
 .pci_wait_present() のフロー図
-image::flow_src_bfm_pci__pci_wait_present.drawio.svg[pci_wait_present() のフロー図]
+image::flow_src_bfm_pci-pci_wait_present.drawio.svg[pci_wait_present() のフロー図]
 
 .pci_wait_present() の関係図
-image::call_src_bfm_pci__pci_wait_present.drawio.svg[pci_wait_present() の関係図]
+image::call_src_bfm_pci-pci_wait_present.drawio.svg[pci_wait_present() の関係図]
 
-[[src_bfm_pci__pci_flr]]
+[[src_bfm_pci-pci_flr]]
 === `pci_flr()`
 [cols="1,5",options="autowidth"]
 .pci_flr()
@@ -711,15 +758,22 @@ image::call_src_bfm_pci__pci_wait_present.drawio.svg[pci_wait_present() の関�
 |注意事項 a|* 装置が FLR に対応していなければ、表示してリセットせずに 0 を返す。
 * 保留中の DMA が 100 回(1ms ごと)見ても終わらなくても、注意を表示してそのまま FLR を出す。
 * FLR をかけると装置の設定空間の値(BAR0・Command など)は初期値に戻る。
+|使用関数 a|* `bfm_port_pci_read32()`(<<port_linux_vfio_port_linux-bfm_port_pci_read32,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_pci_read32,VxWorks 版>>)
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* <<src_bfm_pci-pci_cmd_write,`pci_cmd_write()`>>
+* <<src_bfm_pci-pci_cmd_read,`pci_cmd_read()`>>
+* `bfm_port_delay_us()`(<<port_linux_vfio_port_linux-bfm_port_delay_us,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_delay_us,VxWorks 版>>)
+* `bfm_port_pci_write32()`(<<port_linux_vfio_port_linux-bfm_port_pci_write32,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_pci_write32,VxWorks 版>>)
+* <<src_bfm_pci-pci_wait_present,`pci_wait_present()`>>
 |===
 
 .pci_flr() のフロー図
-image::flow_src_bfm_pci__pci_flr.drawio.svg[pci_flr() のフロー図]
+image::flow_src_bfm_pci-pci_flr.drawio.svg[pci_flr() のフロー図]
 
 .pci_flr() の関係図
-image::call_src_bfm_pci__pci_flr.drawio.svg[pci_flr() の関係図]
+image::call_src_bfm_pci-pci_flr.drawio.svg[pci_flr() の関係図]
 
-[[src_bfm_pci__pci_setup_bar0]]
+[[src_bfm_pci-pci_setup_bar0]]
 === `pci_setup_bar0()`
 [cols="1,5",options="autowidth"]
 .pci_setup_bar0()
@@ -741,15 +795,20 @@ image::call_src_bfm_pci__pci_flr.drawio.svg[pci_flr() の関係図]
 * 失敗したときは `*out_phys` / `*out_size` に書かない。
 * 書き込む BAR0 の下位 4bit(種類のビット)は元の値を残す。
 * Linux(VFIO)では BAR への書き込みは VFIO の中だけで効く。
+|使用関数 a|* `bfm_port_pci_read32()`(<<port_linux_vfio_port_linux-bfm_port_pci_read32,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_pci_read32,VxWorks 版>>)
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* <<src_bfm_pci-pci_cmd_read,`pci_cmd_read()`>>
+* <<src_bfm_pci-pci_cmd_write,`pci_cmd_write()`>>
+* `bfm_port_pci_write32()`(<<port_linux_vfio_port_linux-bfm_port_pci_write32,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_pci_write32,VxWorks 版>>)
 |===
 
 .pci_setup_bar0() のフロー図
-image::flow_src_bfm_pci__pci_setup_bar0.drawio.svg[pci_setup_bar0() のフロー図]
+image::flow_src_bfm_pci-pci_setup_bar0.drawio.svg[pci_setup_bar0() のフロー図]
 
 .pci_setup_bar0() の関係図
-image::call_src_bfm_pci__pci_setup_bar0.drawio.svg[pci_setup_bar0() の関係図]
+image::call_src_bfm_pci-pci_setup_bar0.drawio.svg[pci_setup_bar0() の関係図]
 
-[[src_bfm_pci__bfm_pci_setup]]
+[[src_bfm_pci-bfm_pci_setup]]
 === `bfm_pci_setup()`
 [cols="1,5",options="autowidth"]
 .bfm_pci_setup()
@@ -768,15 +827,23 @@ image::call_src_bfm_pci__pci_setup_bar0.drawio.svg[pci_setup_bar0() の関係図
 |注意事項 a|* `g_bfm_pcie_mrrs` は 128・256・512・1024・2048・4096 のうち、その値以上で最も小さいものにする(4096 より大きければ 4096)。
 * 失敗したときも、それまでに行った設定(FLR など)は戻さない。後片付けは呼び出し側(`bfm_init()` の `cleanup()`)が行う。
 * 装置の ID が表に無いとき(VF など)は `d->name` が `NULL` のまま -1 を返す。
+|使用関数 a|* `bfm_port_pci_read32()`(<<port_linux_vfio_port_linux-bfm_port_pci_read32,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_pci_read32,VxWorks 版>>)
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* <<src_bfm_pci-pci_find_pcie_cap,`pci_find_pcie_cap()`>>
+* <<src_bfm_pci-pci_flr,`pci_flr()`>>
+* <<src_bfm_pci-pci_setup_bar0,`pci_setup_bar0()`>>
+* `bfm_port_pci_write32()`(<<port_linux_vfio_port_linux-bfm_port_pci_write32,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_pci_write32,VxWorks 版>>)
+* <<src_bfm_pci-pci_cmd_write,`pci_cmd_write()`>>
+* <<src_bfm_pci-pci_cmd_read,`pci_cmd_read()`>>
 |===
 
 .bfm_pci_setup() のフロー図
-image::flow_src_bfm_pci__bfm_pci_setup.drawio.svg[bfm_pci_setup() のフロー図]
+image::flow_src_bfm_pci-bfm_pci_setup.drawio.svg[bfm_pci_setup() のフロー図]
 
 .bfm_pci_setup() の関係図
-image::call_src_bfm_pci__bfm_pci_setup.drawio.svg[bfm_pci_setup() の関係図]
+image::call_src_bfm_pci-bfm_pci_setup.drawio.svg[bfm_pci_setup() の関係図]
 
-[[src_bfm_pci__bfm_pci_bus_master]]
+[[src_bfm_pci-bfm_pci_bus_master]]
 === `bfm_pci_bus_master()`
 [cols="1,5",options="autowidth"]
 .bfm_pci_bus_master()
@@ -793,19 +860,21 @@ image::call_src_bfm_pci__bfm_pci_setup.drawio.svg[bfm_pci_setup() の関係図]
 |戻り値 a|なし
 |前提条件 a|移植層が初期化されていること(`bfm_port_init()`)。
 |注意事項 a|落とすと NIC はメモリへ DMA しない。`bfm_core.c` の `cleanup()` が BAR0 を外す前に `bfm_pci_bus_master(0)` を呼ぶ。
+|使用関数 a|* <<src_bfm_pci-pci_cmd_read,`pci_cmd_read()`>>
+* <<src_bfm_pci-pci_cmd_write,`pci_cmd_write()`>>
 |===
 
 .bfm_pci_bus_master() のフロー図
-image::flow_src_bfm_pci__bfm_pci_bus_master.drawio.svg[bfm_pci_bus_master() のフロー図]
+image::flow_src_bfm_pci-bfm_pci_bus_master.drawio.svg[bfm_pci_bus_master() のフロー図]
 
 .bfm_pci_bus_master() の関係図
-image::call_src_bfm_pci__bfm_pci_bus_master.drawio.svg[bfm_pci_bus_master() の関係図]
+image::call_src_bfm_pci-bfm_pci_bus_master.drawio.svg[bfm_pci_bus_master() の関係図]
 
 == `src/mlx5_cmd.c`
 
 mlx5 のコマンドキュー、FW へのページの受け渡し(MANAGE_PAGES)、EQ(非同期イベント)を持つ。コマンドキューは entry 0 だけを使い、コマンドを 1 つずつ同期で出す(排他は持たない)。16 バイトを超える入力・出力はメールボックスの鎖(最大 `BFM_MBOX_BLOCKS` ブロック)で渡す。デバイスの状態 `g_bfm` の実体もここに置く。
 
-[[src_mlx5_cmd__mbox_in]]
+[[src_mlx5_cmd-mbox_in]]
 === `mbox_in()`
 [cols="1,5",options="autowidth"]
 .mbox_in()
@@ -823,15 +892,16 @@ mlx5 のコマンドキュー、FW へのページの受け渡し(MANAGE_PAGES)�
 |戻り値 a|ブロックの先頭のアドレス。
 |前提条件 a|`mlx5_cmd_init()` でメールボックスの領域を取ってあること。`i` が `BFM_MBOX_BLOCKS` より小さいこと。
 |注意事項 a|範囲は検査しない。
+|使用関数 a|なし
 |===
 
 .mbox_in() のフロー図
-image::flow_src_mlx5_cmd__mbox_in.drawio.svg[mbox_in() のフロー図]
+image::flow_src_mlx5_cmd-mbox_in.drawio.svg[mbox_in() のフロー図]
 
 .mbox_in() の関係図
-image::call_src_mlx5_cmd__mbox_in.drawio.svg[mbox_in() の関係図]
+image::call_src_mlx5_cmd-mbox_in.drawio.svg[mbox_in() の関係図]
 
-[[src_mlx5_cmd__mbox_out]]
+[[src_mlx5_cmd-mbox_out]]
 === `mbox_out()`
 [cols="1,5",options="autowidth"]
 .mbox_out()
@@ -849,15 +919,16 @@ image::call_src_mlx5_cmd__mbox_in.drawio.svg[mbox_in() の関係図]
 |戻り値 a|ブロックの先頭のアドレス。
 |前提条件 a|`mlx5_cmd_init()` でメールボックスの領域を取ってあること。`i` が `BFM_MBOX_BLOCKS` より小さいこと。
 |注意事項 a|範囲は検査しない。
+|使用関数 a|なし
 |===
 
 .mbox_out() のフロー図
-image::flow_src_mlx5_cmd__mbox_out.drawio.svg[mbox_out() のフロー図]
+image::flow_src_mlx5_cmd-mbox_out.drawio.svg[mbox_out() のフロー図]
 
 .mbox_out() の関係図
-image::call_src_mlx5_cmd__mbox_out.drawio.svg[mbox_out() の関係図]
+image::call_src_mlx5_cmd-mbox_out.drawio.svg[mbox_out() の関係図]
 
-[[src_mlx5_cmd__mlx5_cmd_init]]
+[[src_mlx5_cmd-mlx5_cmd_init]]
 === `mlx5_cmd_init()`
 [cols="1,5",options="autowidth"]
 .mlx5_cmd_init()
@@ -874,15 +945,22 @@ image::call_src_mlx5_cmd__mbox_out.drawio.svg[mbox_out() の関係図]
 |戻り値 a|`BFM_OK`: 登録した。`BFM_E_NOMEM`: DMA 領域が足りない。`BFM_E_HW`: entry の大きさが 64 バイトでない。
 |前提条件 a|BAR0 を張ってあること(`d->bar0`)。`bfm_mem_reset()` で DMA 領域の切り出しを初期化してあること。
 |注意事項 a|途中で失敗しても、取った DMA 領域は返さない。
+|使用関数 a|* <<src_bfm_mem-bfm_mem_alloc,`bfm_mem_alloc()`>>
+* `bfm_mmio_rd32be()`(外部)
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* `bfm_dma_addr()`(外部)
+* `bfm_mmio_wr32be()`(外部)
+* `bfm_mb()`(マクロ)
+* `bfm_port_delay_us()`(<<port_linux_vfio_port_linux-bfm_port_delay_us,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_delay_us,VxWorks 版>>)
 |===
 
 .mlx5_cmd_init() のフロー図
-image::flow_src_mlx5_cmd__mlx5_cmd_init.drawio.svg[mlx5_cmd_init() のフロー図]
+image::flow_src_mlx5_cmd-mlx5_cmd_init.drawio.svg[mlx5_cmd_init() のフロー図]
 
 .mlx5_cmd_init() の関係図
-image::call_src_mlx5_cmd__mlx5_cmd_init.drawio.svg[mlx5_cmd_init() の関係図]
+image::call_src_mlx5_cmd-mlx5_cmd_init.drawio.svg[mlx5_cmd_init() の関係図]
 
-[[src_mlx5_cmd__mlx5_cmd]]
+[[src_mlx5_cmd-mlx5_cmd]]
 === `mlx5_cmd()`
 [cols="1,5",options="autowidth"]
 .mlx5_cmd()
@@ -911,15 +989,26 @@ image::call_src_mlx5_cmd__mlx5_cmd_init.drawio.svg[mlx5_cmd_init() の関係図]
 |注意事項 a|* entry 0 とメールボックスを共有するので、同時に 2 つは出せない。
 * 完了は割り込みでなく、持ち主のビットを読み続けて待つ。
 * 失敗のとき `out` の中身は途中まで(または未設定)のことがある。
+|使用関数 a|* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* <<src_mlx5_cmd-mbox_in,`mbox_in()`>>
+* `bfm_wr32be()`(外部)
+* `bfm_wr64be()`(外部)
+* `bfm_dma_addr()`(外部)
+* <<src_mlx5_cmd-mbox_out,`mbox_out()`>>
+* `bfm_mb()`(マクロ)
+* `bfm_mmio_wr32be()`(外部)
+* `bfm_port_time_ns()`(<<port_linux_vfio_port_linux-bfm_port_time_ns,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_time_ns,VxWorks 版>>)
+* `bfm_rmb()`(マクロ)
+* `bfm_rd32be()`(外部)
 |===
 
 .mlx5_cmd() のフロー図
-image::flow_src_mlx5_cmd__mlx5_cmd.drawio.svg[mlx5_cmd() のフロー図]
+image::flow_src_mlx5_cmd-mlx5_cmd.drawio.svg[mlx5_cmd() のフロー図]
 
 .mlx5_cmd() の関係図
-image::call_src_mlx5_cmd__mlx5_cmd.drawio.svg[mlx5_cmd() の関係図]
+image::call_src_mlx5_cmd-mlx5_cmd.drawio.svg[mlx5_cmd() の関係図]
 
-[[src_mlx5_cmd__mlx5_destroy_obj]]
+[[src_mlx5_cmd-mlx5_destroy_obj]]
 === `mlx5_destroy_obj()`
 [cols="1,5",options="autowidth"]
 .mlx5_destroy_obj()
@@ -939,15 +1028,18 @@ image::call_src_mlx5_cmd__mlx5_cmd.drawio.svg[mlx5_cmd() の関係図]
 |戻り値 a|`mlx5_cmd()` の戻り値。
 |前提条件 a|`mlx5_cmd_init()` が成功していること。
 |注意事項 a|特になし。
+|使用関数 a|* `bfm_wr16be()`(外部)
+* `bfm_wr24be()`(外部)
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
 |===
 
 .mlx5_destroy_obj() のフロー図
-image::flow_src_mlx5_cmd__mlx5_destroy_obj.drawio.svg[mlx5_destroy_obj() のフロー図]
+image::flow_src_mlx5_cmd-mlx5_destroy_obj.drawio.svg[mlx5_destroy_obj() のフロー図]
 
 .mlx5_destroy_obj() の関係図
-image::call_src_mlx5_cmd__mlx5_destroy_obj.drawio.svg[mlx5_destroy_obj() の関係図]
+image::call_src_mlx5_cmd-mlx5_destroy_obj.drawio.svg[mlx5_destroy_obj() の関係図]
 
-[[src_mlx5_cmd__mlx5_give_pages]]
+[[src_mlx5_cmd-mlx5_give_pages]]
 === `mlx5_give_pages()`
 [cols="1,5",options="autowidth"]
 .mlx5_give_pages()
@@ -968,15 +1060,22 @@ image::call_src_mlx5_cmd__mlx5_destroy_obj.drawio.svg[mlx5_destroy_obj() の関�
 |注意事項 a|* 渡したページを返してもらうことはしない(`fw_pages_used` は増えるだけ)。
 * 入力の領域は静的変数なので、再入できない。
 * 途中のコマンドが失敗したときは、それまでに渡した分だけ `fw_pages_used` が増えている。
+|使用関数 a|* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* `memset()`(外部)
+* `bfm_wr16be()`(外部)
+* `bfm_wr32be()`(外部)
+* `bfm_dma_addr()`(外部)
+* `bfm_wr64be()`(外部)
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
 |===
 
 .mlx5_give_pages() のフロー図
-image::flow_src_mlx5_cmd__mlx5_give_pages.drawio.svg[mlx5_give_pages() のフロー図]
+image::flow_src_mlx5_cmd-mlx5_give_pages.drawio.svg[mlx5_give_pages() のフロー図]
 
 .mlx5_give_pages() の関係図
-image::call_src_mlx5_cmd__mlx5_give_pages.drawio.svg[mlx5_give_pages() の関係図]
+image::call_src_mlx5_cmd-mlx5_give_pages.drawio.svg[mlx5_give_pages() の関係図]
 
-[[src_mlx5_cmd__mlx5_cant_give]]
+[[src_mlx5_cmd-mlx5_cant_give]]
 === `mlx5_cant_give()`
 [cols="1,5",options="autowidth"]
 .mlx5_cant_give()
@@ -994,15 +1093,17 @@ image::call_src_mlx5_cmd__mlx5_give_pages.drawio.svg[mlx5_give_pages() の関係
 |戻り値 a|なし
 |前提条件 a|`mlx5_cmd_init()` が成功していること。
 |注意事項 a|コマンドの失敗は無視する。
+|使用関数 a|* `bfm_wr16be()`(外部)
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
 |===
 
 .mlx5_cant_give() のフロー図
-image::flow_src_mlx5_cmd__mlx5_cant_give.drawio.svg[mlx5_cant_give() のフロー図]
+image::flow_src_mlx5_cmd-mlx5_cant_give.drawio.svg[mlx5_cant_give() のフロー図]
 
 .mlx5_cant_give() の関係図
-image::call_src_mlx5_cmd__mlx5_cant_give.drawio.svg[mlx5_cant_give() の関係図]
+image::call_src_mlx5_cmd-mlx5_cant_give.drawio.svg[mlx5_cant_give() の関係図]
 
-[[src_mlx5_cmd__mlx5_eq_create]]
+[[src_mlx5_cmd-mlx5_eq_create]]
 === `mlx5_eq_create()`
 [cols="1,5",options="autowidth"]
 .mlx5_eq_create()
@@ -1027,15 +1128,23 @@ image::call_src_mlx5_cmd__mlx5_cant_give.drawio.svg[mlx5_cant_give() の関係�
 |前提条件 a|`mlx5_cmd_init()` が成功し、HCA が動いていること。
 |注意事項 a|* 入力の領域は静的変数で、EQ の領域は 4 ページまでしか載らない(`BFM_EQ_LOG` が 7 で 2 ページ)。4 ページを超えるときは、DMA 領域を取る前に `BFM_E_PARAM` で戻る。
 * 失敗しても、取った DMA 領域と UAR は返さない。
+|使用関数 a|* <<src_bfm_mem-bfm_mem_alloc,`bfm_mem_alloc()`>>
+* <<src_mlx5_hca-mlx5_alloc_uar,`mlx5_alloc_uar()`>>
+* `memset()`(外部)
+* `bfm_wr16be()`(外部)
+* `bfm_wr24be()`(外部)
+* `bfm_wr64be()`(外部)
+* `bfm_dma_addr()`(外部)
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
 |===
 
 .mlx5_eq_create() のフロー図
-image::flow_src_mlx5_cmd__mlx5_eq_create.drawio.svg[mlx5_eq_create() のフロー図]
+image::flow_src_mlx5_cmd-mlx5_eq_create.drawio.svg[mlx5_eq_create() のフロー図]
 
 .mlx5_eq_create() の関係図
-image::call_src_mlx5_cmd__mlx5_eq_create.drawio.svg[mlx5_eq_create() の関係図]
+image::call_src_mlx5_cmd-mlx5_eq_create.drawio.svg[mlx5_eq_create() の関係図]
 
-[[src_mlx5_cmd__mlx5_eq_update_ci]]
+[[src_mlx5_cmd-mlx5_eq_update_ci]]
 === `mlx5_eq_update_ci()`
 [cols="1,5",options="autowidth"]
 .mlx5_eq_update_ci()
@@ -1052,15 +1161,16 @@ image::call_src_mlx5_cmd__mlx5_eq_create.drawio.svg[mlx5_eq_create() の関係�
 |戻り値 a|なし
 |前提条件 a|`mlx5_eq_create()` が成功していること。
 |注意事項 a|arm しないので、割り込みは上がらない。
+|使用関数 a|* `bfm_mmio_wr32be()`(外部)
 |===
 
 .mlx5_eq_update_ci() のフロー図
-image::flow_src_mlx5_cmd__mlx5_eq_update_ci.drawio.svg[mlx5_eq_update_ci() のフロー図]
+image::flow_src_mlx5_cmd-mlx5_eq_update_ci.drawio.svg[mlx5_eq_update_ci() のフロー図]
 
 .mlx5_eq_update_ci() の関係図
-image::call_src_mlx5_cmd__mlx5_eq_update_ci.drawio.svg[mlx5_eq_update_ci() の関係図]
+image::call_src_mlx5_cmd-mlx5_eq_update_ci.drawio.svg[mlx5_eq_update_ci() の関係図]
 
-[[src_mlx5_cmd__mlx5_eq_poll]]
+[[src_mlx5_cmd-mlx5_eq_poll]]
 === `mlx5_eq_poll()`
 [cols="1,5",options="autowidth"]
 .mlx5_eq_poll()
@@ -1086,19 +1196,28 @@ image::call_src_mlx5_cmd__mlx5_eq_update_ci.drawio.svg[mlx5_eq_update_ci() の�
 |前提条件 a|1 つのタスクから呼ぶこと(コマンドキューを使う)。
 |注意事項 a|* FW は答えが来るまで同じページ要求を出し直すので、全部に答えると与えすぎる。そのため 1 回の読み取りの最後の要求にだけ答える。
 * ページを渡すのに失敗しても戻り値には現れない。
+|使用関数 a|* `bfm_rmb()`(マクロ)
+* `bfm_rd16be()`(外部)
+* `bfm_rd32be()`(外部)
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* `bfm_rd24be()`(外部)
+* <<src_bfm_ops-bfm_conn_mark_error,`bfm_conn_mark_error()`>>
+* <<src_mlx5_cmd-mlx5_eq_update_ci,`mlx5_eq_update_ci()`>>
+* <<src_mlx5_cmd-mlx5_give_pages,`mlx5_give_pages()`>>
+* <<src_mlx5_cmd-mlx5_cant_give,`mlx5_cant_give()`>>
 |===
 
 .mlx5_eq_poll() のフロー図
-image::flow_src_mlx5_cmd__mlx5_eq_poll.drawio.svg[mlx5_eq_poll() のフロー図]
+image::flow_src_mlx5_cmd-mlx5_eq_poll.drawio.svg[mlx5_eq_poll() のフロー図]
 
 .mlx5_eq_poll() の関係図
-image::call_src_mlx5_cmd__mlx5_eq_poll.drawio.svg[mlx5_eq_poll() の関係図]
+image::call_src_mlx5_cmd-mlx5_eq_poll.drawio.svg[mlx5_eq_poll() の関係図]
 
 == `src/mlx5_hca.c`
 
 HCA の立ち上げと停止、QP 以外の資源(UAR・PD・MKey・CQ)、ポート、RoCE のアドレスを扱う。立ち上げの手順は Linux の mlx5_core と同じ順(FW の初期化待ち → コマンドキュー → `ENABLE_HCA` → ISSI → boot のページ → `HOST_ENDIANNESS` → HCA の能力(general / atomic / roce)→ init のページ → `INIT_HCA`)で、その後に EQ・PD・MKey(自分用 / 公開用)・ポート・vport の `roce_en`・GID を用意する(`mlx5_hca_init()`)。ConnectX-4〜7 の違いは、能力を 4096 バイトまるごと読み書きする、BlueFlame の窓の大きさを `log_bf_reg_size` から求める、QP の `ts_format` を RoCE の能力に合わせる、`num_vhca_ports` が 0 でなければ `SET_ROCE_ADDRESS` にポート番号を入れる、FW のページの上限を `g_bfm_fw_pages_max` にする、で吸収する。能力の読み書きには静的な緩衝 `s_cap_out` / `s_cap_in` を使う。
 
-[[src_mlx5_hca__wait_fw_init]]
+[[src_mlx5_hca-wait_fw_init]]
 === `wait_fw_init()`
 [cols="1,5",options="autowidth"]
 .wait_fw_init()
@@ -1116,15 +1235,19 @@ HCA の立ち上げと停止、QP 以外の資源(UAR・PD・MKey・CQ)、ポー
 |戻り値 a|`BFM_OK`: 初期化が終わった。`BFM_E_TIMEOUT`: 120 秒で終わらなかった(理由を表示する)。
 |前提条件 a|`d->bar0` が張られていること。
 |注意事項 a|ConnectX-7 は FW の起動に長くかかることがあるので、待ちを 120 秒にしている。
+|使用関数 a|* `bfm_port_time_ns()`(<<port_linux_vfio_port_linux-bfm_port_time_ns,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_time_ns,VxWorks 版>>)
+* `bfm_mmio_rd32be()`(外部)
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* `bfm_port_delay_us()`(<<port_linux_vfio_port_linux-bfm_port_delay_us,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_delay_us,VxWorks 版>>)
 |===
 
 .wait_fw_init() のフロー図
-image::flow_src_mlx5_hca__wait_fw_init.drawio.svg[wait_fw_init() のフロー図]
+image::flow_src_mlx5_hca-wait_fw_init.drawio.svg[wait_fw_init() のフロー図]
 
 .wait_fw_init() の関係図
-image::call_src_mlx5_hca__wait_fw_init.drawio.svg[wait_fw_init() の関係図]
+image::call_src_mlx5_hca-wait_fw_init.drawio.svg[wait_fw_init() の関係図]
 
-[[src_mlx5_hca__simple_cmd]]
+[[src_mlx5_hca-simple_cmd]]
 === `simple_cmd()`
 [cols="1,5",options="autowidth"]
 .simple_cmd()
@@ -1144,15 +1267,17 @@ image::call_src_mlx5_hca__wait_fw_init.drawio.svg[wait_fw_init() の関係図]
 |戻り値 a|`mlx5_cmd()` の戻り値(`BFM_OK` / `BFM_E_HW` / `BFM_E_TIMEOUT` など)。
 |前提条件 a|コマンドキューが使えること(`mlx5_cmd_init()` の後)。
 |注意事項 a|出力(16 バイト)は捨てる。
+|使用関数 a|* `bfm_wr16be()`(外部)
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
 |===
 
 .simple_cmd() のフロー図
-image::flow_src_mlx5_hca__simple_cmd.drawio.svg[simple_cmd() のフロー図]
+image::flow_src_mlx5_hca-simple_cmd.drawio.svg[simple_cmd() のフロー図]
 
 .simple_cmd() の関係図
-image::call_src_mlx5_hca__simple_cmd.drawio.svg[simple_cmd() の関係図]
+image::call_src_mlx5_hca-simple_cmd.drawio.svg[simple_cmd() の関係図]
 
-[[src_mlx5_hca__query_pages]]
+[[src_mlx5_hca-query_pages]]
 === `query_pages()`
 [cols="1,5",options="autowidth"]
 .query_pages()
@@ -1172,15 +1297,19 @@ image::call_src_mlx5_hca__simple_cmd.drawio.svg[simple_cmd() の関係図]
 |戻り値 a|`BFM_OK`: 読めた。そのほか `mlx5_cmd()` の戻り値。
 |前提条件 a|`ENABLE_HCA` の後であること。
 |注意事項 a|失敗したときは `*func` と `*n` を書き換えない。
+|使用関数 a|* `bfm_wr16be()`(外部)
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
+* `bfm_rd16be()`(外部)
+* `bfm_rd32be()`(外部)
 |===
 
 .query_pages() のフロー図
-image::flow_src_mlx5_hca__query_pages.drawio.svg[query_pages() のフロー図]
+image::flow_src_mlx5_hca-query_pages.drawio.svg[query_pages() のフロー図]
 
 .query_pages() の関係図
-image::call_src_mlx5_hca__query_pages.drawio.svg[query_pages() の関係図]
+image::call_src_mlx5_hca-query_pages.drawio.svg[query_pages() の関係図]
 
-[[src_mlx5_hca__satisfy_pages]]
+[[src_mlx5_hca-satisfy_pages]]
 === `satisfy_pages()`
 [cols="1,5",options="autowidth"]
 .satisfy_pages()
@@ -1198,15 +1327,18 @@ image::call_src_mlx5_hca__query_pages.drawio.svg[query_pages() の関係図]
 |戻り値 a|`BFM_OK`: 渡し終えた(求める数が 0 以下のときも)。そのほか `query_pages()` / `mlx5_give_pages()` の戻り値(`BFM_E_NOMEM`: FW 用の区画が足りない など)。
 |前提条件 a|`d->fw_pages` が確保済みであること。
 |注意事項 a|求める数が 0 以下なら `mlx5_give_pages()` は何もしない。
+|使用関数 a|* <<src_mlx5_hca-query_pages,`query_pages()`>>
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* <<src_mlx5_cmd-mlx5_give_pages,`mlx5_give_pages()`>>
 |===
 
 .satisfy_pages() のフロー図
-image::flow_src_mlx5_hca__satisfy_pages.drawio.svg[satisfy_pages() のフロー図]
+image::flow_src_mlx5_hca-satisfy_pages.drawio.svg[satisfy_pages() のフロー図]
 
 .satisfy_pages() の関係図
-image::call_src_mlx5_hca__satisfy_pages.drawio.svg[satisfy_pages() の関係図]
+image::call_src_mlx5_hca-satisfy_pages.drawio.svg[satisfy_pages() の関係図]
 
-[[src_mlx5_hca__set_issi]]
+[[src_mlx5_hca-set_issi]]
 === `set_issi()`
 [cols="1,5",options="autowidth"]
 .set_issi()
@@ -1223,15 +1355,20 @@ image::call_src_mlx5_hca__satisfy_pages.drawio.svg[satisfy_pages() の関係図]
 |戻り値 a|`BFM_OK`: ISSI 1 にした、または ISSI 0 のまま進む。そのほか `mlx5_cmd()` の戻り値。
 |前提条件 a|`ENABLE_HCA` の後であること。
 |注意事項 a|ISSI 1 に対応しているかは、`QUERY_ISSI` の出力の byte 108〜111(`supported_issi_dw0`)のビット 1 で見る。
+|使用関数 a|* `bfm_wr16be()`(外部)
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
+* `bfm_rd32be()`(外部)
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* `memset()`(外部)
 |===
 
 .set_issi() のフロー図
-image::flow_src_mlx5_hca__set_issi.drawio.svg[set_issi() のフロー図]
+image::flow_src_mlx5_hca-set_issi.drawio.svg[set_issi() のフロー図]
 
 .set_issi() の関係図
-image::call_src_mlx5_hca__set_issi.drawio.svg[set_issi() の関係図]
+image::call_src_mlx5_hca-set_issi.drawio.svg[set_issi() の関係図]
 
-[[src_mlx5_hca__access_reg]]
+[[src_mlx5_hca-access_reg]]
 === `access_reg()`
 [cols="1,5",options="autowidth"]
 .access_reg()
@@ -1252,15 +1389,18 @@ image::call_src_mlx5_hca__set_issi.drawio.svg[set_issi() の関係図]
 |戻り値 a|`mlx5_cmd()` の戻り値。
 |前提条件 a|コマンドキューが使えること。
 |注意事項 a|失敗したときは `data` を書き換えない。
+|使用関数 a|* `bfm_wr16be()`(外部)
+* `memcpy()`(外部)
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
 |===
 
 .access_reg() のフロー図
-image::flow_src_mlx5_hca__access_reg.drawio.svg[access_reg() のフロー図]
+image::flow_src_mlx5_hca-access_reg.drawio.svg[access_reg() のフロー図]
 
 .access_reg() の関係図
-image::call_src_mlx5_hca__access_reg.drawio.svg[access_reg() の関係図]
+image::call_src_mlx5_hca-access_reg.drawio.svg[access_reg() の関係図]
 
-[[src_mlx5_hca__set_host_endianness]]
+[[src_mlx5_hca-set_host_endianness]]
 === `set_host_endianness()`
 [cols="1,5",options="autowidth"]
 .set_host_endianness()
@@ -1277,15 +1417,16 @@ image::call_src_mlx5_hca__access_reg.drawio.svg[access_reg() の関係図]
 |戻り値 a|`access_reg()` の戻り値。
 |前提条件 a|boot のページを渡した後であること。
 |注意事項 a|特になし。
+|使用関数 a|* <<src_mlx5_hca-access_reg,`access_reg()`>>
 |===
 
 .set_host_endianness() のフロー図
-image::flow_src_mlx5_hca__set_host_endianness.drawio.svg[set_host_endianness() のフロー図]
+image::flow_src_mlx5_hca-set_host_endianness.drawio.svg[set_host_endianness() のフロー図]
 
 .set_host_endianness() の関係図
-image::call_src_mlx5_hca__set_host_endianness.drawio.svg[set_host_endianness() の関係図]
+image::call_src_mlx5_hca-set_host_endianness.drawio.svg[set_host_endianness() の関係図]
 
-[[src_mlx5_hca__query_cap]]
+[[src_mlx5_hca-query_cap]]
 === `query_cap()`
 [cols="1,5",options="autowidth"]
 .query_cap()
@@ -1304,15 +1445,17 @@ image::call_src_mlx5_hca__set_host_endianness.drawio.svg[set_host_endianness() �
 |戻り値 a|`mlx5_cmd()` の戻り値。
 |前提条件 a|コマンドキューが使えること。
 |注意事項 a|結果は静的な緩衝 `s_cap_out`(16 + `MLX5_HCA_CAP_BYTES` バイト。能力は byte 16 から)に入る。次の `query_cap()` で上書きされる。op_mod は `(type << 1) OR 1`。
+|使用関数 a|* `bfm_wr16be()`(外部)
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
 |===
 
 .query_cap() のフロー図
-image::flow_src_mlx5_hca__query_cap.drawio.svg[query_cap() のフロー図]
+image::flow_src_mlx5_hca-query_cap.drawio.svg[query_cap() のフロー図]
 
 .query_cap() の関係図
-image::call_src_mlx5_hca__query_cap.drawio.svg[query_cap() の関係図]
+image::call_src_mlx5_hca-query_cap.drawio.svg[query_cap() の関係図]
 
-[[src_mlx5_hca__set_cap]]
+[[src_mlx5_hca-set_cap]]
 === `set_cap()`
 [cols="1,5",options="autowidth"]
 .set_cap()
@@ -1331,15 +1474,19 @@ image::call_src_mlx5_hca__query_cap.drawio.svg[query_cap() の関係図]
 |戻り値 a|`mlx5_cmd()` の戻り値。
 |前提条件 a|直前に同じ種類の `query_cap()` で `s_cap_out` を埋めてあること。
 |注意事項 a|入力は静的な緩衝 `s_cap_in` で組む。op_mod は `type << 1`。
+|使用関数 a|* `memset()`(外部)
+* `bfm_wr16be()`(外部)
+* `memcpy()`(外部)
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
 |===
 
 .set_cap() のフロー図
-image::flow_src_mlx5_hca__set_cap.drawio.svg[set_cap() のフロー図]
+image::flow_src_mlx5_hca-set_cap.drawio.svg[set_cap() のフロー図]
 
 .set_cap() の関係図
-image::call_src_mlx5_hca__set_cap.drawio.svg[set_cap() の関係図]
+image::call_src_mlx5_hca-set_cap.drawio.svg[set_cap() の関係図]
 
-[[src_mlx5_hca__setup_general_caps]]
+[[src_mlx5_hca-setup_general_caps]]
 === `setup_general_caps()`
 [cols="1,5",options="autowidth"]
 .setup_general_caps()
@@ -1359,15 +1506,18 @@ image::call_src_mlx5_hca__set_cap.drawio.svg[set_cap() の関係図]
 * RoCE の能力ビットが立っていなくても注意を表示するだけで進む。
 * `log_bf_reg_size` が 8〜12 の外なら注意を表示し、9(512 バイト)として扱う。
 * 書き戻す値は読んだ値のまま(変えるものが無い)。
+|使用関数 a|* <<src_mlx5_hca-query_cap,`query_cap()`>>
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* <<src_mlx5_hca-set_cap,`set_cap()`>>
 |===
 
 .setup_general_caps() のフロー図
-image::flow_src_mlx5_hca__setup_general_caps.drawio.svg[setup_general_caps() のフロー図]
+image::flow_src_mlx5_hca-setup_general_caps.drawio.svg[setup_general_caps() のフロー図]
 
 .setup_general_caps() の関係図
-image::call_src_mlx5_hca__setup_general_caps.drawio.svg[setup_general_caps() の関係図]
+image::call_src_mlx5_hca-setup_general_caps.drawio.svg[setup_general_caps() の関係図]
 
-[[src_mlx5_hca__setup_atomic_caps]]
+[[src_mlx5_hca-setup_atomic_caps]]
 === `setup_atomic_caps()`
 [cols="1,5",options="autowidth"]
 .setup_atomic_caps()
@@ -1387,15 +1537,19 @@ image::call_src_mlx5_hca__setup_general_caps.drawio.svg[setup_general_caps() の
 * 能力の byte 8 のビット 1(`supported_atomic_req_8B_endianness_mode_1`)が 0 なら、表示して `BFM_E_HW` を返す。
 * 書いた後に読み直さない。
 * 8 バイトの CAS と FAA の両方に対応していなければ注意を表示する(失敗にはしない)。
+|使用関数 a|* <<src_mlx5_hca-query_cap,`query_cap()`>>
+* `bfm_rd16be()`(外部)
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* <<src_mlx5_hca-set_cap,`set_cap()`>>
 |===
 
 .setup_atomic_caps() のフロー図
-image::flow_src_mlx5_hca__setup_atomic_caps.drawio.svg[setup_atomic_caps() のフロー図]
+image::flow_src_mlx5_hca-setup_atomic_caps.drawio.svg[setup_atomic_caps() のフロー図]
 
 .setup_atomic_caps() の関係図
-image::call_src_mlx5_hca__setup_atomic_caps.drawio.svg[setup_atomic_caps() の関係図]
+image::call_src_mlx5_hca-setup_atomic_caps.drawio.svg[setup_atomic_caps() の関係図]
 
-[[src_mlx5_hca__setup_roce_caps]]
+[[src_mlx5_hca-setup_roce_caps]]
 === `setup_roce_caps()`
 [cols="1,5",options="autowidth"]
 .setup_roce_caps()
@@ -1412,15 +1566,16 @@ image::call_src_mlx5_hca__setup_atomic_caps.drawio.svg[setup_atomic_caps() の�
 |戻り値 a|なし
 |前提条件 a|`INIT_HCA` の前であること。
 |注意事項 a|ConnectX-7 は時刻の形式を実時間だけにできるので、`ts_format` が 0(free running)だと `CREATE_QP` が断られうる。そのための設定。RoCE の能力が読めなければ 0 のままにする(失敗を返さない)。
+|使用関数 a|* <<src_mlx5_hca-query_cap,`query_cap()`>>
 |===
 
 .setup_roce_caps() のフロー図
-image::flow_src_mlx5_hca__setup_roce_caps.drawio.svg[setup_roce_caps() のフロー図]
+image::flow_src_mlx5_hca-setup_roce_caps.drawio.svg[setup_roce_caps() のフロー図]
 
 .setup_roce_caps() の関係図
-image::call_src_mlx5_hca__setup_roce_caps.drawio.svg[setup_roce_caps() の関係図]
+image::call_src_mlx5_hca-setup_roce_caps.drawio.svg[setup_roce_caps() の関係図]
 
-[[src_mlx5_hca__mlx5_alloc_uar]]
+[[src_mlx5_hca-mlx5_alloc_uar]]
 === `mlx5_alloc_uar()`
 [cols="1,5",options="autowidth"]
 .mlx5_alloc_uar()
@@ -1438,15 +1593,18 @@ image::call_src_mlx5_hca__setup_roce_caps.drawio.svg[setup_roce_caps() の関係
 |戻り値 a|`mlx5_cmd()` の戻り値。
 |前提条件 a|`INIT_HCA` の後であること。
 |注意事項 a|失敗したときは `*uarn` を書き換えない。返すことはしない(解放のコマンドを出さない)。
+|使用関数 a|* `bfm_wr16be()`(外部)
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
+* `bfm_rd24be()`(外部)
 |===
 
 .mlx5_alloc_uar() のフロー図
-image::flow_src_mlx5_hca__mlx5_alloc_uar.drawio.svg[mlx5_alloc_uar() のフロー図]
+image::flow_src_mlx5_hca-mlx5_alloc_uar.drawio.svg[mlx5_alloc_uar() のフロー図]
 
 .mlx5_alloc_uar() の関係図
-image::call_src_mlx5_hca__mlx5_alloc_uar.drawio.svg[mlx5_alloc_uar() の関係図]
+image::call_src_mlx5_hca-mlx5_alloc_uar.drawio.svg[mlx5_alloc_uar() の関係図]
 
-[[src_mlx5_hca__alloc_pd]]
+[[src_mlx5_hca-alloc_pd]]
 === `alloc_pd()`
 [cols="1,5",options="autowidth"]
 .alloc_pd()
@@ -1464,15 +1622,18 @@ image::call_src_mlx5_hca__mlx5_alloc_uar.drawio.svg[mlx5_alloc_uar() の関係�
 |戻り値 a|`mlx5_cmd()` の戻り値。
 |前提条件 a|`INIT_HCA` の後であること。
 |注意事項 a|失敗したときは `*pdn` を書き換えない。
+|使用関数 a|* `bfm_wr16be()`(外部)
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
+* `bfm_rd24be()`(外部)
 |===
 
 .alloc_pd() のフロー図
-image::flow_src_mlx5_hca__alloc_pd.drawio.svg[alloc_pd() のフロー図]
+image::flow_src_mlx5_hca-alloc_pd.drawio.svg[alloc_pd() のフロー図]
 
 .alloc_pd() の関係図
-image::call_src_mlx5_hca__alloc_pd.drawio.svg[alloc_pd() の関係図]
+image::call_src_mlx5_hca-alloc_pd.drawio.svg[alloc_pd() の関係図]
 
-[[src_mlx5_hca__create_mkey_pa]]
+[[src_mlx5_hca-create_mkey_pa]]
 === `create_mkey_pa()`
 [cols="1,5",options="autowidth"]
 .create_mkey_pa()
@@ -1495,15 +1656,20 @@ image::call_src_mlx5_hca__alloc_pd.drawio.svg[alloc_pd() の関係図]
 |戻り値 a|`mlx5_cmd()` の戻り値。
 |前提条件 a|`d->pdn` が取ってあること(`alloc_pd()` の後)。
 |注意事項 a|失敗したときは `*mkey` を書き換えない。
+|使用関数 a|* `bfm_wr16be()`(外部)
+* `bfm_wr24be()`(外部)
+* `bfm_wr64be()`(外部)
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
+* `bfm_rd24be()`(外部)
 |===
 
 .create_mkey_pa() のフロー図
-image::flow_src_mlx5_hca__create_mkey_pa.drawio.svg[create_mkey_pa() のフロー図]
+image::flow_src_mlx5_hca-create_mkey_pa.drawio.svg[create_mkey_pa() のフロー図]
 
 .create_mkey_pa() の関係図
-image::call_src_mlx5_hca__create_mkey_pa.drawio.svg[create_mkey_pa() の関係図]
+image::call_src_mlx5_hca-create_mkey_pa.drawio.svg[create_mkey_pa() の関係図]
 
-[[src_mlx5_hca__mlx5_cq_create]]
+[[src_mlx5_hca-mlx5_cq_create]]
 === `mlx5_cq_create()`
 [cols="1,5",options="autowidth"]
 .mlx5_cq_create()
@@ -1528,15 +1694,22 @@ image::call_src_mlx5_hca__create_mkey_pa.drawio.svg[create_mkey_pa() の関係�
 * ページの大きさは 4KiB(`log_page_size` = 0)。
 * `log_n` の検査は `buf` / `dbr` に触る前に行う(CQE は 1024 個 x 64 バイト = 16 ページまで。入力の PAS の数で決まる)。
 * 失敗したときは `*cqn` を書き換えない。
+|使用関数 a|* `bfm_wr16be()`(外部)
+* `bfm_wr24be()`(外部)
+* `bfm_wr32be()`(外部)
+* `bfm_wr64be()`(外部)
+* `bfm_dma_addr()`(外部)
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
+* `bfm_rd24be()`(外部)
 |===
 
 .mlx5_cq_create() のフロー図
-image::flow_src_mlx5_hca__mlx5_cq_create.drawio.svg[mlx5_cq_create() のフロー図]
+image::flow_src_mlx5_hca-mlx5_cq_create.drawio.svg[mlx5_cq_create() のフロー図]
 
 .mlx5_cq_create() の関係図
-image::call_src_mlx5_hca__mlx5_cq_create.drawio.svg[mlx5_cq_create() の関係図]
+image::call_src_mlx5_hca-mlx5_cq_create.drawio.svg[mlx5_cq_create() の関係図]
 
-[[src_mlx5_hca__port_set_mtu]]
+[[src_mlx5_hca-port_set_mtu]]
 === `port_set_mtu()`
 [cols="1,5",options="autowidth"]
 .port_set_mtu()
@@ -1556,15 +1729,20 @@ image::call_src_mlx5_hca__mlx5_cq_create.drawio.svg[mlx5_cq_create() の関係�
 |注意事項 a|* フレーム長は 32bit で計算する(`ip_mtu` が 65535 に近くても桁あふれしない)。
 * 上限が 0 と読めたときは、上限を 0xffff(16bit の欄に書ける最大)とみなす。
 * 切り詰めたときは表示する。
+|使用関数 a|* <<src_mlx5_hca-access_reg,`access_reg()`>>
+* `bfm_rd16be()`(外部)
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* `memset()`(外部)
+* `bfm_wr16be()`(外部)
 |===
 
 .port_set_mtu() のフロー図
-image::flow_src_mlx5_hca__port_set_mtu.drawio.svg[port_set_mtu() のフロー図]
+image::flow_src_mlx5_hca-port_set_mtu.drawio.svg[port_set_mtu() のフロー図]
 
 .port_set_mtu() の関係図
-image::call_src_mlx5_hca__port_set_mtu.drawio.svg[port_set_mtu() の関係図]
+image::call_src_mlx5_hca-port_set_mtu.drawio.svg[port_set_mtu() の関係図]
 
-[[src_mlx5_hca__frame_to_ip_mtu]]
+[[src_mlx5_hca-frame_to_ip_mtu]]
 === `frame_to_ip_mtu()`
 [cols="1,5",options="autowidth"]
 .frame_to_ip_mtu()
@@ -1581,15 +1759,16 @@ image::call_src_mlx5_hca__port_set_mtu.drawio.svg[port_set_mtu() の関係図]
 |戻り値 a|IP の MTU。`frame` が 22 以下なら 0。
 |前提条件 a|特になし。
 |注意事項 a|引き算で負にならないよう、22 以下は 0 にする(リンクが上がっていないときの `oper_mtu` の 0 など)。`port_log_mtu()` が表示に使う。
+|使用関数 a|なし
 |===
 
 .frame_to_ip_mtu() のフロー図
-image::flow_src_mlx5_hca__frame_to_ip_mtu.drawio.svg[frame_to_ip_mtu() のフロー図]
+image::flow_src_mlx5_hca-frame_to_ip_mtu.drawio.svg[frame_to_ip_mtu() のフロー図]
 
 .frame_to_ip_mtu() の関係図
-image::call_src_mlx5_hca__frame_to_ip_mtu.drawio.svg[frame_to_ip_mtu() の関係図]
+image::call_src_mlx5_hca-frame_to_ip_mtu.drawio.svg[frame_to_ip_mtu() の関係図]
 
-[[src_mlx5_hca__port_log_mtu]]
+[[src_mlx5_hca-port_log_mtu]]
 === `port_log_mtu()`
 [cols="1,5",options="autowidth"]
 .port_log_mtu()
@@ -1607,15 +1786,19 @@ image::call_src_mlx5_hca__frame_to_ip_mtu.drawio.svg[frame_to_ip_mtu() の関係
 |前提条件 a|`INIT_HCA` の後であること。
 |注意事項 a|* PMTU が読めなければ何も表示しない。
 * フレーム長が 22 以下の値は 0 と表示する。
+|使用関数 a|* <<src_mlx5_hca-access_reg,`access_reg()`>>
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* <<src_mlx5_hca-frame_to_ip_mtu,`frame_to_ip_mtu()`>>
+* `bfm_rd16be()`(外部)
 |===
 
 .port_log_mtu() のフロー図
-image::flow_src_mlx5_hca__port_log_mtu.drawio.svg[port_log_mtu() のフロー図]
+image::flow_src_mlx5_hca-port_log_mtu.drawio.svg[port_log_mtu() のフロー図]
 
 .port_log_mtu() の関係図
-image::call_src_mlx5_hca__port_log_mtu.drawio.svg[port_log_mtu() の関係図]
+image::call_src_mlx5_hca-port_log_mtu.drawio.svg[port_log_mtu() の関係図]
 
-[[src_mlx5_hca__port_up]]
+[[src_mlx5_hca-port_up]]
 === `port_up()`
 [cols="1,5",options="autowidth"]
 .port_up()
@@ -1633,15 +1816,20 @@ image::call_src_mlx5_hca__port_log_mtu.drawio.svg[port_log_mtu() の関係図]
 |前提条件 a|`INIT_HCA` の後であること。
 |注意事項 a|* 待ちの間の PAOS の読みの失敗は、上がっていないのと同じに扱って待ち続ける。時間切れになったとき、最後の読みが失敗していれば「PAOS が読めない」を表示して `BFM_E_HW` を返す。
 * リンクが後で上がれば EQ のポートの変化のイベントで `link_up` が立つ(`mlx5_eq_poll()`)。
+|使用関数 a|* <<src_mlx5_hca-access_reg,`access_reg()`>>
+* `bfm_port_time_ns()`(<<port_linux_vfio_port_linux-bfm_port_time_ns,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_time_ns,VxWorks 版>>)
+* `memset()`(外部)
+* `bfm_port_delay_us()`(<<port_linux_vfio_port_linux-bfm_port_delay_us,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_delay_us,VxWorks 版>>)
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
 |===
 
 .port_up() のフロー図
-image::flow_src_mlx5_hca__port_up.drawio.svg[port_up() のフロー図]
+image::flow_src_mlx5_hca-port_up.drawio.svg[port_up() のフロー図]
 
 .port_up() の関係図
-image::call_src_mlx5_hca__port_up.drawio.svg[port_up() の関係図]
+image::call_src_mlx5_hca-port_up.drawio.svg[port_up() の関係図]
 
-[[src_mlx5_hca__vport_enable_roce]]
+[[src_mlx5_hca-vport_enable_roce]]
 === `vport_enable_roce()`
 [cols="1,5",options="autowidth"]
 .vport_enable_roce()
@@ -1658,15 +1846,18 @@ image::call_src_mlx5_hca__port_up.drawio.svg[port_up() の関係図]
 |戻り値 a|`mlx5_cmd()` の戻り値。
 |前提条件 a|`INIT_HCA` の後であること。
 |注意事項 a|立てないと QP の `INIT2RTR` が断られる。入力(516 バイト)は静的な緩衝に組む。
+|使用関数 a|* `memset()`(外部)
+* `bfm_wr16be()`(外部)
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
 |===
 
 .vport_enable_roce() のフロー図
-image::flow_src_mlx5_hca__vport_enable_roce.drawio.svg[vport_enable_roce() のフロー図]
+image::flow_src_mlx5_hca-vport_enable_roce.drawio.svg[vport_enable_roce() のフロー図]
 
 .vport_enable_roce() の関係図
-image::call_src_mlx5_hca__vport_enable_roce.drawio.svg[vport_enable_roce() の関係図]
+image::call_src_mlx5_hca-vport_enable_roce.drawio.svg[vport_enable_roce() の関係図]
 
-[[src_mlx5_hca__vport_query_mac]]
+[[src_mlx5_hca-vport_query_mac]]
 === `vport_query_mac()`
 [cols="1,5",options="autowidth"]
 .vport_query_mac()
@@ -1684,15 +1875,18 @@ image::call_src_mlx5_hca__vport_enable_roce.drawio.svg[vport_enable_roce() の�
 |戻り値 a|`mlx5_cmd()` の戻り値。
 |前提条件 a|`INIT_HCA` の後であること。
 |注意事項 a|失敗したときは `mac` を書き換えない。出力(272 バイト)は静的な緩衝で受ける。
+|使用関数 a|* `bfm_wr16be()`(外部)
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
+* `memcpy()`(外部)
 |===
 
 .vport_query_mac() のフロー図
-image::flow_src_mlx5_hca__vport_query_mac.drawio.svg[vport_query_mac() のフロー図]
+image::flow_src_mlx5_hca-vport_query_mac.drawio.svg[vport_query_mac() のフロー図]
 
 .vport_query_mac() の関係図
-image::call_src_mlx5_hca__vport_query_mac.drawio.svg[vport_query_mac() の関係図]
+image::call_src_mlx5_hca-vport_query_mac.drawio.svg[vport_query_mac() の関係図]
 
-[[src_mlx5_hca__set_roce_address]]
+[[src_mlx5_hca-set_roce_address]]
 === `set_roce_address()`
 [cols="1,5",options="autowidth"]
 .set_roce_address()
@@ -1709,15 +1903,18 @@ image::call_src_mlx5_hca__vport_query_mac.drawio.svg[vport_query_mac() の関係
 |戻り値 a|`mlx5_cmd()` の戻り値。
 |前提条件 a|`d->gid` と `d->mac` が入っていること。
 |注意事項 a|`d->num_vhca_ports` が 0 でなければ `vhca_port_num` に 1 を入れる(ConnectX-7 への備え)。
+|使用関数 a|* `bfm_wr16be()`(外部)
+* `memcpy()`(外部)
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
 |===
 
 .set_roce_address() のフロー図
-image::flow_src_mlx5_hca__set_roce_address.drawio.svg[set_roce_address() のフロー図]
+image::flow_src_mlx5_hca-set_roce_address.drawio.svg[set_roce_address() のフロー図]
 
 .set_roce_address() の関係図
-image::call_src_mlx5_hca__set_roce_address.drawio.svg[set_roce_address() の関係図]
+image::call_src_mlx5_hca-set_roce_address.drawio.svg[set_roce_address() の関係図]
 
-[[src_mlx5_hca__mlx5_gid_from_ipv4]]
+[[src_mlx5_hca-mlx5_gid_from_ipv4]]
 === `mlx5_gid_from_ipv4()`
 [cols="1,5",options="autowidth"]
 .mlx5_gid_from_ipv4()
@@ -1735,15 +1932,17 @@ image::call_src_mlx5_hca__set_roce_address.drawio.svg[set_roce_address() の関�
 |戻り値 a|なし
 |前提条件 a|特になし。
 |注意事項 a|byte 12〜15 にはビッグエンディアンで書く。
+|使用関数 a|* `memset()`(外部)
+* `bfm_wr32be()`(外部)
 |===
 
 .mlx5_gid_from_ipv4() のフロー図
-image::flow_src_mlx5_hca__mlx5_gid_from_ipv4.drawio.svg[mlx5_gid_from_ipv4() のフロー図]
+image::flow_src_mlx5_hca-mlx5_gid_from_ipv4.drawio.svg[mlx5_gid_from_ipv4() のフロー図]
 
 .mlx5_gid_from_ipv4() の関係図
-image::call_src_mlx5_hca__mlx5_gid_from_ipv4.drawio.svg[mlx5_gid_from_ipv4() の関係図]
+image::call_src_mlx5_hca-mlx5_gid_from_ipv4.drawio.svg[mlx5_gid_from_ipv4() の関係図]
 
-[[src_mlx5_hca__mlx5_hca_init]]
+[[src_mlx5_hca-mlx5_hca_init]]
 === `mlx5_hca_init()`
 [cols="1,5",options="autowidth"]
 .mlx5_hca_init()
@@ -1763,15 +1962,44 @@ image::call_src_mlx5_hca__mlx5_gid_from_ipv4.drawio.svg[mlx5_gid_from_ipv4() の
 * `ENABLE_HCA` が通った時点で `d->hca_enabled = 1` にする。
 * 公開メモリの鍵の下位 8 ビットは、そのときの時刻(ns を 10 ビット右へずらしたもの)から作る。自分用の鍵(`lkey`)の下位 8 ビットは 0。
 * `g_bfm_port_mtu` が 0 なら MTU を設定しない。`g_bfm_local_mac` が全部 0 なら vport の MAC を使う。
+|使用関数 a|* `bfm_mmio_rd32be()`(外部)
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* <<src_mlx5_hca-wait_fw_init,`wait_fw_init()`>>
+* <<src_mlx5_cmd-mlx5_cmd_init,`mlx5_cmd_init()`>>
+* <<src_mlx5_hca-simple_cmd,`simple_cmd()`>>
+* <<src_mlx5_hca-set_issi,`set_issi()`>>
+* <<src_bfm_mem-bfm_mem_alloc,`bfm_mem_alloc()`>>
+* <<src_mlx5_hca-satisfy_pages,`satisfy_pages()`>>
+* <<src_mlx5_hca-set_host_endianness,`set_host_endianness()`>>
+* <<src_mlx5_hca-setup_general_caps,`setup_general_caps()`>>
+* <<src_mlx5_hca-setup_atomic_caps,`setup_atomic_caps()`>>
+* <<src_mlx5_hca-setup_roce_caps,`setup_roce_caps()`>>
+* `bfm_wr16be()`(外部)
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
+* <<src_mlx5_cmd-mlx5_eq_create,`mlx5_eq_create()`>>
+* <<src_mlx5_hca-alloc_pd,`alloc_pd()`>>
+* `bfm_port_time_ns()`(<<port_linux_vfio_port_linux-bfm_port_time_ns,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_time_ns,VxWorks 版>>)
+* <<src_mlx5_hca-create_mkey_pa,`create_mkey_pa()`>>
+* <<src_mlx5_hca-port_set_mtu,`port_set_mtu()`>>
+* <<src_mlx5_hca-port_up,`port_up()`>>
+* <<src_mlx5_hca-port_log_mtu,`port_log_mtu()`>>
+* <<src_mlx5_hca-vport_enable_roce,`vport_enable_roce()`>>
+* `memcmp()`(外部)
+* `memcpy()`(外部)
+* <<src_mlx5_hca-vport_query_mac,`vport_query_mac()`>>
+* <<src_mlx5_hca-mlx5_gid_from_ipv4,`mlx5_gid_from_ipv4()`>>
+* <<src_mlx5_hca-set_roce_address,`set_roce_address()`>>
+* <<src_mlx5_cmd-mlx5_eq_poll,`mlx5_eq_poll()`>>
+* `bfm_port_delay_us()`(<<port_linux_vfio_port_linux-bfm_port_delay_us,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_delay_us,VxWorks 版>>)
 |===
 
 .mlx5_hca_init() のフロー図
-image::flow_src_mlx5_hca__mlx5_hca_init.drawio.svg[mlx5_hca_init() のフロー図]
+image::flow_src_mlx5_hca-mlx5_hca_init.drawio.svg[mlx5_hca_init() のフロー図]
 
 .mlx5_hca_init() の関係図
-image::call_src_mlx5_hca__mlx5_hca_init.drawio.svg[mlx5_hca_init() の関係図]
+image::call_src_mlx5_hca-mlx5_hca_init.drawio.svg[mlx5_hca_init() の関係図]
 
-[[src_mlx5_hca__mlx5_hca_teardown]]
+[[src_mlx5_hca-mlx5_hca_teardown]]
 === `mlx5_hca_teardown()`
 [cols="1,5",options="autowidth"]
 .mlx5_hca_teardown()
@@ -1790,19 +2018,22 @@ image::call_src_mlx5_hca__mlx5_hca_init.drawio.svg[mlx5_hca_init() の関係図]
 |注意事項 a|* `d->hca_enabled` が 0 なら何もしない。
 * この後は FW にコマンドを出さない(資源を壊さずに止めた後の `MANAGE_PAGES`・`DISABLE_HCA` は返らないことがある。実機で確認済み)。
 * force も失敗した(コマンドが失敗した、または出力の byte 15 のビット 0 が立っていた)ときは、注意(次の立ち上げの FLR で戻す)を表示し、何も返さずに `hca_enabled` を 0 にする。
+|使用関数 a|* `bfm_wr16be()`(外部)
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
 |===
 
 .mlx5_hca_teardown() のフロー図
-image::flow_src_mlx5_hca__mlx5_hca_teardown.drawio.svg[mlx5_hca_teardown() のフロー図]
+image::flow_src_mlx5_hca-mlx5_hca_teardown.drawio.svg[mlx5_hca_teardown() のフロー図]
 
 .mlx5_hca_teardown() の関係図
-image::call_src_mlx5_hca__mlx5_hca_teardown.drawio.svg[mlx5_hca_teardown() の関係図]
+image::call_src_mlx5_hca-mlx5_hca_teardown.drawio.svg[mlx5_hca_teardown() の関係図]
 
 == `src/mlx5_qp.c`
 
 QP(RC と GSI)の作成・状態遷移・破棄を持つ。QP の作成のときに送受信で共有する CQ も作る。QPC の欄の位置は ConnectX-4 / 4 Lx の実機で確かめたもの(ソースの冒頭のコメント)を使う。RC は RST → INIT → RTR → RTS、GSI(UD)は RST → INIT → RTR → RTS と進める。
 
-[[src_mlx5_qp__qp_in_header]]
+[[src_mlx5_qp-qp_in_header]]
 === `qp_in_header()`
 [cols="1,5",options="autowidth"]
 .qp_in_header()
@@ -1822,15 +2053,19 @@ QP(RC と GSI)の作成・状態遷移・破棄を持つ。QP の作成のとき
 |戻り値 a|なし
 |前提条件 a|`in` が `QP_IN_SIZE` バイト以上あること。
 |注意事項 a|特になし。
+|使用関数 a|* `memset()`(外部)
+* `bfm_wr16be()`(外部)
+* `bfm_wr24be()`(外部)
+* `bfm_wr32be()`(外部)
 |===
 
 .qp_in_header() のフロー図
-image::flow_src_mlx5_qp__qp_in_header.drawio.svg[qp_in_header() のフロー図]
+image::flow_src_mlx5_qp-qp_in_header.drawio.svg[qp_in_header() のフロー図]
 
 .qp_in_header() の関係図
-image::call_src_mlx5_qp__qp_in_header.drawio.svg[qp_in_header() の関係図]
+image::call_src_mlx5_qp-qp_in_header.drawio.svg[qp_in_header() の関係図]
 
-[[src_mlx5_qp__mlx5_udp_sport]]
+[[src_mlx5_qp-mlx5_udp_sport]]
 === `mlx5_udp_sport()`
 [cols="1,5",options="autowidth"]
 .mlx5_udp_sport()
@@ -1848,15 +2083,16 @@ image::call_src_mlx5_qp__qp_in_header.drawio.svg[qp_in_header() の関係図]
 |戻り値 a|UDP の送信元ポート(0xc000〜0xffff)。
 |前提条件 a|特になし。
 |注意事項 a|Linux と同じ値になるので、相手が Linux でも経路の振り分けがそろう。
+|使用関数 a|なし
 |===
 
 .mlx5_udp_sport() のフロー図
-image::flow_src_mlx5_qp__mlx5_udp_sport.drawio.svg[mlx5_udp_sport() のフロー図]
+image::flow_src_mlx5_qp-mlx5_udp_sport.drawio.svg[mlx5_udp_sport() のフロー図]
 
 .mlx5_udp_sport() の関係図
-image::call_src_mlx5_qp__mlx5_udp_sport.drawio.svg[mlx5_udp_sport() の関係図]
+image::call_src_mlx5_qp-mlx5_udp_sport.drawio.svg[mlx5_udp_sport() の関係図]
 
-[[src_mlx5_qp__mlx5_qp_create]]
+[[src_mlx5_qp-mlx5_qp_create]]
 === `mlx5_qp_create()`
 [cols="1,5",options="autowidth"]
 .mlx5_qp_create()
@@ -1884,15 +2120,25 @@ image::call_src_mlx5_qp__mlx5_udp_sport.drawio.svg[mlx5_udp_sport() の関係図
 |注意事項 a|* `CREATE_QP` が失敗したら、作った CQ を壊して `has_cq` を 0 に戻す。
 * 大きさの検査(`rq_log` / `sq_log` が 16 以下、WQ が 32 ページ以下)は CQ を作る前に行うので、`BFM_E_PARAM` で戻るときは何も作らない。
 * 入力の領域は静的変数なので、再入できない。
+|使用関数 a|* <<src_mlx5_hca-mlx5_cq_create,`mlx5_cq_create()`>>
+* `memset()`(外部)
+* `bfm_wr16be()`(外部)
+* `bfm_wr24be()`(外部)
+* `bfm_wr64be()`(外部)
+* `bfm_dma_addr()`(外部)
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
+* <<src_mlx5_cmd-mlx5_destroy_obj,`mlx5_destroy_obj()`>>
+* `bfm_rd24be()`(外部)
+* `bfm_port_time_ns()`(<<port_linux_vfio_port_linux-bfm_port_time_ns,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_time_ns,VxWorks 版>>)
 |===
 
 .mlx5_qp_create() のフロー図
-image::flow_src_mlx5_qp__mlx5_qp_create.drawio.svg[mlx5_qp_create() のフロー図]
+image::flow_src_mlx5_qp-mlx5_qp_create.drawio.svg[mlx5_qp_create() のフロー図]
 
 .mlx5_qp_create() の関係図
-image::call_src_mlx5_qp__mlx5_qp_create.drawio.svg[mlx5_qp_create() の関係図]
+image::call_src_mlx5_qp-mlx5_qp_create.drawio.svg[mlx5_qp_create() の関係図]
 
-[[src_mlx5_qp__mlx5_qp_rst2init]]
+[[src_mlx5_qp-mlx5_qp_rst2init]]
 === `mlx5_qp_rst2init()`
 [cols="1,5",options="autowidth"]
 .mlx5_qp_rst2init()
@@ -1911,15 +2157,19 @@ image::call_src_mlx5_qp__mlx5_qp_create.drawio.svg[mlx5_qp_create() の関係図
 |戻り値 a|`mlx5_cmd()` の戻り値。
 |前提条件 a|`mlx5_qp_create()` が成功していること。
 |注意事項 a|rre などのアクセスのフラグを入れると ConnectX-4 の FW は BAD_PARAM で断るので、ここでは入れない(RTR2RTS で入れる)。
+|使用関数 a|* <<src_mlx5_qp-qp_in_header,`qp_in_header()`>>
+* `bfm_wr24be()`(外部)
+* `bfm_wr32be()`(外部)
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
 |===
 
 .mlx5_qp_rst2init() のフロー図
-image::flow_src_mlx5_qp__mlx5_qp_rst2init.drawio.svg[mlx5_qp_rst2init() のフロー図]
+image::flow_src_mlx5_qp-mlx5_qp_rst2init.drawio.svg[mlx5_qp_rst2init() のフロー図]
 
 .mlx5_qp_rst2init() の関係図
-image::call_src_mlx5_qp__mlx5_qp_rst2init.drawio.svg[mlx5_qp_rst2init() の関係図]
+image::call_src_mlx5_qp-mlx5_qp_rst2init.drawio.svg[mlx5_qp_rst2init() の関係図]
 
-[[src_mlx5_qp__mlx5_qp_ud_to_rts]]
+[[src_mlx5_qp-mlx5_qp_ud_to_rts]]
 === `mlx5_qp_ud_to_rts()`
 [cols="1,5",options="autowidth"]
 .mlx5_qp_ud_to_rts()
@@ -1937,15 +2187,19 @@ image::call_src_mlx5_qp__mlx5_qp_rst2init.drawio.svg[mlx5_qp_rst2init() の関�
 |戻り値 a|`BFM_OK`: RTS になった。そのほか `mlx5_cmd()` の戻り値。
 |前提条件 a|`mlx5_qp_rst2init()`(`ud` = 1)が成功していること。
 |注意事項 a|相手の情報は送る WQE に載せるので、ここでは入れない。INIT2RTR が失敗したら RTR2RTS は出さない。
+|使用関数 a|* <<src_mlx5_qp-qp_in_header,`qp_in_header()`>>
+* `bfm_wr24be()`(外部)
+* `bfm_wr32be()`(外部)
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
 |===
 
 .mlx5_qp_ud_to_rts() のフロー図
-image::flow_src_mlx5_qp__mlx5_qp_ud_to_rts.drawio.svg[mlx5_qp_ud_to_rts() のフロー図]
+image::flow_src_mlx5_qp-mlx5_qp_ud_to_rts.drawio.svg[mlx5_qp_ud_to_rts() のフロー図]
 
 .mlx5_qp_ud_to_rts() の関係図
-image::call_src_mlx5_qp__mlx5_qp_ud_to_rts.drawio.svg[mlx5_qp_ud_to_rts() の関係図]
+image::call_src_mlx5_qp-mlx5_qp_ud_to_rts.drawio.svg[mlx5_qp_ud_to_rts() の関係図]
 
-[[src_mlx5_qp__floor_log2]]
+[[src_mlx5_qp-floor_log2]]
 === `floor_log2()`
 [cols="1,5",options="autowidth"]
 .floor_log2()
@@ -1962,15 +2216,16 @@ image::call_src_mlx5_qp__mlx5_qp_ud_to_rts.drawio.svg[mlx5_qp_ud_to_rts() の関
 |戻り値 a|切り捨てた log2。
 |前提条件 a|特になし。
 |注意事項 a|`v` が 0 でも 0 を返す。
+|使用関数 a|なし
 |===
 
 .floor_log2() のフロー図
-image::flow_src_mlx5_qp__floor_log2.drawio.svg[floor_log2() のフロー図]
+image::flow_src_mlx5_qp-floor_log2.drawio.svg[floor_log2() のフロー図]
 
 .floor_log2() の関係図
-image::call_src_mlx5_qp__floor_log2.drawio.svg[floor_log2() の関係図]
+image::call_src_mlx5_qp-floor_log2.drawio.svg[floor_log2() の関係図]
 
-[[src_mlx5_qp__log_rra]]
+[[src_mlx5_qp-log_rra]]
 === `log_rra()`
 [cols="1,5",options="autowidth"]
 .log_rra()
@@ -1987,15 +2242,16 @@ image::call_src_mlx5_qp__floor_log2.drawio.svg[floor_log2() の関係図]
 |戻り値 a|`log_max_ra_res_qp` と 4 の小さいほう。
 |前提条件 a|HCA の能力を読んであること(`d->log_max_ra_res_qp`)。
 |注意事項 a|特になし。
+|使用関数 a|なし
 |===
 
 .log_rra() のフロー図
-image::flow_src_mlx5_qp__log_rra.drawio.svg[log_rra() のフロー図]
+image::flow_src_mlx5_qp-log_rra.drawio.svg[log_rra() のフロー図]
 
 .log_rra() の関係図
-image::call_src_mlx5_qp__log_rra.drawio.svg[log_rra() の関係図]
+image::call_src_mlx5_qp-log_rra.drawio.svg[log_rra() の関係図]
 
-[[src_mlx5_qp__mlx5_qp_init2rtr_rc]]
+[[src_mlx5_qp-mlx5_qp_init2rtr_rc]]
 === `mlx5_qp_init2rtr_rc()`
 [cols="1,5",options="autowidth"]
 .mlx5_qp_init2rtr_rc()
@@ -2014,15 +2270,22 @@ image::call_src_mlx5_qp__log_rra.drawio.svg[log_rra() の関係図]
 |戻り値 a|`mlx5_cmd()` の戻り値。
 |前提条件 a|`mlx5_qp_rst2init()` が成功し、`c` に相手の情報が入っていること。
 |注意事項 a|log_rra_max(responder として受け付ける read / atomic の数)はここで入れる。RTR2RTS で書いても FW は保持しない。
+|使用関数 a|* <<src_mlx5_qp-qp_in_header,`qp_in_header()`>>
+* `bfm_wr24be()`(外部)
+* <<src_mlx5_qp-log_rra,`log_rra()`>>
+* `memcpy()`(外部)
+* `bfm_wr16be()`(外部)
+* <<src_mlx5_qp-mlx5_udp_sport,`mlx5_udp_sport()`>>
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
 |===
 
 .mlx5_qp_init2rtr_rc() のフロー図
-image::flow_src_mlx5_qp__mlx5_qp_init2rtr_rc.drawio.svg[mlx5_qp_init2rtr_rc() のフロー図]
+image::flow_src_mlx5_qp-mlx5_qp_init2rtr_rc.drawio.svg[mlx5_qp_init2rtr_rc() のフロー図]
 
 .mlx5_qp_init2rtr_rc() の関係図
-image::call_src_mlx5_qp__mlx5_qp_init2rtr_rc.drawio.svg[mlx5_qp_init2rtr_rc() の関係図]
+image::call_src_mlx5_qp-mlx5_qp_init2rtr_rc.drawio.svg[mlx5_qp_init2rtr_rc() の関係図]
 
-[[src_mlx5_qp__mlx5_qp_rtr2rts_rc]]
+[[src_mlx5_qp-mlx5_qp_rtr2rts_rc]]
 === `mlx5_qp_rtr2rts_rc()`
 [cols="1,5",options="autowidth"]
 .mlx5_qp_rtr2rts_rc()
@@ -2046,15 +2309,21 @@ image::call_src_mlx5_qp__mlx5_qp_init2rtr_rc.drawio.svg[mlx5_qp_init2rtr_rc() �
 |前提条件 a|`mlx5_qp_init2rtr_rc()` が成功していること。HCA の能力(`log_max_ra_req_qp` / `log_max_ra_res_qp` / `atomic_mode`)を読んであること。
 |注意事項 a|* 試すのは多くて 2 回(1 回目は `d->atomic_mode`、2 回目は 0)。2 回目で成功したときは、atomic_mode が断られたことを表示する。
 * `d->atomic_mode` が 0 なら 1 回目の失敗でそのまま戻る。
+|使用関数 a|* <<src_mlx5_qp-floor_log2,`floor_log2()`>>
+* <<src_mlx5_qp-qp_in_header,`qp_in_header()`>>
+* `bfm_wr24be()`(外部)
+* <<src_mlx5_qp-log_rra,`log_rra()`>>
+* <<src_mlx5_cmd-mlx5_cmd,`mlx5_cmd()`>>
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
 |===
 
 .mlx5_qp_rtr2rts_rc() のフロー図
-image::flow_src_mlx5_qp__mlx5_qp_rtr2rts_rc.drawio.svg[mlx5_qp_rtr2rts_rc() のフロー図]
+image::flow_src_mlx5_qp-mlx5_qp_rtr2rts_rc.drawio.svg[mlx5_qp_rtr2rts_rc() のフロー図]
 
 .mlx5_qp_rtr2rts_rc() の関係図
-image::call_src_mlx5_qp__mlx5_qp_rtr2rts_rc.drawio.svg[mlx5_qp_rtr2rts_rc() の関係図]
+image::call_src_mlx5_qp-mlx5_qp_rtr2rts_rc.drawio.svg[mlx5_qp_rtr2rts_rc() の関係図]
 
-[[src_mlx5_qp__mlx5_qp_destroy]]
+[[src_mlx5_qp-mlx5_qp_destroy]]
 === `mlx5_qp_destroy()`
 [cols="1,5",options="autowidth"]
 .mlx5_qp_destroy()
@@ -2073,13 +2342,14 @@ image::call_src_mlx5_qp__mlx5_qp_rtr2rts_rc.drawio.svg[mlx5_qp_rtr2rts_rc() の�
 |前提条件 a|特になし。
 |注意事項 a|* コマンドの失敗は無視する。
 * UAR は返さない(呼び出し側が返す)。WQ などの DMA 領域も返さない。
+|使用関数 a|* <<src_mlx5_cmd-mlx5_destroy_obj,`mlx5_destroy_obj()`>>
 |===
 
 .mlx5_qp_destroy() のフロー図
-image::flow_src_mlx5_qp__mlx5_qp_destroy.drawio.svg[mlx5_qp_destroy() のフロー図]
+image::flow_src_mlx5_qp-mlx5_qp_destroy.drawio.svg[mlx5_qp_destroy() のフロー図]
 
 .mlx5_qp_destroy() の関係図
-image::call_src_mlx5_qp__mlx5_qp_destroy.drawio.svg[mlx5_qp_destroy() の関係図]
+image::call_src_mlx5_qp-mlx5_qp_destroy.drawio.svg[mlx5_qp_destroy() の関係図]
 
 == `src/bfm_cm.c`
 
@@ -2095,7 +2365,7 @@ image::call_src_mlx5_qp__mlx5_qp_destroy.drawio.svg[mlx5_qp_destroy() の関係�
 
 受け取ったメッセージは `gsi_pump()` が `handle_msg()` でその場で処理する(REP はその接続の枠へ写し、BYE は接続を閉じた扱いにし、REQ は `bfm_accept()` のために 1 つだけ `s_req` に取っておく)。接続の枠 `g_bfm_conn[BFM_MAX_CONN]` もこのファイルが持つ。
 
-[[src_bfm_cm__cm_rand32]]
+[[src_bfm_cm-cm_rand32]]
 === `cm_rand32()`
 [cols="1,5",options="autowidth"]
 .cm_rand32()
@@ -2108,15 +2378,16 @@ image::call_src_mlx5_qp__mlx5_qp_destroy.drawio.svg[mlx5_qp_destroy() の関係�
 |前提条件 a|特になし。
 |注意事項 a|* 暗号用ではない。呼ぶたびに今の時刻を混ぜる。
 * 接続の id(`local_id`)に使う。0 は「まだ無い」の意味に使うので避けている。
+|使用関数 a|* `bfm_port_time_ns()`(<<port_linux_vfio_port_linux-bfm_port_time_ns,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_time_ns,VxWorks 版>>)
 |===
 
 .cm_rand32() のフロー図
-image::flow_src_bfm_cm__cm_rand32.drawio.svg[cm_rand32() のフロー図]
+image::flow_src_bfm_cm-cm_rand32.drawio.svg[cm_rand32() のフロー図]
 
 .cm_rand32() の関係図
-image::call_src_bfm_cm__cm_rand32.drawio.svg[cm_rand32() の関係図]
+image::call_src_bfm_cm-cm_rand32.drawio.svg[cm_rand32() の関係図]
 
-[[src_bfm_cm__ms_since]]
+[[src_bfm_cm-ms_since]]
 === `ms_since()`
 [cols="1,5",options="autowidth"]
 .ms_since()
@@ -2133,15 +2404,16 @@ image::call_src_bfm_cm__cm_rand32.drawio.svg[cm_rand32() の関係図]
 |戻り値 a|経過時間(ミリ秒、切り捨て)。
 |前提条件 a|`t0` は `bfm_port_time_ns()` で取った値であること。
 |注意事項 a|特になし。
+|使用関数 a|* `bfm_port_time_ns()`(<<port_linux_vfio_port_linux-bfm_port_time_ns,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_time_ns,VxWorks 版>>)
 |===
 
 .ms_since() のフロー図
-image::flow_src_bfm_cm__ms_since.drawio.svg[ms_since() のフロー図]
+image::flow_src_bfm_cm-ms_since.drawio.svg[ms_since() のフロー図]
 
 .ms_since() の関係図
-image::call_src_bfm_cm__ms_since.drawio.svg[ms_since() の関係図]
+image::call_src_bfm_cm-ms_since.drawio.svg[ms_since() の関係図]
 
-[[src_bfm_cm__own_rr]]
+[[src_bfm_cm-own_rr]]
 === `own_rr()`
 [cols="1,5",options="autowidth"]
 .own_rr()
@@ -2153,15 +2425,16 @@ image::call_src_bfm_cm__ms_since.drawio.svg[ms_since() の関係図]
 |戻り値 a|同時の read / atomic の数(1〜16)。
 |前提条件 a|`g_bfm.log_max_ra_res_qp` が HCA の能力から読んであること。
 |注意事項 a|REQ・REP の [24] に入れる(`build_msg()`)。
+|使用関数 a|なし
 |===
 
 .own_rr() のフロー図
-image::flow_src_bfm_cm__own_rr.drawio.svg[own_rr() のフロー図]
+image::flow_src_bfm_cm-own_rr.drawio.svg[own_rr() のフロー図]
 
 .own_rr() の関係図
-image::call_src_bfm_cm__own_rr.drawio.svg[own_rr() の関係図]
+image::call_src_bfm_cm-own_rr.drawio.svg[own_rr() の関係図]
 
-[[src_bfm_cm__build_msg]]
+[[src_bfm_cm-build_msg]]
 === `build_msg()`
 [cols="1,5",options="autowidth"]
 .build_msg()
@@ -2180,15 +2453,21 @@ image::call_src_bfm_cm__own_rr.drawio.svg[own_rr() の関係図]
 |戻り値 a|なし
 |前提条件 a|`c->path_mtu`・`c->port`・`c->local_id`・`c->peer_id` が決まっていること。REQ / REP では `c->qp` が作ってあり、`g_bfm.mac`・`g_bfm.ip`・`g_bfm.rkey` が決まっていること。
 |注意事項 a|数はすべてビッグエンディアンで書く。
+|使用関数 a|* `memset()`(外部)
+* `bfm_wr32be()`(外部)
+* `bfm_wr16be()`(外部)
+* <<src_bfm_cm-own_rr,`own_rr()`>>
+* `memcpy()`(外部)
+* `bfm_wr64be()`(外部)
 |===
 
 .build_msg() のフロー図
-image::flow_src_bfm_cm__build_msg.drawio.svg[build_msg() のフロー図]
+image::flow_src_bfm_cm-build_msg.drawio.svg[build_msg() のフロー図]
 
 .build_msg() の関係図
-image::call_src_bfm_cm__build_msg.drawio.svg[build_msg() の関係図]
+image::call_src_bfm_cm-build_msg.drawio.svg[build_msg() の関係図]
 
-[[src_bfm_cm__take_peer]]
+[[src_bfm_cm-take_peer]]
 === `take_peer()`
 [cols="1,5",options="autowidth"]
 .take_peer()
@@ -2206,15 +2485,19 @@ image::call_src_bfm_cm__build_msg.drawio.svg[build_msg() の関係図]
 |戻り値 a|なし
 |前提条件 a|`m` は `MSG_SIZE` バイトの REQ / REP であること。
 |注意事項 a|[24](同時の read / atomic の数)が 0 なら 1 にする。
+|使用関数 a|* `bfm_rd32be()`(外部)
+* `memcpy()`(外部)
+* <<src_mlx5_hca-mlx5_gid_from_ipv4,`mlx5_gid_from_ipv4()`>>
+* `bfm_rd64be()`(外部)
 |===
 
 .take_peer() のフロー図
-image::flow_src_bfm_cm__take_peer.drawio.svg[take_peer() のフロー図]
+image::flow_src_bfm_cm-take_peer.drawio.svg[take_peer() のフロー図]
 
 .take_peer() の関係図
-image::call_src_bfm_cm__take_peer.drawio.svg[take_peer() の関係図]
+image::call_src_bfm_cm-take_peer.drawio.svg[take_peer() の関係図]
 
-[[src_bfm_cm__gsi_post_recv]]
+[[src_bfm_cm-gsi_post_recv]]
 === `gsi_post_recv()`
 [cols="1,5",options="autowidth"]
 .gsi_post_recv()
@@ -2226,15 +2509,20 @@ image::call_src_bfm_cm__take_peer.drawio.svg[take_peer() の関係図]
 |戻り値 a|なし
 |前提条件 a|`bfm_cm_init()` で GSI の WQ・ドアベルレコード・受信枠を切り出してあること。
 |注意事項 a|受信枠の位置は WQE の位置と同じ添字で決まる(`gsi_pump()` は CQE の `wqe_cnt` から枠を引く)。
+|使用関数 a|* `bfm_wr32be()`(外部)
+* `bfm_wr64be()`(外部)
+* `bfm_dma_addr()`(外部)
+* `bfm_dma_wmb()`(マクロ)
+* `bfm_cpu_to_be32()`(マクロ)
 |===
 
 .gsi_post_recv() のフロー図
-image::flow_src_bfm_cm__gsi_post_recv.drawio.svg[gsi_post_recv() のフロー図]
+image::flow_src_bfm_cm-gsi_post_recv.drawio.svg[gsi_post_recv() のフロー図]
 
 .gsi_post_recv() の関係図
-image::call_src_bfm_cm__gsi_post_recv.drawio.svg[gsi_post_recv() の関係図]
+image::call_src_bfm_cm-gsi_post_recv.drawio.svg[gsi_post_recv() の関係図]
 
-[[src_bfm_cm__gsi_send]]
+[[src_bfm_cm-gsi_send]]
 === `gsi_send()`
 [cols="1,5",options="autowidth"]
 .gsi_send()
@@ -2254,15 +2542,29 @@ image::call_src_bfm_cm__gsi_post_recv.drawio.svg[gsi_post_recv() の関係図]
 |注意事項 a|* 完了を待たずに戻る。完了は後の `gsi_pump()` が数える。
 * 送信の置き場は `BFM_GSI_TXBUFS` 個を順に使い回すので、送信中の数がその数より少ない間だけ次を出す。
 * 待つ間の `gsi_pump()` で受けたメッセージは `handle_msg()` で処理される(`handle_msg()` から `gsi_send()` が呼ばれることもある)。
+|使用関数 a|* `bfm_port_time_ns()`(<<port_linux_vfio_port_linux-bfm_port_time_ns,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_time_ns,VxWorks 版>>)
+* <<src_bfm_cm-gsi_pump,`gsi_pump()`>>
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* <<src_bfm_cm-ms_since,`ms_since()`>>
+* `bfm_wr32be()`(外部)
+* `bfm_wr16be()`(外部)
+* <<src_mlx5_qp-mlx5_udp_sport,`mlx5_udp_sport()`>>
+* `bfm_wr64be()`(外部)
+* `bfm_dma_addr()`(外部)
+* `bfm_dma_wmb()`(マクロ)
+* `bfm_cpu_to_be32()`(マクロ)
+* `memcpy()`(外部)
+* `bfm_mmio_wr64_raw()`(外部)
+* `bfm_wc_flush()`(マクロ)
 |===
 
 .gsi_send() のフロー図
-image::flow_src_bfm_cm__gsi_send.drawio.svg[gsi_send() のフロー図]
+image::flow_src_bfm_cm-gsi_send.drawio.svg[gsi_send() のフロー図]
 
 .gsi_send() の関係図
-image::call_src_bfm_cm__gsi_send.drawio.svg[gsi_send() の関係図]
+image::call_src_bfm_cm-gsi_send.drawio.svg[gsi_send() の関係図]
 
-[[src_bfm_cm__handle_msg]]
+[[src_bfm_cm-handle_msg]]
 === `handle_msg()`
 [cols="1,5",options="autowidth"]
 .handle_msg()
@@ -2282,15 +2584,22 @@ image::call_src_bfm_cm__gsi_send.drawio.svg[gsi_send() の関係図]
 * REP の送り直しの `gsi_send()` の失敗は無視する。
 * REQ 以外は `local_id` が合った最初の枠で処理を終える(条件に合わなければ何もしない)。どの枠にも合わなければ捨てる。
 * 相手が切った接続は `BFM_CS_CLOSED` にするだけで枠は返さない。アプリケーションが `bfm_disconnect()` で返すこと(表示もそう促す)。
+|使用関数 a|* `bfm_rd32be()`(外部)
+* <<src_bfm_cm-build_msg,`build_msg()`>>
+* <<src_bfm_cm-gsi_send,`gsi_send()`>>
+* `memcpy()`(外部)
+* `bfm_port_time_ns()`(<<port_linux_vfio_port_linux-bfm_port_time_ns,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_time_ns,VxWorks 版>>)
+* <<src_bfm_cm-take_peer,`take_peer()`>>
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
 |===
 
 .handle_msg() のフロー図
-image::flow_src_bfm_cm__handle_msg.drawio.svg[handle_msg() のフロー図]
+image::flow_src_bfm_cm-handle_msg.drawio.svg[handle_msg() のフロー図]
 
 .handle_msg() の関係図
-image::call_src_bfm_cm__handle_msg.drawio.svg[handle_msg() の関係図]
+image::call_src_bfm_cm-handle_msg.drawio.svg[handle_msg() の関係図]
 
-[[src_bfm_cm__gsi_pump]]
+[[src_bfm_cm-gsi_pump]]
 === `gsi_pump()`
 [cols="1,5",options="autowidth"]
 .gsi_pump()
@@ -2305,15 +2614,22 @@ image::call_src_bfm_cm__handle_msg.drawio.svg[handle_msg() の関係図]
 * 短すぎる受信や magic の違うものは捨てる(受信は出し直す)。
 * エラー完了を見たらその場で -1 を返し、残りの CQE は次の呼び出しで読む。送信のエラー(`MLX5_CQE_REQ_ERR`)は送信中の数を減らし、受信のエラー(`MLX5_CQE_RESP_ERR`)は受信を出し直す。
 * `handle_msg()` が `gsi_send()` を呼び、`gsi_send()` が送信の置き場を待つ間に `gsi_pump()` を呼ぶことがある(入れ子になる)。
+|使用関数 a|* `bfm_rmb()`(マクロ)
+* `bfm_rd32be()`(外部)
+* `bfm_rd16be()`(外部)
+* `bfm_cpu_to_be32()`(マクロ)
+* <<src_bfm_cm-gsi_post_recv,`gsi_post_recv()`>>
+* <<src_bfm_cm-handle_msg,`handle_msg()`>>
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
 |===
 
 .gsi_pump() のフロー図
-image::flow_src_bfm_cm__gsi_pump.drawio.svg[gsi_pump() のフロー図]
+image::flow_src_bfm_cm-gsi_pump.drawio.svg[gsi_pump() のフロー図]
 
 .gsi_pump() の関係図
-image::call_src_bfm_cm__gsi_pump.drawio.svg[gsi_pump() の関係図]
+image::call_src_bfm_cm-gsi_pump.drawio.svg[gsi_pump() の関係図]
 
-[[src_bfm_cm__conn_open]]
+[[src_bfm_cm-conn_open]]
 === `conn_open()`
 [cols="1,5",options="autowidth"]
 .conn_open()
@@ -2334,15 +2650,20 @@ image::call_src_bfm_cm__gsi_pump.drawio.svg[gsi_pump() の関係図]
 * `g_bfm_scatter_cqe` が 0 でなければ scatter to CQE を有効にする(`cs_req = 0x11`)。
 * `mlx5_qp_create()` が失敗したら `mlx5_qp_rst2init()` は呼ばない。
 * 枠の資源(QP の WQ・CQ・UAR・中継バッファ)は `bfm_cm_init()` で切り出し済みのものを使い回す。
+|使用関数 a|* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* <<src_bfm_cm-cm_rand32,`cm_rand32()`>>
+* <<src_mlx5_qp-mlx5_qp_create,`mlx5_qp_create()`>>
+* <<src_mlx5_qp-mlx5_qp_rst2init,`mlx5_qp_rst2init()`>>
+* <<src_mlx5_qp-mlx5_qp_destroy,`mlx5_qp_destroy()`>>
 |===
 
 .conn_open() のフロー図
-image::flow_src_bfm_cm__conn_open.drawio.svg[conn_open() のフロー図]
+image::flow_src_bfm_cm-conn_open.drawio.svg[conn_open() のフロー図]
 
 .conn_open() の関係図
-image::call_src_bfm_cm__conn_open.drawio.svg[conn_open() の関係図]
+image::call_src_bfm_cm-conn_open.drawio.svg[conn_open() の関係図]
 
-[[src_bfm_cm__conn_release]]
+[[src_bfm_cm-conn_release]]
 === `conn_release()`
 [cols="1,5",options="autowidth"]
 .conn_release()
@@ -2359,15 +2680,17 @@ image::call_src_bfm_cm__conn_open.drawio.svg[conn_open() の関係図]
 |戻り値 a|なし
 |前提条件 a|特になし。
 |注意事項 a|相手へは何も送らない(BYE は `bfm_disconnect()` が送る)。枠ごとの資源(WQ・CQ・UAR・中継バッファ)は返さず、次の接続で使い回す。
+|使用関数 a|* <<src_bfm_ops-bfm_ops_detach,`bfm_ops_detach()`>>
+* <<src_mlx5_qp-mlx5_qp_destroy,`mlx5_qp_destroy()`>>
 |===
 
 .conn_release() のフロー図
-image::flow_src_bfm_cm__conn_release.drawio.svg[conn_release() のフロー図]
+image::flow_src_bfm_cm-conn_release.drawio.svg[conn_release() のフロー図]
 
 .conn_release() の関係図
-image::call_src_bfm_cm__conn_release.drawio.svg[conn_release() の関係図]
+image::call_src_bfm_cm-conn_release.drawio.svg[conn_release() の関係図]
 
-[[src_bfm_cm__conn_up]]
+[[src_bfm_cm-conn_up]]
 === `conn_up()`
 [cols="1,5",options="autowidth"]
 .conn_up()
@@ -2385,15 +2708,19 @@ image::call_src_bfm_cm__conn_release.drawio.svg[conn_release() の関係図]
 |戻り値 a|`BFM_OK`: 使える状態になった。そのほか `mlx5_qp_init2rtr_rc()` / `mlx5_qp_rtr2rts_rc()` / `bfm_ops_attach()` の戻り値。
 |前提条件 a|`conn_open()` で INIT まで進めてあり、`c` に相手の情報(`peer_qpn`・`peer_psn`・`peer_gid`・`peer_mac`・`peer_rr`・`path_mtu`)が入っていること。
 |注意事項 a|途中で失敗したら残りは行わず、`c->state` も変えない(後始末は呼び出し側が `conn_release()` で行う)。
+|使用関数 a|* <<src_mlx5_qp-mlx5_qp_init2rtr_rc,`mlx5_qp_init2rtr_rc()`>>
+* <<src_mlx5_qp-mlx5_qp_rtr2rts_rc,`mlx5_qp_rtr2rts_rc()`>>
+* <<src_bfm_ops-bfm_ops_attach,`bfm_ops_attach()`>>
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
 |===
 
 .conn_up() のフロー図
-image::flow_src_bfm_cm__conn_up.drawio.svg[conn_up() のフロー図]
+image::flow_src_bfm_cm-conn_up.drawio.svg[conn_up() のフロー図]
 
 .conn_up() の関係図
-image::call_src_bfm_cm__conn_up.drawio.svg[conn_up() の関係図]
+image::call_src_bfm_cm-conn_up.drawio.svg[conn_up() の関係図]
 
-[[src_bfm_cm__bfm_cm_init]]
+[[src_bfm_cm-bfm_cm_init]]
 === `bfm_cm_init()`
 [cols="1,5",options="autowidth"]
 .bfm_cm_init()
@@ -2408,15 +2735,25 @@ image::call_src_bfm_cm__conn_up.drawio.svg[conn_up() の関係図]
 * 接続の枠の準備で失敗したとき(`fail`)は、それまでに write-combining で張った UAR の窓を `bfm_port_bar0_wc_release()` で返し、全部の枠の `c->bf` を NULL にしてから戻る。
 * `s_gsi_ready = 1` にするのは全部そろって成功するときだけなので、失敗したときは `s_gsi_ready` は 0 のまま(`bfm_connect()` などは NULL を返す)。
 * `g_bfm_bf_enable` と `g_bfm.bf_cap` が立っているのに WC で張れなかったときは、注意を表示して BlueFlame なしで動かす(`c->bf = NULL`)。
+|使用関数 a|* `memset()`(外部)
+* <<src_bfm_mem-bfm_mem_alloc,`bfm_mem_alloc()`>>
+* <<src_mlx5_hca-mlx5_alloc_uar,`mlx5_alloc_uar()`>>
+* <<src_mlx5_qp-mlx5_qp_create,`mlx5_qp_create()`>>
+* <<src_mlx5_qp-mlx5_qp_rst2init,`mlx5_qp_rst2init()`>>
+* <<src_mlx5_qp-mlx5_qp_ud_to_rts,`mlx5_qp_ud_to_rts()`>>
+* <<src_bfm_cm-gsi_post_recv,`gsi_post_recv()`>>
+* `bfm_port_bar0_wc()`(<<port_linux_vfio_port_linux-bfm_port_bar0_wc,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_bar0_wc,VxWorks 版>>)
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* `bfm_port_bar0_wc_release()`(<<port_linux_vfio_port_linux-bfm_port_bar0_wc_release,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_bar0_wc_release,VxWorks 版>>)
 |===
 
 .bfm_cm_init() のフロー図
-image::flow_src_bfm_cm__bfm_cm_init.drawio.svg[bfm_cm_init() のフロー図]
+image::flow_src_bfm_cm-bfm_cm_init.drawio.svg[bfm_cm_init() のフロー図]
 
 .bfm_cm_init() の関係図
-image::call_src_bfm_cm__bfm_cm_init.drawio.svg[bfm_cm_init() の関係図]
+image::call_src_bfm_cm-bfm_cm_init.drawio.svg[bfm_cm_init() の関係図]
 
-[[src_bfm_cm__bfm_cm_fini]]
+[[src_bfm_cm-bfm_cm_fini]]
 === `bfm_cm_fini()`
 [cols="1,5",options="autowidth"]
 .bfm_cm_fini()
@@ -2428,15 +2765,17 @@ image::call_src_bfm_cm__bfm_cm_init.drawio.svg[bfm_cm_init() の関係図]
 |戻り値 a|なし
 |前提条件 a|`bfm_cm_init()` の後であること。
 |注意事項 a|GSI の QP や UAR は壊さない(HCA の停止で消える)。切断する接続があれば、それぞれ BYE が出ていくのを最大 `TX_DRAIN_MS`(100 ミリ秒)待つ。
+|使用関数 a|* <<src_bfm_cm-bfm_disconnect,`bfm_disconnect()`>>
+* `bfm_port_bar0_wc_release()`(<<port_linux_vfio_port_linux-bfm_port_bar0_wc_release,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_bar0_wc_release,VxWorks 版>>)
 |===
 
 .bfm_cm_fini() のフロー図
-image::flow_src_bfm_cm__bfm_cm_fini.drawio.svg[bfm_cm_fini() のフロー図]
+image::flow_src_bfm_cm-bfm_cm_fini.drawio.svg[bfm_cm_fini() のフロー図]
 
 .bfm_cm_fini() の関係図
-image::call_src_bfm_cm__bfm_cm_fini.drawio.svg[bfm_cm_fini() の関係図]
+image::call_src_bfm_cm-bfm_cm_fini.drawio.svg[bfm_cm_fini() の関係図]
 
-[[src_bfm_cm__bfm_connect]]
+[[src_bfm_cm-bfm_connect]]
 === `bfm_connect()`
 [cols="1,5",options="autowidth"]
 .bfm_connect()
@@ -2459,15 +2798,26 @@ image::call_src_bfm_cm__bfm_cm_fini.drawio.svg[bfm_cm_fini() の関係図]
 * 相手の MAC・IP は引数(または設定の値)のものを入れるが、REP を受けると `take_peer()` が REP の中身で上書きする。
 * 失敗したときは相手へ何も送らずに(BYE も送らない)枠を返す(`conn_release()`)。
 * REP を待つ間の `gsi_pump()` の戻り値は見ない。
+|使用関数 a|* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* <<src_bfm_cm-conn_open,`conn_open()`>>
+* `memcpy()`(外部)
+* <<src_mlx5_hca-mlx5_gid_from_ipv4,`mlx5_gid_from_ipv4()`>>
+* <<src_bfm_cm-build_msg,`build_msg()`>>
+* `bfm_port_time_ns()`(<<port_linux_vfio_port_linux-bfm_port_time_ns,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_time_ns,VxWorks 版>>)
+* <<src_bfm_cm-ms_since,`ms_since()`>>
+* <<src_bfm_cm-gsi_send,`gsi_send()`>>
+* <<src_bfm_cm-gsi_pump,`gsi_pump()`>>
+* <<src_bfm_cm-conn_up,`conn_up()`>>
+* <<src_bfm_cm-conn_release,`conn_release()`>>
 |===
 
 .bfm_connect() のフロー図
-image::flow_src_bfm_cm__bfm_connect.drawio.svg[bfm_connect() のフロー図]
+image::flow_src_bfm_cm-bfm_connect.drawio.svg[bfm_connect() のフロー図]
 
 .bfm_connect() の関係図
-image::call_src_bfm_cm__bfm_connect.drawio.svg[bfm_connect() の関係図]
+image::call_src_bfm_cm-bfm_connect.drawio.svg[bfm_connect() の関係図]
 
-[[src_bfm_cm__bfm_accept]]
+[[src_bfm_cm-bfm_accept]]
 === `bfm_accept()`
 [cols="1,5",options="autowidth"]
 .bfm_accept()
@@ -2488,15 +2838,25 @@ image::call_src_bfm_cm__bfm_connect.drawio.svg[bfm_connect() の関係図]
 * REQ の経路 MTU([5])が 1 以上で自分の path_mtu より小さければ、そちらに合わせる。
 * QP を RTS にしてから REP を送るので、掛け側は REP を受けてすぐ使える。REP が落ちたときは、掛け側の REQ の送り直しに `handle_msg()` が REP を送り直す。
 * 待つ間の `gsi_pump()` で、既存の接続への BYE や REQ の送り直しも処理される。
+|使用関数 a|* `bfm_port_time_ns()`(<<port_linux_vfio_port_linux-bfm_port_time_ns,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_time_ns,VxWorks 版>>)
+* <<src_bfm_cm-gsi_pump,`gsi_pump()`>>
+* `bfm_rd16be()`(外部)
+* <<src_bfm_cm-ms_since,`ms_since()`>>
+* <<src_bfm_cm-conn_open,`conn_open()`>>
+* <<src_bfm_cm-take_peer,`take_peer()`>>
+* <<src_bfm_cm-conn_up,`conn_up()`>>
+* <<src_bfm_cm-build_msg,`build_msg()`>>
+* <<src_bfm_cm-gsi_send,`gsi_send()`>>
+* <<src_bfm_cm-conn_release,`conn_release()`>>
 |===
 
 .bfm_accept() のフロー図
-image::flow_src_bfm_cm__bfm_accept.drawio.svg[bfm_accept() のフロー図]
+image::flow_src_bfm_cm-bfm_accept.drawio.svg[bfm_accept() のフロー図]
 
 .bfm_accept() の関係図
-image::call_src_bfm_cm__bfm_accept.drawio.svg[bfm_accept() の関係図]
+image::call_src_bfm_cm-bfm_accept.drawio.svg[bfm_accept() の関係図]
 
-[[src_bfm_cm__bfm_disconnect]]
+[[src_bfm_cm-bfm_disconnect]]
 === `bfm_disconnect()`
 [cols="1,5",options="autowidth"]
 .bfm_disconnect()
@@ -2516,15 +2876,22 @@ image::call_src_bfm_cm__bfm_accept.drawio.svg[bfm_accept() の関係図]
 * BYE の送信に失敗したら待たずに枠を返す。待つ間に GSI のエラー完了を見たら待つのをやめる。
 * 送信の完了は GSI 全体の送信中の数(`s_tx_outstanding`)が 0 になるまで待つ。
 * 呼んだ後 `c` は使えない。
+|使用関数 a|* <<src_bfm_cm-build_msg,`build_msg()`>>
+* <<src_bfm_cm-gsi_send,`gsi_send()`>>
+* `bfm_port_time_ns()`(<<port_linux_vfio_port_linux-bfm_port_time_ns,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_time_ns,VxWorks 版>>)
+* <<src_bfm_cm-ms_since,`ms_since()`>>
+* <<src_bfm_cm-gsi_pump,`gsi_pump()`>>
+* <<src_bfm_cm-conn_release,`conn_release()`>>
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
 |===
 
 .bfm_disconnect() のフロー図
-image::flow_src_bfm_cm__bfm_disconnect.drawio.svg[bfm_disconnect() のフロー図]
+image::flow_src_bfm_cm-bfm_disconnect.drawio.svg[bfm_disconnect() のフロー図]
 
 .bfm_disconnect() の関係図
-image::call_src_bfm_cm__bfm_disconnect.drawio.svg[bfm_disconnect() の関係図]
+image::call_src_bfm_cm-bfm_disconnect.drawio.svg[bfm_disconnect() の関係図]
 
-[[src_bfm_cm__bfm_cm_poll]]
+[[src_bfm_cm-bfm_cm_poll]]
 === `bfm_cm_poll()`
 [cols="1,5",options="autowidth"]
 .bfm_cm_poll()
@@ -2537,19 +2904,20 @@ image::call_src_bfm_cm__bfm_disconnect.drawio.svg[bfm_disconnect() の関係図]
 |前提条件 a|`bfm_init()` と同じタスクから呼ぶこと。
 |注意事項 a|* 相手が切った接続は `BFM_CS_CLOSED` になるだけで枠は返さない。アプリケーションが `bfm_disconnect()` で返すこと。
 * 新しい接続への REQ は `s_req` に取っておかれ、`bfm_accept()` に任せる。
+|使用関数 a|* <<src_bfm_cm-gsi_pump,`gsi_pump()`>>
 |===
 
 .bfm_cm_poll() のフロー図
-image::flow_src_bfm_cm__bfm_cm_poll.drawio.svg[bfm_cm_poll() のフロー図]
+image::flow_src_bfm_cm-bfm_cm_poll.drawio.svg[bfm_cm_poll() のフロー図]
 
 .bfm_cm_poll() の関係図
-image::call_src_bfm_cm__bfm_cm_poll.drawio.svg[bfm_cm_poll() の関係図]
+image::call_src_bfm_cm-bfm_cm_poll.drawio.svg[bfm_cm_poll() の関係図]
 
 == `src/bfm_ops.c`
 
 データ経路。相手の公開メモリへの write / read / atomic(CAS・FAA)を、1 個の操作 = 1 個の WQE として出す。WQE は手元の作業域で組み、SQ のリング(ホストメモリ)へ写し、doorbell record を進めてから、同じ WQE を UAR の BlueFlame の窓へ MMIO で書く(`post()`)。窓は write-combining なので 64 バイトが 1 個の PCIe の書き込みにまとまり、NIC はドアベルと一緒に WQE を受け取る。窓は 2 面あり交互に使う。小さい write はデータを WQE に埋め込む(inline)。read と atomic は必ず完了通知(CQE)を求め、32 バイトまでの応答は CQE に入るので CPU がそこから写す。完了は `poll_one()` で CQ から拾い、`wait_done()` で待つ。
 
-[[src_bfm_ops__conn_usable]]
+[[src_bfm_ops-conn_usable]]
 === `conn_usable()`
 [cols="1,5",options="autowidth"]
 .conn_usable()
@@ -2566,15 +2934,16 @@ image::call_src_bfm_cm__bfm_cm_poll.drawio.svg[bfm_cm_poll() の関係図]
 |戻り値 a|1: 使える。0: 使えない(NULL、または `BFM_CS_UP` でない)。
 |前提条件 a|特になし。
 |注意事項 a|特になし。
+|使用関数 a|なし
 |===
 
 .conn_usable() のフロー図
-image::flow_src_bfm_ops__conn_usable.drawio.svg[conn_usable() のフロー図]
+image::flow_src_bfm_ops-conn_usable.drawio.svg[conn_usable() のフロー図]
 
 .conn_usable() の関係図
-image::call_src_bfm_ops__conn_usable.drawio.svg[conn_usable() の関係図]
+image::call_src_bfm_ops-conn_usable.drawio.svg[conn_usable() の関係図]
 
-[[src_bfm_ops__map_syndrome]]
+[[src_bfm_ops-map_syndrome]]
 === `map_syndrome()`
 [cols="1,5",options="autowidth"]
 .map_syndrome()
@@ -2591,15 +2960,16 @@ image::call_src_bfm_ops__conn_usable.drawio.svg[conn_usable() の関係図]
 |戻り値 a|`BFM_E_REMOTE`: 0x12・0x13・0x14(相手が拒否)。`BFM_E_RETRY`: 0x15・0x16(再送が尽きた)。`BFM_E_CQE`: そのほか。
 |前提条件 a|特になし。
 |注意事項 a|特になし。
+|使用関数 a|なし
 |===
 
 .map_syndrome() のフロー図
-image::flow_src_bfm_ops__map_syndrome.drawio.svg[map_syndrome() のフロー図]
+image::flow_src_bfm_ops-map_syndrome.drawio.svg[map_syndrome() のフロー図]
 
 .map_syndrome() の関係図
-image::call_src_bfm_ops__map_syndrome.drawio.svg[map_syndrome() の関係図]
+image::call_src_bfm_ops-map_syndrome.drawio.svg[map_syndrome() の関係図]
 
-[[src_bfm_ops__syndrome_str]]
+[[src_bfm_ops-syndrome_str]]
 === `syndrome_str()`
 [cols="1,5",options="autowidth"]
 .syndrome_str()
@@ -2616,15 +2986,16 @@ image::call_src_bfm_ops__map_syndrome.drawio.svg[map_syndrome() の関係図]
 |戻り値 a|syndrome の名前の文字列(静的な文字列)。知らない値は `"?"`。
 |前提条件 a|特になし。
 |注意事項 a|`poll_one()` がエラー完了を表示するときに使う。
+|使用関数 a|なし
 |===
 
 .syndrome_str() のフロー図
-image::flow_src_bfm_ops__syndrome_str.drawio.svg[syndrome_str() のフロー図]
+image::flow_src_bfm_ops-syndrome_str.drawio.svg[syndrome_str() のフロー図]
 
 .syndrome_str() の関係図
-image::call_src_bfm_ops__syndrome_str.drawio.svg[syndrome_str() の関係図]
+image::call_src_bfm_ops-syndrome_str.drawio.svg[syndrome_str() の関係図]
 
-[[src_bfm_ops__poll_one]]
+[[src_bfm_ops-poll_one]]
 === `poll_one()`
 [cols="1,5",options="autowidth"]
 .poll_one()
@@ -2644,15 +3015,21 @@ image::call_src_bfm_ops__syndrome_str.drawio.svg[syndrome_str() の関係図]
 * 済んだ位置は、CQE の WQE カウンタ(16 ビット)を `sq_done` の 32 ビットへ広げ、その WQE の大きさ(`wqe_bbs[]`)を足して求める。
 * エラー完了では `sq_done` を進めない。接続が `BFM_CS_UP` のときだけ表示して `BFM_CS_ERROR` にする(2 回目以降は表示しない)。
 * `last_scat` は CQ のリングの中を指すので、次の CQE を拾うまでに読むこと。
+|使用関数 a|* `bfm_rmb()`(マクロ)
+* `bfm_rd16be()`(外部)
+* `bfm_cpu_to_be32()`(マクロ)
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* <<src_bfm_ops-syndrome_str,`syndrome_str()`>>
+* <<src_bfm_ops-map_syndrome,`map_syndrome()`>>
 |===
 
 .poll_one() のフロー図
-image::flow_src_bfm_ops__poll_one.drawio.svg[poll_one() のフロー図]
+image::flow_src_bfm_ops-poll_one.drawio.svg[poll_one() のフロー図]
 
 .poll_one() の関係図
-image::call_src_bfm_ops__poll_one.drawio.svg[poll_one() の関係図]
+image::call_src_bfm_ops-poll_one.drawio.svg[poll_one() の関係図]
 
-[[src_bfm_ops__wait_done]]
+[[src_bfm_ops-wait_done]]
 === `wait_done()`
 [cols="1,5",options="autowidth"]
 .wait_done()
@@ -2672,15 +3049,18 @@ image::call_src_bfm_ops__poll_one.drawio.svg[poll_one() の関係図]
 |注意事項 a|* 時刻は CQE が無いときの 4096 回に 1 回だけ見る。
 * 時間切れのときは表示して接続を `BFM_CS_ERROR` にする。
 * 位置の比較は 32 ビットの差の符号で行う(周回してもよい)。
+|使用関数 a|* `bfm_port_time_ns()`(<<port_linux_vfio_port_linux-bfm_port_time_ns,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_time_ns,VxWorks 版>>)
+* <<src_bfm_ops-poll_one,`poll_one()`>>
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
 |===
 
 .wait_done() のフロー図
-image::flow_src_bfm_ops__wait_done.drawio.svg[wait_done() のフロー図]
+image::flow_src_bfm_ops-wait_done.drawio.svg[wait_done() のフロー図]
 
 .wait_done() の関係図
-image::call_src_bfm_ops__wait_done.drawio.svg[wait_done() の関係図]
+image::call_src_bfm_ops-wait_done.drawio.svg[wait_done() の関係図]
 
-[[src_bfm_ops__post]]
+[[src_bfm_ops-post]]
 === `post()`
 [cols="1,5",options="autowidth"]
 .post()
@@ -2701,15 +3081,21 @@ image::call_src_bfm_ops__wait_done.drawio.svg[wait_done() の関係図]
 |注意事項 a|* 書く順は、リングへ写す → `bfm_dma_wmb()` → doorbell record(`dbr[1]`)→ `bfm_dma_wmb()` → 窓(またはドアベル)→ `bfm_wc_flush()`。
 * 位置ごとの WQE の大きさを `wqe_bbs[]` に覚える(`poll_one()` が済んだ位置を求めるのに使う)。
 * 空きを待つ間の `wait_done()` の失敗は、その戻り値(エラー完了も時間切れも)をそのまま返す。
+|使用関数 a|* <<src_bfm_ops-poll_one,`poll_one()`>>
+* <<src_bfm_ops-wait_done,`wait_done()`>>
+* `bfm_dma_wmb()`(マクロ)
+* `bfm_cpu_to_be32()`(マクロ)
+* `bfm_mmio_wr64_raw()`(外部)
+* `bfm_wc_flush()`(マクロ)
 |===
 
 .post() のフロー図
-image::flow_src_bfm_ops__post.drawio.svg[post() のフロー図]
+image::flow_src_bfm_ops-post.drawio.svg[post() のフロー図]
 
 .post() の関係図
-image::call_src_bfm_ops__post.drawio.svg[post() の関係図]
+image::call_src_bfm_ops-post.drawio.svg[post() の関係図]
 
-[[src_bfm_ops__put32]]
+[[src_bfm_ops-put32]]
 === `put32()`
 [cols="1,5",options="autowidth"]
 .put32()
@@ -2728,15 +3114,17 @@ image::call_src_bfm_ops__post.drawio.svg[post() の関係図]
 |戻り値 a|なし
 |前提条件 a|`byte_off + 4` が作業域に収まること。
 |注意事項 a|特になし。
+|使用関数 a|* `bfm_cpu_to_be32()`(マクロ)
+* `memcpy()`(外部)
 |===
 
 .put32() のフロー図
-image::flow_src_bfm_ops__put32.drawio.svg[put32() のフロー図]
+image::flow_src_bfm_ops-put32.drawio.svg[put32() のフロー図]
 
 .put32() の関係図
-image::call_src_bfm_ops__put32.drawio.svg[put32() の関係図]
+image::call_src_bfm_ops-put32.drawio.svg[put32() の関係図]
 
-[[src_bfm_ops__put64]]
+[[src_bfm_ops-put64]]
 === `put64()`
 [cols="1,5",options="autowidth"]
 .put64()
@@ -2755,15 +3143,17 @@ image::call_src_bfm_ops__put32.drawio.svg[put32() の関係図]
 |戻り値 a|なし
 |前提条件 a|`byte_off + 8` が作業域に収まること。
 |注意事項 a|特になし。
+|使用関数 a|* `bfm_cpu_to_be64()`(マクロ)
+* `memcpy()`(外部)
 |===
 
 .put64() のフロー図
-image::flow_src_bfm_ops__put64.drawio.svg[put64() のフロー図]
+image::flow_src_bfm_ops-put64.drawio.svg[put64() のフロー図]
 
 .put64() の関係図
-image::call_src_bfm_ops__put64.drawio.svg[put64() の関係図]
+image::call_src_bfm_ops-put64.drawio.svg[put64() の関係図]
 
-[[src_bfm_ops__build_ctrl]]
+[[src_bfm_ops-build_ctrl]]
 === `build_ctrl()`
 [cols="1,5",options="autowidth"]
 .build_ctrl()
@@ -2784,15 +3174,16 @@ image::call_src_bfm_ops__put64.drawio.svg[put64() の関係図]
 |戻り値 a|なし
 |前提条件 a|この WQE を、次に `post()` で出すこと(位置を今の `sq_pc` で書くため)。
 |注意事項 a|特になし。
+|使用関数 a|* <<src_bfm_ops-put32,`put32()`>>
 |===
 
 .build_ctrl() のフロー図
-image::flow_src_bfm_ops__build_ctrl.drawio.svg[build_ctrl() のフロー図]
+image::flow_src_bfm_ops-build_ctrl.drawio.svg[build_ctrl() のフロー図]
 
 .build_ctrl() の関係図
-image::call_src_bfm_ops__build_ctrl.drawio.svg[build_ctrl() の関係図]
+image::call_src_bfm_ops-build_ctrl.drawio.svg[build_ctrl() の関係図]
 
-[[src_bfm_ops__build_raddr]]
+[[src_bfm_ops-build_raddr]]
 === `build_raddr()`
 [cols="1,5",options="autowidth"]
 .build_raddr()
@@ -2811,15 +3202,17 @@ image::call_src_bfm_ops__build_ctrl.drawio.svg[build_ctrl() の関係図]
 |戻り値 a|なし
 |前提条件 a|`off` の範囲を `check_range()` で確かめてあること。
 |注意事項 a|特になし。
+|使用関数 a|* <<src_bfm_ops-put64,`put64()`>>
+* <<src_bfm_ops-put32,`put32()`>>
 |===
 
 .build_raddr() のフロー図
-image::flow_src_bfm_ops__build_raddr.drawio.svg[build_raddr() のフロー図]
+image::flow_src_bfm_ops-build_raddr.drawio.svg[build_raddr() のフロー図]
 
 .build_raddr() の関係図
-image::call_src_bfm_ops__build_raddr.drawio.svg[build_raddr() の関係図]
+image::call_src_bfm_ops-build_raddr.drawio.svg[build_raddr() の関係図]
 
-[[src_bfm_ops__build_dseg]]
+[[src_bfm_ops-build_dseg]]
 === `build_dseg()`
 [cols="1,5",options="autowidth"]
 .build_dseg()
@@ -2839,15 +3232,17 @@ image::call_src_bfm_ops__build_raddr.drawio.svg[build_raddr() の関係図]
 |戻り値 a|なし
 |前提条件 a|`addr` が DMA 領域の中のアドレス(`bfm_dma_addr()` の値)であること。
 |注意事項 a|特になし。
+|使用関数 a|* <<src_bfm_ops-put32,`put32()`>>
+* <<src_bfm_ops-put64,`put64()`>>
 |===
 
 .build_dseg() のフロー図
-image::flow_src_bfm_ops__build_dseg.drawio.svg[build_dseg() のフロー図]
+image::flow_src_bfm_ops-build_dseg.drawio.svg[build_dseg() のフロー図]
 
 .build_dseg() の関係図
-image::call_src_bfm_ops__build_dseg.drawio.svg[build_dseg() の関係図]
+image::call_src_bfm_ops-build_dseg.drawio.svg[build_dseg() の関係図]
 
-[[src_bfm_ops__build_write_inline]]
+[[src_bfm_ops-build_write_inline]]
 === `build_write_inline()`
 [cols="1,5",options="autowidth"]
 .build_write_inline()
@@ -2869,15 +3264,20 @@ image::call_src_bfm_ops__build_dseg.drawio.svg[build_dseg() の関係図]
 |戻り値 a|WQE の大きさ(WQEBB の数)。
 |前提条件 a|`len` が `INLINE_MAX` 以下であること。
 |注意事項 a|DS の数は 2 + (4 + len + 15) / 16。0 で埋めるのは WQEBB の単位に切り上げた大きさ。
+|使用関数 a|* `memset()`(外部)
+* <<src_bfm_ops-build_ctrl,`build_ctrl()`>>
+* <<src_bfm_ops-build_raddr,`build_raddr()`>>
+* <<src_bfm_ops-put32,`put32()`>>
+* `memcpy()`(外部)
 |===
 
 .build_write_inline() のフロー図
-image::flow_src_bfm_ops__build_write_inline.drawio.svg[build_write_inline() のフロー図]
+image::flow_src_bfm_ops-build_write_inline.drawio.svg[build_write_inline() のフロー図]
 
 .build_write_inline() の関係図
-image::call_src_bfm_ops__build_write_inline.drawio.svg[build_write_inline() の関係図]
+image::call_src_bfm_ops-build_write_inline.drawio.svg[build_write_inline() の関係図]
 
-[[src_bfm_ops__check_range]]
+[[src_bfm_ops-check_range]]
 === `check_range()`
 [cols="1,5",options="autowidth"]
 .check_range()
@@ -2896,15 +3296,16 @@ image::call_src_bfm_ops__build_write_inline.drawio.svg[build_write_inline() の�
 |戻り値 a|`BFM_OK`: 使える。`BFM_E_STATE`: 接続が使えない。`BFM_E_PARAM`: 長さが 0、相手の公開メモリが 0、または範囲外。
 |前提条件 a|特になし。
 |注意事項 a|`off + len` のあふれが起きない形で比べる。
+|使用関数 a|* <<src_bfm_ops-conn_usable,`conn_usable()`>>
 |===
 
 .check_range() のフロー図
-image::flow_src_bfm_ops__check_range.drawio.svg[check_range() のフロー図]
+image::flow_src_bfm_ops-check_range.drawio.svg[check_range() のフロー図]
 
 .check_range() の関係図
-image::call_src_bfm_ops__check_range.drawio.svg[check_range() の関係図]
+image::call_src_bfm_ops-check_range.drawio.svg[check_range() の関係図]
 
-[[src_bfm_ops__bfm_ops_attach]]
+[[src_bfm_ops-bfm_ops_attach]]
 === `bfm_ops_attach()`
 [cols="1,5",options="autowidth"]
 .bfm_ops_attach()
@@ -2921,15 +3322,16 @@ image::call_src_bfm_ops__check_range.drawio.svg[check_range() の関係図]
 |戻り値 a|`BFM_OK`(常に)。
 |前提条件 a|`c` の QP が作られ、`c->qp.qpn` と `c->qp.sq_pc` が正しいこと。
 |注意事項 a|接続管理(`bfm_connect()` / `bfm_accept()`)が呼ぶ。
+|使用関数 a|なし
 |===
 
 .bfm_ops_attach() のフロー図
-image::flow_src_bfm_ops__bfm_ops_attach.drawio.svg[bfm_ops_attach() のフロー図]
+image::flow_src_bfm_ops-bfm_ops_attach.drawio.svg[bfm_ops_attach() のフロー図]
 
 .bfm_ops_attach() の関係図
-image::call_src_bfm_ops__bfm_ops_attach.drawio.svg[bfm_ops_attach() の関係図]
+image::call_src_bfm_ops-bfm_ops_attach.drawio.svg[bfm_ops_attach() の関係図]
 
-[[src_bfm_ops__bfm_ops_detach]]
+[[src_bfm_ops-bfm_ops_detach]]
 === `bfm_ops_detach()`
 [cols="1,5",options="autowidth"]
 .bfm_ops_detach()
@@ -2946,15 +3348,16 @@ image::call_src_bfm_ops__bfm_ops_attach.drawio.svg[bfm_ops_attach() の関係図
 |戻り値 a|なし
 |前提条件 a|特になし。
 |注意事項 a|接続管理(`conn_release()`)が呼ぶ。
+|使用関数 a|なし
 |===
 
 .bfm_ops_detach() のフロー図
-image::flow_src_bfm_ops__bfm_ops_detach.drawio.svg[bfm_ops_detach() のフロー図]
+image::flow_src_bfm_ops-bfm_ops_detach.drawio.svg[bfm_ops_detach() のフロー図]
 
 .bfm_ops_detach() の関係図
-image::call_src_bfm_ops__bfm_ops_detach.drawio.svg[bfm_ops_detach() の関係図]
+image::call_src_bfm_ops-bfm_ops_detach.drawio.svg[bfm_ops_detach() の関係図]
 
-[[src_bfm_ops__bfm_conn_mark_error]]
+[[src_bfm_ops-bfm_conn_mark_error]]
 === `bfm_conn_mark_error()`
 [cols="1,5",options="autowidth"]
 .bfm_conn_mark_error()
@@ -2972,15 +3375,16 @@ image::call_src_bfm_ops__bfm_ops_detach.drawio.svg[bfm_ops_detach() の関係図
 |戻り値 a|なし
 |前提条件 a|特になし。
 |注意事項 a|`mlx5_eq_poll()` が呼ぶ。`BFM_CS_UP` でない接続と QP を作っていない接続は変えない。
+|使用関数 a|* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
 |===
 
 .bfm_conn_mark_error() のフロー図
-image::flow_src_bfm_ops__bfm_conn_mark_error.drawio.svg[bfm_conn_mark_error() のフロー図]
+image::flow_src_bfm_ops-bfm_conn_mark_error.drawio.svg[bfm_conn_mark_error() のフロー図]
 
 .bfm_conn_mark_error() の関係図
-image::call_src_bfm_ops__bfm_conn_mark_error.drawio.svg[bfm_conn_mark_error() の関係図]
+image::call_src_bfm_ops-bfm_conn_mark_error.drawio.svg[bfm_conn_mark_error() の関係図]
 
-[[src_bfm_ops__bfm_ops_post_rw]]
+[[src_bfm_ops-bfm_ops_post_rw]]
 === `bfm_ops_post_rw()`
 [cols="1,5",options="autowidth"]
 .bfm_ops_post_rw()
@@ -3004,15 +3408,23 @@ image::call_src_bfm_ops__bfm_conn_mark_error.drawio.svg[bfm_conn_mark_error() �
 |注意事項 a|* 中継バッファから送る write では、中身は呼び出し側が置く(この関数は `src` を写さない)。
 * inline の write は中継バッファを使わないので、`stage_off` を見ない(`stage_off + len` の検査は inline でない write と read だけに掛かる)。
 * read の応答が CQE に入った(32 バイトまで)ときは、中継バッファには書かれない。
+|使用関数 a|* <<src_bfm_ops-check_range,`check_range()`>>
+* <<src_bfm_ops-post,`post()`>>
+* <<src_bfm_ops-build_write_inline,`build_write_inline()`>>
+* `memset()`(外部)
+* <<src_bfm_ops-build_ctrl,`build_ctrl()`>>
+* <<src_bfm_ops-build_raddr,`build_raddr()`>>
+* <<src_bfm_ops-build_dseg,`build_dseg()`>>
+* `bfm_dma_addr()`(外部)
 |===
 
 .bfm_ops_post_rw() のフロー図
-image::flow_src_bfm_ops__bfm_ops_post_rw.drawio.svg[bfm_ops_post_rw() のフロー図]
+image::flow_src_bfm_ops-bfm_ops_post_rw.drawio.svg[bfm_ops_post_rw() のフロー図]
 
 .bfm_ops_post_rw() の関係図
-image::call_src_bfm_ops__bfm_ops_post_rw.drawio.svg[bfm_ops_post_rw() の関係図]
+image::call_src_bfm_ops-bfm_ops_post_rw.drawio.svg[bfm_ops_post_rw() の関係図]
 
-[[src_bfm_ops__bfm_ops_poll1]]
+[[src_bfm_ops-bfm_ops_poll1]]
 === `bfm_ops_poll1()`
 [cols="1,5",options="autowidth"]
 .bfm_ops_poll1()
@@ -3029,15 +3441,16 @@ image::call_src_bfm_ops__bfm_ops_post_rw.drawio.svg[bfm_ops_post_rw() の関係�
 |戻り値 a|1: 拾った。0: まだ無い。負: エラー完了(`poll_one()` の値)。
 |前提条件 a|`bfm_ops_post_rw()` で出した操作があること。
 |注意事項 a|特になし。
+|使用関数 a|* <<src_bfm_ops-poll_one,`poll_one()`>>
 |===
 
 .bfm_ops_poll1() のフロー図
-image::flow_src_bfm_ops__bfm_ops_poll1.drawio.svg[bfm_ops_poll1() のフロー図]
+image::flow_src_bfm_ops-bfm_ops_poll1.drawio.svg[bfm_ops_poll1() のフロー図]
 
 .bfm_ops_poll1() の関係図
-image::call_src_bfm_ops__bfm_ops_poll1.drawio.svg[bfm_ops_poll1() の関係図]
+image::call_src_bfm_ops-bfm_ops_poll1.drawio.svg[bfm_ops_poll1() の関係図]
 
-[[src_bfm_ops__bfm_write]]
+[[src_bfm_ops-bfm_write]]
 === `bfm_write()`
 [cols="1,5",options="autowidth"]
 .bfm_write()
@@ -3057,15 +3470,25 @@ image::call_src_bfm_ops__bfm_ops_poll1.drawio.svg[bfm_ops_poll1() の関係図]
 |戻り値 a|`BFM_OK`: 書けた。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗。そのほか `post()` / `wait_done()` の戻り値(`BFM_E_TIMEOUT`、エラー完了の値)。
 |前提条件 a|`bfm_connect()` / `bfm_accept()` で得た接続であること。同じ接続を複数のタスクから同時に使わないこと。
 |注意事項 a|* 長いものを分けて送る途中で失敗すると、それまでの分は相手に書かれている。
+|使用関数 a|* <<src_bfm_ops-check_range,`check_range()`>>
+* <<src_bfm_ops-build_write_inline,`build_write_inline()`>>
+* <<src_bfm_ops-post,`post()`>>
+* <<src_bfm_ops-wait_done,`wait_done()`>>
+* `memcpy()`(外部)
+* `memset()`(外部)
+* <<src_bfm_ops-build_ctrl,`build_ctrl()`>>
+* <<src_bfm_ops-build_raddr,`build_raddr()`>>
+* <<src_bfm_ops-build_dseg,`build_dseg()`>>
+* `bfm_dma_addr()`(外部)
 |===
 
 .bfm_write() のフロー図
-image::flow_src_bfm_ops__bfm_write.drawio.svg[bfm_write() のフロー図]
+image::flow_src_bfm_ops-bfm_write.drawio.svg[bfm_write() のフロー図]
 
 .bfm_write() の関係図
-image::call_src_bfm_ops__bfm_write.drawio.svg[bfm_write() の関係図]
+image::call_src_bfm_ops-bfm_write.drawio.svg[bfm_write() の関係図]
 
-[[src_bfm_ops__bfm_write_post]]
+[[src_bfm_ops-bfm_write_post]]
 === `bfm_write_post()`
 [cols="1,5",options="autowidth"]
 .bfm_write_post()
@@ -3087,15 +3510,18 @@ image::call_src_bfm_ops__bfm_write.drawio.svg[bfm_write() の関係図]
 |注意事項 a|* 終わるのを待つには `bfm_flush()` を呼ぶこと。
 * 送る順に相手のメモリへ届く(RC の順序保証)。
 * 通知を挟むのは、通知なしが続きすぎると SQ の空き(`sq_done`)が分からなくなるため。
+|使用関数 a|* <<src_bfm_ops-check_range,`check_range()`>>
+* <<src_bfm_ops-build_write_inline,`build_write_inline()`>>
+* <<src_bfm_ops-post,`post()`>>
 |===
 
 .bfm_write_post() のフロー図
-image::flow_src_bfm_ops__bfm_write_post.drawio.svg[bfm_write_post() のフロー図]
+image::flow_src_bfm_ops-bfm_write_post.drawio.svg[bfm_write_post() のフロー図]
 
 .bfm_write_post() の関係図
-image::call_src_bfm_ops__bfm_write_post.drawio.svg[bfm_write_post() の関係図]
+image::call_src_bfm_ops-bfm_write_post.drawio.svg[bfm_write_post() の関係図]
 
-[[src_bfm_ops__bfm_flush]]
+[[src_bfm_ops-bfm_flush]]
 === `bfm_flush()`
 [cols="1,5",options="autowidth"]
 .bfm_flush()
@@ -3112,15 +3538,19 @@ image::call_src_bfm_ops__bfm_write_post.drawio.svg[bfm_write_post() の関係図
 |戻り値 a|`BFM_OK`: 全部終わった(出したものが無いときも)。`BFM_E_STATE`: 接続が使えない。そのほか `post()` / `wait_done()` の戻り値。
 |前提条件 a|`bfm_write()` と同じ。
 |注意事項 a|特になし。
+|使用関数 a|* <<src_bfm_ops-conn_usable,`conn_usable()`>>
+* <<src_bfm_ops-build_ctrl,`build_ctrl()`>>
+* <<src_bfm_ops-post,`post()`>>
+* <<src_bfm_ops-wait_done,`wait_done()`>>
 |===
 
 .bfm_flush() のフロー図
-image::flow_src_bfm_ops__bfm_flush.drawio.svg[bfm_flush() のフロー図]
+image::flow_src_bfm_ops-bfm_flush.drawio.svg[bfm_flush() のフロー図]
 
 .bfm_flush() の関係図
-image::call_src_bfm_ops__bfm_flush.drawio.svg[bfm_flush() の関係図]
+image::call_src_bfm_ops-bfm_flush.drawio.svg[bfm_flush() の関係図]
 
-[[src_bfm_ops__bfm_read]]
+[[src_bfm_ops-bfm_read]]
 === `bfm_read()`
 [cols="1,5",options="autowidth"]
 .bfm_read()
@@ -3140,15 +3570,24 @@ image::call_src_bfm_ops__bfm_flush.drawio.svg[bfm_flush() の関係図]
 |戻り値 a|`BFM_OK`: 読めた。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗。そのほか `post()` / `wait_done()` の戻り値。
 |前提条件 a|`bfm_write()` と同じ。
 |注意事項 a|途中で失敗すると、`dst` にはそれまでの分だけが入っている。
+|使用関数 a|* <<src_bfm_ops-check_range,`check_range()`>>
+* `memset()`(外部)
+* <<src_bfm_ops-build_ctrl,`build_ctrl()`>>
+* <<src_bfm_ops-build_raddr,`build_raddr()`>>
+* <<src_bfm_ops-build_dseg,`build_dseg()`>>
+* `bfm_dma_addr()`(外部)
+* <<src_bfm_ops-post,`post()`>>
+* <<src_bfm_ops-wait_done,`wait_done()`>>
+* `memcpy()`(外部)
 |===
 
 .bfm_read() のフロー図
-image::flow_src_bfm_ops__bfm_read.drawio.svg[bfm_read() のフロー図]
+image::flow_src_bfm_ops-bfm_read.drawio.svg[bfm_read() のフロー図]
 
 .bfm_read() の関係図
-image::call_src_bfm_ops__bfm_read.drawio.svg[bfm_read() の関係図]
+image::call_src_bfm_ops-bfm_read.drawio.svg[bfm_read() の関係図]
 
-[[src_bfm_ops__atomic_result]]
+[[src_bfm_ops-atomic_result]]
 === `atomic_result()`
 [cols="1,5",options="autowidth"]
 .atomic_result()
@@ -3165,15 +3604,17 @@ image::call_src_bfm_ops__bfm_read.drawio.svg[bfm_read() の関係図]
 |戻り値 a|atomic の元の値(ホスト順)。
 |前提条件 a|`c` の直前の完了が、この atomic の完了であること。
 |注意事項 a|CQE に入って返った値は、HCA の設定によらずビッグエンディアン(ConnectX-4 Lx で確認)。中継バッファへ書かれた値は、HCA を atomic をホスト順で扱う設定にしてある(`setup_atomic_caps()`)のでホスト順。
+|使用関数 a|* `bfm_rd64be()`(外部)
+* `memcpy()`(外部)
 |===
 
 .atomic_result() のフロー図
-image::flow_src_bfm_ops__atomic_result.drawio.svg[atomic_result() のフロー図]
+image::flow_src_bfm_ops-atomic_result.drawio.svg[atomic_result() のフロー図]
 
 .atomic_result() の関係図
-image::call_src_bfm_ops__atomic_result.drawio.svg[atomic_result() の関係図]
+image::call_src_bfm_ops-atomic_result.drawio.svg[atomic_result() の関係図]
 
-[[src_bfm_ops__atomic_op]]
+[[src_bfm_ops-atomic_op]]
 === `atomic_op()`
 [cols="1,5",options="autowidth"]
 .atomic_op()
@@ -3195,15 +3636,25 @@ image::call_src_bfm_ops__atomic_result.drawio.svg[atomic_result() の関係図]
 |戻り値 a|`BFM_OK`: 終わった。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗、または相手のアドレス(`raddr + off`)が 8 の倍数でない。そのほか `post()` / `wait_done()` の戻り値。
 |前提条件 a|`bfm_write()` と同じ。
 |注意事項 a|失敗したときは `*old` を書かない。
+|使用関数 a|* <<src_bfm_ops-check_range,`check_range()`>>
+* `memset()`(外部)
+* <<src_bfm_ops-build_ctrl,`build_ctrl()`>>
+* <<src_bfm_ops-build_raddr,`build_raddr()`>>
+* <<src_bfm_ops-put64,`put64()`>>
+* <<src_bfm_ops-build_dseg,`build_dseg()`>>
+* `bfm_dma_addr()`(外部)
+* <<src_bfm_ops-post,`post()`>>
+* <<src_bfm_ops-wait_done,`wait_done()`>>
+* <<src_bfm_ops-atomic_result,`atomic_result()`>>
 |===
 
 .atomic_op() のフロー図
-image::flow_src_bfm_ops__atomic_op.drawio.svg[atomic_op() のフロー図]
+image::flow_src_bfm_ops-atomic_op.drawio.svg[atomic_op() のフロー図]
 
 .atomic_op() の関係図
-image::call_src_bfm_ops__atomic_op.drawio.svg[atomic_op() の関係図]
+image::call_src_bfm_ops-atomic_op.drawio.svg[atomic_op() の関係図]
 
-[[src_bfm_ops__bfm_cas]]
+[[src_bfm_ops-bfm_cas]]
 === `bfm_cas()`
 [cols="1,5",options="autowidth"]
 .bfm_cas()
@@ -3224,15 +3675,16 @@ image::call_src_bfm_ops__atomic_op.drawio.svg[atomic_op() の関係図]
 |戻り値 a|`atomic_op()` の戻り値。
 |前提条件 a|`bfm_write()` と同じ。
 |注意事項 a|`*old == expect` なら置き換わった。
+|使用関数 a|* <<src_bfm_ops-atomic_op,`atomic_op()`>>
 |===
 
 .bfm_cas() のフロー図
-image::flow_src_bfm_ops__bfm_cas.drawio.svg[bfm_cas() のフロー図]
+image::flow_src_bfm_ops-bfm_cas.drawio.svg[bfm_cas() のフロー図]
 
 .bfm_cas() の関係図
-image::call_src_bfm_ops__bfm_cas.drawio.svg[bfm_cas() の関係図]
+image::call_src_bfm_ops-bfm_cas.drawio.svg[bfm_cas() の関係図]
 
-[[src_bfm_ops__bfm_faa]]
+[[src_bfm_ops-bfm_faa]]
 === `bfm_faa()`
 [cols="1,5",options="autowidth"]
 .bfm_faa()
@@ -3252,15 +3704,16 @@ image::call_src_bfm_ops__bfm_cas.drawio.svg[bfm_cas() の関係図]
 |戻り値 a|`atomic_op()` の戻り値。
 |前提条件 a|`bfm_write()` と同じ。
 |注意事項 a|特になし。
+|使用関数 a|* <<src_bfm_ops-atomic_op,`atomic_op()`>>
 |===
 
 .bfm_faa() のフロー図
-image::flow_src_bfm_ops__bfm_faa.drawio.svg[bfm_faa() のフロー図]
+image::flow_src_bfm_ops-bfm_faa.drawio.svg[bfm_faa() のフロー図]
 
 .bfm_faa() の関係図
-image::call_src_bfm_ops__bfm_faa.drawio.svg[bfm_faa() の関係図]
+image::call_src_bfm_ops-bfm_faa.drawio.svg[bfm_faa() の関係図]
 
-[[src_bfm_ops__bfm_inline_max]]
+[[src_bfm_ops-bfm_inline_max]]
 === `bfm_inline_max()`
 [cols="1,5",options="autowidth"]
 .bfm_inline_max()
@@ -3272,15 +3725,16 @@ image::call_src_bfm_ops__bfm_faa.drawio.svg[bfm_faa() の関係図]
 |戻り値 a|`INLINE_MAX`(`BFM_WQE_MAX` が 256 なら 220)。
 |前提条件 a|特になし。
 |注意事項 a|特になし。
+|使用関数 a|なし
 |===
 
 .bfm_inline_max() のフロー図
-image::flow_src_bfm_ops__bfm_inline_max.drawio.svg[bfm_inline_max() のフロー図]
+image::flow_src_bfm_ops-bfm_inline_max.drawio.svg[bfm_inline_max() のフロー図]
 
 .bfm_inline_max() の関係図
-image::call_src_bfm_ops__bfm_inline_max.drawio.svg[bfm_inline_max() の関係図]
+image::call_src_bfm_ops-bfm_inline_max.drawio.svg[bfm_inline_max() の関係図]
 
-[[src_bfm_ops__bfm_bf_active]]
+[[src_bfm_ops-bfm_bf_active]]
 === `bfm_bf_active()`
 [cols="1,5",options="autowidth"]
 .bfm_bf_active()
@@ -3297,15 +3751,16 @@ image::call_src_bfm_ops__bfm_inline_max.drawio.svg[bfm_inline_max() の関係図
 |戻り値 a|1: BlueFlame を使っている。0: 使っていない、または `c` が NULL。
 |前提条件 a|特になし。
 |注意事項 a|特になし。
+|使用関数 a|なし
 |===
 
 .bfm_bf_active() のフロー図
-image::flow_src_bfm_ops__bfm_bf_active.drawio.svg[bfm_bf_active() のフロー図]
+image::flow_src_bfm_ops-bfm_bf_active.drawio.svg[bfm_bf_active() のフロー図]
 
 .bfm_bf_active() の関係図
-image::call_src_bfm_ops__bfm_bf_active.drawio.svg[bfm_bf_active() の関係図]
+image::call_src_bfm_ops-bfm_bf_active.drawio.svg[bfm_bf_active() の関係図]
 
-[[src_bfm_ops__bfm_is_up]]
+[[src_bfm_ops-bfm_is_up]]
 === `bfm_is_up()`
 [cols="1,5",options="autowidth"]
 .bfm_is_up()
@@ -3322,15 +3777,16 @@ image::call_src_bfm_ops__bfm_bf_active.drawio.svg[bfm_bf_active() の関係図]
 |戻り値 a|1: 使える。0: エラーか相手から切断された、または `c` が NULL。
 |前提条件 a|特になし。
 |注意事項 a|0 になった接続は `bfm_disconnect()` で返すこと。
+|使用関数 a|* <<src_bfm_ops-conn_usable,`conn_usable()`>>
 |===
 
 .bfm_is_up() のフロー図
-image::flow_src_bfm_ops__bfm_is_up.drawio.svg[bfm_is_up() のフロー図]
+image::flow_src_bfm_ops-bfm_is_up.drawio.svg[bfm_is_up() のフロー図]
 
 .bfm_is_up() の関係図
-image::call_src_bfm_ops__bfm_is_up.drawio.svg[bfm_is_up() の関係図]
+image::call_src_bfm_ops-bfm_is_up.drawio.svg[bfm_is_up() の関係図]
 
-[[src_bfm_ops__bfm_remote_size]]
+[[src_bfm_ops-bfm_remote_size]]
 === `bfm_remote_size()`
 [cols="1,5",options="autowidth"]
 .bfm_remote_size()
@@ -3347,15 +3803,16 @@ image::call_src_bfm_ops__bfm_is_up.drawio.svg[bfm_is_up() の関係図]
 |戻り値 a|相手の公開メモリの大きさ(バイト)。`c` が NULL なら 0。
 |前提条件 a|特になし。
 |注意事項 a|特になし。
+|使用関数 a|なし
 |===
 
 .bfm_remote_size() のフロー図
-image::flow_src_bfm_ops__bfm_remote_size.drawio.svg[bfm_remote_size() のフロー図]
+image::flow_src_bfm_ops-bfm_remote_size.drawio.svg[bfm_remote_size() のフロー図]
 
 .bfm_remote_size() の関係図
-image::call_src_bfm_ops__bfm_remote_size.drawio.svg[bfm_remote_size() の関係図]
+image::call_src_bfm_ops-bfm_remote_size.drawio.svg[bfm_remote_size() の関係図]
 
-[[src_bfm_ops__bfm_last_syndrome]]
+[[src_bfm_ops-bfm_last_syndrome]]
 === `bfm_last_syndrome()`
 [cols="1,5",options="autowidth"]
 .bfm_last_syndrome()
@@ -3372,15 +3829,16 @@ image::call_src_bfm_ops__bfm_remote_size.drawio.svg[bfm_remote_size() の関係�
 |戻り値 a|直前のエラー完了の syndrome(0 = なし)。`c` が NULL なら 0。
 |前提条件 a|特になし。
 |注意事項 a|値は `bfm_ops_attach()` で 0 に戻る。
+|使用関数 a|なし
 |===
 
 .bfm_last_syndrome() のフロー図
-image::flow_src_bfm_ops__bfm_last_syndrome.drawio.svg[bfm_last_syndrome() のフロー図]
+image::flow_src_bfm_ops-bfm_last_syndrome.drawio.svg[bfm_last_syndrome() のフロー図]
 
 .bfm_last_syndrome() の関係図
-image::call_src_bfm_ops__bfm_last_syndrome.drawio.svg[bfm_last_syndrome() の関係図]
+image::call_src_bfm_ops-bfm_last_syndrome.drawio.svg[bfm_last_syndrome() の関係図]
 
-[[src_bfm_ops__bfm_strerror]]
+[[src_bfm_ops-bfm_strerror]]
 === `bfm_strerror()`
 [cols="1,5",options="autowidth"]
 .bfm_strerror()
@@ -3397,19 +3855,20 @@ image::call_src_bfm_ops__bfm_last_syndrome.drawio.svg[bfm_last_syndrome() の関
 |戻り値 a|説明の文字列(静的な文字列)。知らない値は `"?"`。
 |前提条件 a|特になし。
 |注意事項 a|特になし。
+|使用関数 a|なし
 |===
 
 .bfm_strerror() のフロー図
-image::flow_src_bfm_ops__bfm_strerror.drawio.svg[bfm_strerror() のフロー図]
+image::flow_src_bfm_ops-bfm_strerror.drawio.svg[bfm_strerror() のフロー図]
 
 .bfm_strerror() の関係図
-image::call_src_bfm_ops__bfm_strerror.drawio.svg[bfm_strerror() の関係図]
+image::call_src_bfm_ops-bfm_strerror.drawio.svg[bfm_strerror() の関係図]
 
 == `port/linux_vfio/port_linux.c`
 
 移植層の Linux 版(x86-64 Linux + VFIO の試験環境)。装置を VFIO で掴み、DMA 領域と公開メモリを `g_bfm_dma_base` / `g_bfm_mr_base` の仮想アドレスにそのまま張って、同じ値を IOVA にして `VFIO_IOMMU_MAP_DMA` する(VxWorks の「論理アドレス = 物理アドレス」を真似る)。BAR0 は VFIO の fd ではなく sysfs の `resource0` から UC で張り、BlueFlame に使う UAR のページだけを、窓を「前 / そのページ / 後」の mmap に張り直してから `resource0_wc` で write-combining に張り替える。UC の窓を作っている mmap の一覧を静的配列 `s_seg`(最大 `SEG_MAX` = 32 個)で持つ。
 
-[[port_linux_vfio_port_linux__bfm_port_log]]
+[[port_linux_vfio_port_linux-bfm_port_log]]
 === `bfm_port_log()`
 [cols="1,5",options="autowidth"]
 .bfm_port_log()
@@ -3427,15 +3886,19 @@ image::call_src_bfm_ops__bfm_strerror.drawio.svg[bfm_strerror() の関係図]
 |戻り値 a|なし
 |前提条件 a|特になし。
 |注意事項 a|特になし。
+|使用関数 a|* `va_start()`(外部)
+* `vfprintf()`(外部)
+* `va_end()`(外部)
+* `fflush()`(外部)
 |===
 
 .bfm_port_log() のフロー図
-image::flow_port_linux_vfio_port_linux__bfm_port_log.drawio.svg[bfm_port_log() のフロー図]
+image::flow_port_linux_vfio_port_linux-bfm_port_log.drawio.svg[bfm_port_log() のフロー図]
 
 .bfm_port_log() の関係図
-image::call_port_linux_vfio_port_linux__bfm_port_log.drawio.svg[bfm_port_log() の関係図]
+image::call_port_linux_vfio_port_linux-bfm_port_log.drawio.svg[bfm_port_log() の関係図]
 
-[[port_linux_vfio_port_linux__bfm_port_time_ns]]
+[[port_linux_vfio_port_linux-bfm_port_time_ns]]
 === `bfm_port_time_ns()`
 [cols="1,5",options="autowidth"]
 .bfm_port_time_ns()
@@ -3447,15 +3910,16 @@ image::call_port_linux_vfio_port_linux__bfm_port_log.drawio.svg[bfm_port_log() �
 |戻り値 a|時刻(ナノ秒)。
 |前提条件 a|特になし。
 |注意事項 a|時間切れの判定に使う。
+|使用関数 a|* `clock_gettime()`(外部)
 |===
 
 .bfm_port_time_ns() のフロー図
-image::flow_port_linux_vfio_port_linux__bfm_port_time_ns.drawio.svg[bfm_port_time_ns() のフロー図]
+image::flow_port_linux_vfio_port_linux-bfm_port_time_ns.drawio.svg[bfm_port_time_ns() のフロー図]
 
 .bfm_port_time_ns() の関係図
-image::call_port_linux_vfio_port_linux__bfm_port_time_ns.drawio.svg[bfm_port_time_ns() の関係図]
+image::call_port_linux_vfio_port_linux-bfm_port_time_ns.drawio.svg[bfm_port_time_ns() の関係図]
 
-[[port_linux_vfio_port_linux__bfm_port_delay_us]]
+[[port_linux_vfio_port_linux-bfm_port_delay_us]]
 === `bfm_port_delay_us()`
 [cols="1,5",options="autowidth"]
 .bfm_port_delay_us()
@@ -3472,15 +3936,16 @@ image::call_port_linux_vfio_port_linux__bfm_port_time_ns.drawio.svg[bfm_port_tim
 |戻り値 a|なし
 |前提条件 a|特になし。
 |注意事項 a|`EINTR` 以外の失敗では、残りを待たずに戻る。
+|使用関数 a|* `nanosleep()`(外部)
 |===
 
 .bfm_port_delay_us() のフロー図
-image::flow_port_linux_vfio_port_linux__bfm_port_delay_us.drawio.svg[bfm_port_delay_us() のフロー図]
+image::flow_port_linux_vfio_port_linux-bfm_port_delay_us.drawio.svg[bfm_port_delay_us() のフロー図]
 
 .bfm_port_delay_us() の関係図
-image::call_port_linux_vfio_port_linux__bfm_port_delay_us.drawio.svg[bfm_port_delay_us() の関係図]
+image::call_port_linux_vfio_port_linux-bfm_port_delay_us.drawio.svg[bfm_port_delay_us() の関係図]
 
-[[port_linux_vfio_port_linux__vfio_open_device]]
+[[port_linux_vfio_port_linux-vfio_open_device]]
 === `vfio_open_device()`
 [cols="1,5",options="autowidth"]
 .vfio_open_device()
@@ -3498,15 +3963,22 @@ image::call_port_linux_vfio_port_linux__bfm_port_delay_us.drawio.svg[bfm_port_de
 |前提条件 a|装置(と同じ IOMMU グループの装置全部)を vfio-pci に結びつけてあること。IOMMU が有効なこと。
 |注意事項 a|* 失敗しても、それまでに開いた fd(`s_container` / `s_group` / `s_device`)は閉じない。呼び出し側(`bfm_port_init()`)が `bfm_port_fini()` で閉じる。
 * 領域の情報(`VFIO_DEVICE_GET_REGION_INFO`)が取れないときは表示せずに -1 を返す。
+|使用関数 a|* `snprintf()`(外部)
+* `readlink()`(外部)
+* <<port_linux_vfio_port_linux-bfm_port_log,`bfm_port_log()`>>
+* `strrchr()`(外部)
+* `atoi()`(外部)
+* `open()`(外部)
+* `ioctl()`(外部)
 |===
 
 .vfio_open_device() のフロー図
-image::flow_port_linux_vfio_port_linux__vfio_open_device.drawio.svg[vfio_open_device() のフロー図]
+image::flow_port_linux_vfio_port_linux-vfio_open_device.drawio.svg[vfio_open_device() のフロー図]
 
 .vfio_open_device() の関係図
-image::call_port_linux_vfio_port_linux__vfio_open_device.drawio.svg[vfio_open_device() の関係図]
+image::call_port_linux_vfio_port_linux-vfio_open_device.drawio.svg[vfio_open_device() の関係図]
 
-[[port_linux_vfio_port_linux__map_region]]
+[[port_linux_vfio_port_linux-map_region]]
 === `map_region()`
 [cols="1,5",options="autowidth"]
 .map_region()
@@ -3527,15 +3999,19 @@ image::call_port_linux_vfio_port_linux__vfio_open_device.drawio.svg[vfio_open_de
 |注意事項 a|* `MAP_FIXED_NOREPLACE` で張るので、`va` の位置に既に何か張られていると失敗する(表示で `g_bfm_*_base` を変えるよう促す)。
 * `MAP_POPULATE` で張るときに実体を確保する。
 * 失敗したときは自分で張ったメモリを外してから戻る。
+|使用関数 a|* `mmap()`(外部)
+* <<port_linux_vfio_port_linux-bfm_port_log,`bfm_port_log()`>>
+* `munmap()`(外部)
+* `ioctl()`(外部)
 |===
 
 .map_region() のフロー図
-image::flow_port_linux_vfio_port_linux__map_region.drawio.svg[map_region() のフロー図]
+image::flow_port_linux_vfio_port_linux-map_region.drawio.svg[map_region() のフロー図]
 
 .map_region() の関係図
-image::call_port_linux_vfio_port_linux__map_region.drawio.svg[map_region() の関係図]
+image::call_port_linux_vfio_port_linux-map_region.drawio.svg[map_region() の関係図]
 
-[[port_linux_vfio_port_linux__bfm_port_init]]
+[[port_linux_vfio_port_linux-bfm_port_init]]
 === `bfm_port_init()`
 [cols="1,5",options="autowidth"]
 .bfm_port_init()
@@ -3548,15 +4024,22 @@ image::call_port_linux_vfio_port_linux__map_region.drawio.svg[map_region() の�
 |前提条件 a|`g_bfm_linux_pci_bdf`・`g_bfm_dma_base` / `g_bfm_dma_size`・`g_bfm_mr_base` / `g_bfm_mr_size` を設定してあること。装置を vfio-pci に結びつけてあること。
 |注意事項 a|* `g_bfm_linux_pci_bdf` が NULL のときは、理由を表示して -1 を返す(まだ何も取っていないので `bfm_port_fini()` は呼ばない)。
 * `/dev/cpu_dma_latency` に書けないときは注意を表示するだけで、成功として続ける(相手からの read / atomic が遅くなりうる)。
+|使用関数 a|* <<port_linux_vfio_port_linux-bfm_port_log,`bfm_port_log()`>>
+* <<port_linux_vfio_port_linux-vfio_open_device,`vfio_open_device()`>>
+* <<port_linux_vfio_port_linux-bfm_port_fini,`bfm_port_fini()`>>
+* <<port_linux_vfio_port_linux-map_region,`map_region()`>>
+* `open()`(外部)
+* `write()`(外部)
+* `close()`(外部)
 |===
 
 .bfm_port_init() のフロー図
-image::flow_port_linux_vfio_port_linux__bfm_port_init.drawio.svg[bfm_port_init() のフロー図]
+image::flow_port_linux_vfio_port_linux-bfm_port_init.drawio.svg[bfm_port_init() のフロー図]
 
 .bfm_port_init() の関係図
-image::call_port_linux_vfio_port_linux__bfm_port_init.drawio.svg[bfm_port_init() の関係図]
+image::call_port_linux_vfio_port_linux-bfm_port_init.drawio.svg[bfm_port_init() の関係図]
 
-[[port_linux_vfio_port_linux__bfm_port_fini]]
+[[port_linux_vfio_port_linux-bfm_port_fini]]
 === `bfm_port_fini()`
 [cols="1,5",options="autowidth"]
 .bfm_port_fini()
@@ -3568,15 +4051,18 @@ image::call_port_linux_vfio_port_linux__bfm_port_init.drawio.svg[bfm_port_init()
 |戻り値 a|なし
 |前提条件 a|Bus Master を落としてあること(NIC がメモリへ DMA しないこと)。
 |注意事項 a|取っていないものは飛ばすので、立ち上げの途中で失敗したときにも呼べる。何度呼んでもよい。
+|使用関数 a|* <<port_linux_vfio_port_linux-bfm_port_bar0_unmap,`bfm_port_bar0_unmap()`>>
+* `close()`(外部)
+* `munmap()`(外部)
 |===
 
 .bfm_port_fini() のフロー図
-image::flow_port_linux_vfio_port_linux__bfm_port_fini.drawio.svg[bfm_port_fini() のフロー図]
+image::flow_port_linux_vfio_port_linux-bfm_port_fini.drawio.svg[bfm_port_fini() のフロー図]
 
 .bfm_port_fini() の関係図
-image::call_port_linux_vfio_port_linux__bfm_port_fini.drawio.svg[bfm_port_fini() の関係図]
+image::call_port_linux_vfio_port_linux-bfm_port_fini.drawio.svg[bfm_port_fini() の関係図]
 
-[[port_linux_vfio_port_linux__bfm_port_pci_read32]]
+[[port_linux_vfio_port_linux-bfm_port_pci_read32]]
 === `bfm_port_pci_read32()`
 [cols="1,5",options="autowidth"]
 .bfm_port_pci_read32()
@@ -3593,15 +4079,17 @@ image::call_port_linux_vfio_port_linux__bfm_port_fini.drawio.svg[bfm_port_fini()
 |戻り値 a|読んだ値。読めなかったら `0xffffffff`(理由を表示する)。
 |前提条件 a|`bfm_port_init()` が成功していること。
 |注意事項 a|特になし。
+|使用関数 a|* `pread()`(外部)
+* <<port_linux_vfio_port_linux-bfm_port_log,`bfm_port_log()`>>
 |===
 
 .bfm_port_pci_read32() のフロー図
-image::flow_port_linux_vfio_port_linux__bfm_port_pci_read32.drawio.svg[bfm_port_pci_read32() のフロー図]
+image::flow_port_linux_vfio_port_linux-bfm_port_pci_read32.drawio.svg[bfm_port_pci_read32() のフロー図]
 
 .bfm_port_pci_read32() の関係図
-image::call_port_linux_vfio_port_linux__bfm_port_pci_read32.drawio.svg[bfm_port_pci_read32() の関係図]
+image::call_port_linux_vfio_port_linux-bfm_port_pci_read32.drawio.svg[bfm_port_pci_read32() の関係図]
 
-[[port_linux_vfio_port_linux__bfm_port_pci_write32]]
+[[port_linux_vfio_port_linux-bfm_port_pci_write32]]
 === `bfm_port_pci_write32()`
 [cols="1,5",options="autowidth"]
 .bfm_port_pci_write32()
@@ -3619,15 +4107,17 @@ image::call_port_linux_vfio_port_linux__bfm_port_pci_read32.drawio.svg[bfm_port_
 |戻り値 a|なし
 |前提条件 a|`bfm_port_init()` が成功していること。
 |注意事項 a|書けなかったときは表示するだけで、呼び出し側には知らせない。
+|使用関数 a|* `pwrite()`(外部)
+* <<port_linux_vfio_port_linux-bfm_port_log,`bfm_port_log()`>>
 |===
 
 .bfm_port_pci_write32() のフロー図
-image::flow_port_linux_vfio_port_linux__bfm_port_pci_write32.drawio.svg[bfm_port_pci_write32() のフロー図]
+image::flow_port_linux_vfio_port_linux-bfm_port_pci_write32.drawio.svg[bfm_port_pci_write32() のフロー図]
 
 .bfm_port_pci_write32() の関係図
-image::call_port_linux_vfio_port_linux__bfm_port_pci_write32.drawio.svg[bfm_port_pci_write32() の関係図]
+image::call_port_linux_vfio_port_linux-bfm_port_pci_write32.drawio.svg[bfm_port_pci_write32() の関係図]
 
-[[port_linux_vfio_port_linux__bar_map_uc]]
+[[port_linux_vfio_port_linux-bar_map_uc]]
 === `bar_map_uc()`
 [cols="1,5",options="autowidth"]
 .bar_map_uc()
@@ -3647,15 +4137,19 @@ image::call_port_linux_vfio_port_linux__bfm_port_pci_write32.drawio.svg[bfm_port
 |戻り値 a|張った先頭。失敗したら `MAP_FAILED`。
 |前提条件 a|`vfio_open_device()` が成功していること(VFIO から張るとき)。`g_bfm_linux_pci_bdf` を設定してあること(sysfs から張るとき)。
 |注意事項 a|失敗しても表示しない。
+|使用関数 a|* `snprintf()`(外部)
+* `open()`(外部)
+* `mmap()`(外部)
+* `close()`(外部)
 |===
 
 .bar_map_uc() のフロー図
-image::flow_port_linux_vfio_port_linux__bar_map_uc.drawio.svg[bar_map_uc() のフロー図]
+image::flow_port_linux_vfio_port_linux-bar_map_uc.drawio.svg[bar_map_uc() のフロー図]
 
 .bar_map_uc() の関係図
-image::call_port_linux_vfio_port_linux__bar_map_uc.drawio.svg[bar_map_uc() の関係図]
+image::call_port_linux_vfio_port_linux-bar_map_uc.drawio.svg[bar_map_uc() の関係図]
 
-[[port_linux_vfio_port_linux__bfm_port_bar0_map]]
+[[port_linux_vfio_port_linux-bfm_port_bar0_map]]
 === `bfm_port_bar0_map()`
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_map()
@@ -3674,15 +4168,17 @@ image::call_port_linux_vfio_port_linux__bar_map_uc.drawio.svg[bar_map_uc() の�
 |前提条件 a|`bfm_port_init()` が成功していること。
 |注意事項 a|* `bar_size` が 0 でなく VFIO の大きさと違うときは注意を表示するが、VFIO の大きさで張る。
 * VFIO の fd から張ったときは `s_bar0_sysfs` が 0 になり、`bfm_port_bar0_wc()` は NULL を返す(VFIO の fd から張ると BAR 全体が UC で登録され、後から一部を WC にできないため)。
+|使用関数 a|* <<port_linux_vfio_port_linux-bfm_port_log,`bfm_port_log()`>>
+* <<port_linux_vfio_port_linux-bar_map_uc,`bar_map_uc()`>>
 |===
 
 .bfm_port_bar0_map() のフロー図
-image::flow_port_linux_vfio_port_linux__bfm_port_bar0_map.drawio.svg[bfm_port_bar0_map() のフロー図]
+image::flow_port_linux_vfio_port_linux-bfm_port_bar0_map.drawio.svg[bfm_port_bar0_map() のフロー図]
 
 .bfm_port_bar0_map() の関係図
-image::call_port_linux_vfio_port_linux__bfm_port_bar0_map.drawio.svg[bfm_port_bar0_map() の関係図]
+image::call_port_linux_vfio_port_linux-bfm_port_bar0_map.drawio.svg[bfm_port_bar0_map() の関係図]
 
-[[port_linux_vfio_port_linux__bfm_port_bar0_unmap]]
+[[port_linux_vfio_port_linux-bfm_port_bar0_unmap]]
 === `bfm_port_bar0_unmap()`
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_unmap()
@@ -3694,15 +4190,16 @@ image::call_port_linux_vfio_port_linux__bfm_port_bar0_map.drawio.svg[bfm_port_ba
 |戻り値 a|なし
 |前提条件 a|Bus Master を落としてあること。
 |注意事項 a|WC に張り替えたページや、張り直して分かれた mmap も、BAR0 の範囲全体を 1 回の `munmap` で外す。
+|使用関数 a|* `munmap()`(外部)
 |===
 
 .bfm_port_bar0_unmap() のフロー図
-image::flow_port_linux_vfio_port_linux__bfm_port_bar0_unmap.drawio.svg[bfm_port_bar0_unmap() のフロー図]
+image::flow_port_linux_vfio_port_linux-bfm_port_bar0_unmap.drawio.svg[bfm_port_bar0_unmap() のフロー図]
 
 .bfm_port_bar0_unmap() の関係図
-image::call_port_linux_vfio_port_linux__bfm_port_bar0_unmap.drawio.svg[bfm_port_bar0_unmap() の関係図]
+image::call_port_linux_vfio_port_linux-bfm_port_bar0_unmap.drawio.svg[bfm_port_bar0_unmap() の関係図]
 
-[[port_linux_vfio_port_linux__seg_add]]
+[[port_linux_vfio_port_linux-seg_add]]
 === `seg_add()`
 [cols="1,5",options="autowidth"]
 .seg_add()
@@ -3720,15 +4217,16 @@ image::call_port_linux_vfio_port_linux__bfm_port_bar0_unmap.drawio.svg[bfm_port_
 |戻り値 a|なし
 |前提条件 a|その区間が UC の 1 つの mmap として張られていること。
 |注意事項 a|一覧が満杯(`s_nseg >= SEG_MAX`)のときは表示せずに足さない。その区間は以後 `bfm_port_bar0_wc()` で WC に張り替えられなくなるだけ。
+|使用関数 a|なし
 |===
 
 .seg_add() のフロー図
-image::flow_port_linux_vfio_port_linux__seg_add.drawio.svg[seg_add() のフロー図]
+image::flow_port_linux_vfio_port_linux-seg_add.drawio.svg[seg_add() のフロー図]
 
 .seg_add() の関係図
-image::call_port_linux_vfio_port_linux__seg_add.drawio.svg[seg_add() の関係図]
+image::call_port_linux_vfio_port_linux-seg_add.drawio.svg[seg_add() の関係図]
 
-[[port_linux_vfio_port_linux__bfm_port_bar0_wc]]
+[[port_linux_vfio_port_linux-bfm_port_bar0_wc]]
 === `bfm_port_bar0_wc()`
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_wc()
@@ -3751,15 +4249,23 @@ image::call_port_linux_vfio_port_linux__seg_add.drawio.svg[seg_add() の関係�
 * 範囲の前・後の張り直しが失敗したときは、表示せずに NULL を返す(BAR0 は全部 UC のままなので、一覧は変えない。前を張り直した後に後で失敗したときも、張り直した前の部分はそのまま残る)。
 * 範囲の `munmap` に失敗したときは、表示せずに NULL を返す。範囲は UC のまま残っているので、一覧に `[off, off+len)` を足す(`seg_add()`)。
 * `resource0_wc` で張れなかったときは、UC に張り直せたら一覧に `[off, off+len)` を足す。張り直せなかったときは一覧に足さない(その範囲は以後 WC に張り替えられない)。
+|使用関数 a|* <<port_linux_vfio_port_linux-bar_map_uc,`bar_map_uc()`>>
+* `munmap()`(外部)
+* <<port_linux_vfio_port_linux-seg_add,`seg_add()`>>
+* `snprintf()`(外部)
+* `open()`(外部)
+* `mmap()`(外部)
+* `close()`(外部)
+* <<port_linux_vfio_port_linux-bfm_port_log,`bfm_port_log()`>>
 |===
 
 .bfm_port_bar0_wc() のフロー図
-image::flow_port_linux_vfio_port_linux__bfm_port_bar0_wc.drawio.svg[bfm_port_bar0_wc() のフロー図]
+image::flow_port_linux_vfio_port_linux-bfm_port_bar0_wc.drawio.svg[bfm_port_bar0_wc() のフロー図]
 
 .bfm_port_bar0_wc() の関係図
-image::call_port_linux_vfio_port_linux__bfm_port_bar0_wc.drawio.svg[bfm_port_bar0_wc() の関係図]
+image::call_port_linux_vfio_port_linux-bfm_port_bar0_wc.drawio.svg[bfm_port_bar0_wc() の関係図]
 
-[[port_linux_vfio_port_linux__bfm_port_bar0_wc_release]]
+[[port_linux_vfio_port_linux-bfm_port_bar0_wc_release]]
 === `bfm_port_bar0_wc_release()`
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_wc_release()
@@ -3778,19 +4284,22 @@ image::call_port_linux_vfio_port_linux__bfm_port_bar0_wc.drawio.svg[bfm_port_bar
 |前提条件 a|`bfm_port_bar0_wc()` がその範囲で成功していること。
 |注意事項 a|* BAR0 を張っていないとき、範囲が BAR0 を超えるときは何もしない。
 * `munmap` や張り直しに失敗したときは、表示せずに一覧に足さない。一覧が満杯のときも足さない(`seg_add()`)。
+|使用関数 a|* `munmap()`(外部)
+* <<port_linux_vfio_port_linux-bar_map_uc,`bar_map_uc()`>>
+* <<port_linux_vfio_port_linux-seg_add,`seg_add()`>>
 |===
 
 .bfm_port_bar0_wc_release() のフロー図
-image::flow_port_linux_vfio_port_linux__bfm_port_bar0_wc_release.drawio.svg[bfm_port_bar0_wc_release() のフロー図]
+image::flow_port_linux_vfio_port_linux-bfm_port_bar0_wc_release.drawio.svg[bfm_port_bar0_wc_release() のフロー図]
 
 .bfm_port_bar0_wc_release() の関係図
-image::call_port_linux_vfio_port_linux__bfm_port_bar0_wc_release.drawio.svg[bfm_port_bar0_wc_release() の関係図]
+image::call_port_linux_vfio_port_linux-bfm_port_bar0_wc_release.drawio.svg[bfm_port_bar0_wc_release() の関係図]
 
 == `port/vxworks/port_vxworks.c`
 
 移植層の x86-64 VxWorks 版(論理アドレス = 物理アドレス)。**この版は未検証(VxWorks の機材で動かしていない)。** 使う VxWorks の API は `printf`・`tick64Get`・`sysClkRateGet`・`taskDelay` だけ。DMA 領域・公開メモリ(論理 = 物理・ライトバック)と BAR0(論理 = 物理・キャッシュしない属性)を張るのは BSP 側の役目で、この版はアドレスをそのまま返す。x86 の DMA はキャッシュと一貫しているので、キャッシュの操作はしない。PCIe の設定空間は ECAM(`g_bfm_pcie_ecam_base`)を直接読み書きする(設定空間はリトルエンディアンなので、バイト順はそのまま)。BlueFlame には、BSP が PAT の WC で張った BAR0 全体の write-combining の別名(`g_bfm_bar0_wc_va`)を使う。
 
-[[port_vxworks_port_vxworks__bfm_port_log]]
+[[port_vxworks_port_vxworks-bfm_port_log]]
 === `bfm_port_log()`
 [cols="1,5",options="autowidth"]
 .bfm_port_log()
@@ -3808,15 +4317,18 @@ image::call_port_linux_vfio_port_linux__bfm_port_bar0_wc_release.drawio.svg[bfm_
 |戻り値 a|なし
 |前提条件 a|特になし。
 |注意事項 a|VxWorks の実機で未検証。
+|使用関数 a|* `va_start()`(外部)
+* `vprintf()`(外部)
+* `va_end()`(外部)
 |===
 
 .bfm_port_log() のフロー図
-image::flow_port_vxworks_port_vxworks__bfm_port_log.drawio.svg[bfm_port_log() のフロー図]
+image::flow_port_vxworks_port_vxworks-bfm_port_log.drawio.svg[bfm_port_log() のフロー図]
 
 .bfm_port_log() の関係図
-image::call_port_vxworks_port_vxworks__bfm_port_log.drawio.svg[bfm_port_log() の関係図]
+image::call_port_vxworks_port_vxworks-bfm_port_log.drawio.svg[bfm_port_log() の関係図]
 
-[[port_vxworks_port_vxworks__bfm_port_time_ns]]
+[[port_vxworks_port_vxworks-bfm_port_time_ns]]
 === `bfm_port_time_ns()`
 [cols="1,5",options="autowidth"]
 .bfm_port_time_ns()
@@ -3831,15 +4343,17 @@ image::call_port_vxworks_port_vxworks__bfm_port_log.drawio.svg[bfm_port_log() �
 * `tick64Get()` は 64bit なので一周しない。
 * `sysClkRateGet()` が 0 を返したときは 60Hz として計算する。
 * VxWorks の実機で未検証。
+|使用関数 a|* `sysClkRateGet()`(外部)
+* `tick64Get()`(外部)
 |===
 
 .bfm_port_time_ns() のフロー図
-image::flow_port_vxworks_port_vxworks__bfm_port_time_ns.drawio.svg[bfm_port_time_ns() のフロー図]
+image::flow_port_vxworks_port_vxworks-bfm_port_time_ns.drawio.svg[bfm_port_time_ns() のフロー図]
 
 .bfm_port_time_ns() の関係図
-image::call_port_vxworks_port_vxworks__bfm_port_time_ns.drawio.svg[bfm_port_time_ns() の関係図]
+image::call_port_vxworks_port_vxworks-bfm_port_time_ns.drawio.svg[bfm_port_time_ns() の関係図]
 
-[[port_vxworks_port_vxworks__bfm_port_delay_us]]
+[[port_vxworks_port_vxworks-bfm_port_delay_us]]
 === `bfm_port_delay_us()`
 [cols="1,5",options="autowidth"]
 .bfm_port_delay_us()
@@ -3858,15 +4372,17 @@ image::call_port_vxworks_port_vxworks__bfm_port_time_ns.drawio.svg[bfm_port_time
 |注意事項 a|* 分解能は 1 tick なので、短い待ちでも 1 tick 待つ。
 * `taskDelay` の戻り値は見ない。
 * VxWorks の実機で未検証。
+|使用関数 a|* `sysClkRateGet()`(外部)
+* `taskDelay()`(外部)
 |===
 
 .bfm_port_delay_us() のフロー図
-image::flow_port_vxworks_port_vxworks__bfm_port_delay_us.drawio.svg[bfm_port_delay_us() のフロー図]
+image::flow_port_vxworks_port_vxworks-bfm_port_delay_us.drawio.svg[bfm_port_delay_us() のフロー図]
 
 .bfm_port_delay_us() の関係図
-image::call_port_vxworks_port_vxworks__bfm_port_delay_us.drawio.svg[bfm_port_delay_us() の関係図]
+image::call_port_vxworks_port_vxworks-bfm_port_delay_us.drawio.svg[bfm_port_delay_us() の関係図]
 
-[[port_vxworks_port_vxworks__bfm_port_init]]
+[[port_vxworks_port_vxworks-bfm_port_init]]
 === `bfm_port_init()`
 [cols="1,5",options="autowidth"]
 .bfm_port_init()
@@ -3879,15 +4395,16 @@ image::call_port_vxworks_port_vxworks__bfm_port_delay_us.drawio.svg[bfm_port_del
 |前提条件 a|`g_bfm_dma_*` と `g_bfm_mr_*` の物理メモリが OS に使われず、論理 = 物理・ライトバックで張られていること(BSP の役目)。`g_bfm_pcie_ecam_base` を設定してあること。
 |注意事項 a|* `g_bfm_cpu_awake` はこの版では何もしない(深い C-state は BIOS / BSP で止める)。
 * VxWorks の実機で未検証。
+|使用関数 a|* <<port_vxworks_port_vxworks-bfm_port_log,`bfm_port_log()`>>
 |===
 
 .bfm_port_init() のフロー図
-image::flow_port_vxworks_port_vxworks__bfm_port_init.drawio.svg[bfm_port_init() のフロー図]
+image::flow_port_vxworks_port_vxworks-bfm_port_init.drawio.svg[bfm_port_init() のフロー図]
 
 .bfm_port_init() の関係図
-image::call_port_vxworks_port_vxworks__bfm_port_init.drawio.svg[bfm_port_init() の関係図]
+image::call_port_vxworks_port_vxworks-bfm_port_init.drawio.svg[bfm_port_init() の関係図]
 
-[[port_vxworks_port_vxworks__bfm_port_fini]]
+[[port_vxworks_port_vxworks-bfm_port_fini]]
 === `bfm_port_fini()`
 [cols="1,5",options="autowidth"]
 .bfm_port_fini()
@@ -3899,15 +4416,16 @@ image::call_port_vxworks_port_vxworks__bfm_port_init.drawio.svg[bfm_port_init() 
 |戻り値 a|なし
 |前提条件 a|特になし。
 |注意事項 a|VxWorks の実機で未検証。
+|使用関数 a|なし
 |===
 
 .bfm_port_fini() のフロー図
-image::flow_port_vxworks_port_vxworks__bfm_port_fini.drawio.svg[bfm_port_fini() のフロー図]
+image::flow_port_vxworks_port_vxworks-bfm_port_fini.drawio.svg[bfm_port_fini() のフロー図]
 
 .bfm_port_fini() の関係図
-image::call_port_vxworks_port_vxworks__bfm_port_fini.drawio.svg[bfm_port_fini() の関係図]
+image::call_port_vxworks_port_vxworks-bfm_port_fini.drawio.svg[bfm_port_fini() の関係図]
 
-[[port_vxworks_port_vxworks__ecam]]
+[[port_vxworks_port_vxworks-ecam]]
 === `ecam()`
 [cols="1,5",options="autowidth"]
 .ecam()
@@ -3925,15 +4443,16 @@ image::call_port_vxworks_port_vxworks__bfm_port_fini.drawio.svg[bfm_port_fini() 
 |前提条件 a|`g_bfm_pcie_ecam_base`・`g_bfm_pci_bus` / `g_bfm_pci_dev` / `g_bfm_pci_func` を設定してあること。ECAM が論理 = 物理で張られていること。
 |注意事項 a|* `off` は `0xffc` で切るので、4KiB を超える位置や 4 の倍数でない位置は丸められる。
 * VxWorks の実機で未検証。
+|使用関数 a|なし
 |===
 
 .ecam() のフロー図
-image::flow_port_vxworks_port_vxworks__ecam.drawio.svg[ecam() のフロー図]
+image::flow_port_vxworks_port_vxworks-ecam.drawio.svg[ecam() のフロー図]
 
 .ecam() の関係図
-image::call_port_vxworks_port_vxworks__ecam.drawio.svg[ecam() の関係図]
+image::call_port_vxworks_port_vxworks-ecam.drawio.svg[ecam() の関係図]
 
-[[port_vxworks_port_vxworks__bfm_port_pci_read32]]
+[[port_vxworks_port_vxworks-bfm_port_pci_read32]]
 === `bfm_port_pci_read32()`
 [cols="1,5",options="autowidth"]
 .bfm_port_pci_read32()
@@ -3950,15 +4469,16 @@ image::call_port_vxworks_port_vxworks__ecam.drawio.svg[ecam() の関係図]
 |戻り値 a|読んだ値。
 |前提条件 a|`bfm_port_init()` が成功していること。
 |注意事項 a|VxWorks の実機で未検証。
+|使用関数 a|* <<port_vxworks_port_vxworks-ecam,`ecam()`>>
 |===
 
 .bfm_port_pci_read32() のフロー図
-image::flow_port_vxworks_port_vxworks__bfm_port_pci_read32.drawio.svg[bfm_port_pci_read32() のフロー図]
+image::flow_port_vxworks_port_vxworks-bfm_port_pci_read32.drawio.svg[bfm_port_pci_read32() のフロー図]
 
 .bfm_port_pci_read32() の関係図
-image::call_port_vxworks_port_vxworks__bfm_port_pci_read32.drawio.svg[bfm_port_pci_read32() の関係図]
+image::call_port_vxworks_port_vxworks-bfm_port_pci_read32.drawio.svg[bfm_port_pci_read32() の関係図]
 
-[[port_vxworks_port_vxworks__bfm_port_pci_write32]]
+[[port_vxworks_port_vxworks-bfm_port_pci_write32]]
 === `bfm_port_pci_write32()`
 [cols="1,5",options="autowidth"]
 .bfm_port_pci_write32()
@@ -3976,15 +4496,17 @@ image::call_port_vxworks_port_vxworks__bfm_port_pci_read32.drawio.svg[bfm_port_p
 |戻り値 a|なし
 |前提条件 a|`bfm_port_init()` が成功していること。
 |注意事項 a|VxWorks の実機で未検証。
+|使用関数 a|* <<port_vxworks_port_vxworks-ecam,`ecam()`>>
+* `bfm_mb()`(マクロ)
 |===
 
 .bfm_port_pci_write32() のフロー図
-image::flow_port_vxworks_port_vxworks__bfm_port_pci_write32.drawio.svg[bfm_port_pci_write32() のフロー図]
+image::flow_port_vxworks_port_vxworks-bfm_port_pci_write32.drawio.svg[bfm_port_pci_write32() のフロー図]
 
 .bfm_port_pci_write32() の関係図
-image::call_port_vxworks_port_vxworks__bfm_port_pci_write32.drawio.svg[bfm_port_pci_write32() の関係図]
+image::call_port_vxworks_port_vxworks-bfm_port_pci_write32.drawio.svg[bfm_port_pci_write32() の関係図]
 
-[[port_vxworks_port_vxworks__bfm_port_bar0_map]]
+[[port_vxworks_port_vxworks-bfm_port_bar0_map]]
 === `bfm_port_bar0_map()`
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_map()
@@ -4002,15 +4524,16 @@ image::call_port_vxworks_port_vxworks__bfm_port_pci_write32.drawio.svg[bfm_port_
 |戻り値 a|`bar_phys` をポインタにしたもの。NULL は返さない(`bar_phys` が 0 のときを除く)。
 |前提条件 a|BAR0(`g_bfm_bar0_addr` から BAR0 の大きさぶん)が論理 = 物理・キャッシュしない属性で張られていること(BSP の役目)。
 |注意事項 a|張られているかは確かめない。VxWorks の実機で未検証。
+|使用関数 a|なし
 |===
 
 .bfm_port_bar0_map() のフロー図
-image::flow_port_vxworks_port_vxworks__bfm_port_bar0_map.drawio.svg[bfm_port_bar0_map() のフロー図]
+image::flow_port_vxworks_port_vxworks-bfm_port_bar0_map.drawio.svg[bfm_port_bar0_map() のフロー図]
 
 .bfm_port_bar0_map() の関係図
-image::call_port_vxworks_port_vxworks__bfm_port_bar0_map.drawio.svg[bfm_port_bar0_map() の関係図]
+image::call_port_vxworks_port_vxworks-bfm_port_bar0_map.drawio.svg[bfm_port_bar0_map() の関係図]
 
-[[port_vxworks_port_vxworks__bfm_port_bar0_unmap]]
+[[port_vxworks_port_vxworks-bfm_port_bar0_unmap]]
 === `bfm_port_bar0_unmap()`
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_unmap()
@@ -4023,15 +4546,16 @@ image::call_port_vxworks_port_vxworks__bfm_port_bar0_map.drawio.svg[bfm_port_bar
 |前提条件 a|特になし。
 |注意事項 a|* 呼んだ後は `bfm_port_bar0_wc()` が範囲の外として NULL を返す(`len` が 0 でなければ)。
 * VxWorks の実機で未検証。
+|使用関数 a|なし
 |===
 
 .bfm_port_bar0_unmap() のフロー図
-image::flow_port_vxworks_port_vxworks__bfm_port_bar0_unmap.drawio.svg[bfm_port_bar0_unmap() のフロー図]
+image::flow_port_vxworks_port_vxworks-bfm_port_bar0_unmap.drawio.svg[bfm_port_bar0_unmap() のフロー図]
 
 .bfm_port_bar0_unmap() の関係図
-image::call_port_vxworks_port_vxworks__bfm_port_bar0_unmap.drawio.svg[bfm_port_bar0_unmap() の関係図]
+image::call_port_vxworks_port_vxworks-bfm_port_bar0_unmap.drawio.svg[bfm_port_bar0_unmap() の関係図]
 
-[[port_vxworks_port_vxworks__bfm_port_bar0_wc]]
+[[port_vxworks_port_vxworks-bfm_port_bar0_wc]]
 === `bfm_port_bar0_wc()`
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_wc()
@@ -4051,15 +4575,16 @@ image::call_port_vxworks_port_vxworks__bfm_port_bar0_unmap.drawio.svg[bfm_port_b
 |注意事項 a|* 範囲の検査は `off > s_bar_size` または `len > s_bar_size - off` で行う(足し算のあふれを避ける書き方)。
 * Linux 版と違い、`bfm_port_bar0_map()` の窓(UC)は UC のまま残る。
 * VxWorks の実機で未検証。
+|使用関数 a|* <<port_vxworks_port_vxworks-bfm_port_log,`bfm_port_log()`>>
 |===
 
 .bfm_port_bar0_wc() のフロー図
-image::flow_port_vxworks_port_vxworks__bfm_port_bar0_wc.drawio.svg[bfm_port_bar0_wc() のフロー図]
+image::flow_port_vxworks_port_vxworks-bfm_port_bar0_wc.drawio.svg[bfm_port_bar0_wc() のフロー図]
 
 .bfm_port_bar0_wc() の関係図
-image::call_port_vxworks_port_vxworks__bfm_port_bar0_wc.drawio.svg[bfm_port_bar0_wc() の関係図]
+image::call_port_vxworks_port_vxworks-bfm_port_bar0_wc.drawio.svg[bfm_port_bar0_wc() の関係図]
 
-[[port_vxworks_port_vxworks__bfm_port_bar0_wc_release]]
+[[port_vxworks_port_vxworks-bfm_port_bar0_wc_release]]
 === `bfm_port_bar0_wc_release()`
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_wc_release()
@@ -4077,13 +4602,14 @@ image::call_port_vxworks_port_vxworks__bfm_port_bar0_wc.drawio.svg[bfm_port_bar0
 |戻り値 a|なし
 |前提条件 a|特になし。
 |注意事項 a|VxWorks の実機で未検証。
+|使用関数 a|なし
 |===
 
 .bfm_port_bar0_wc_release() のフロー図
-image::flow_port_vxworks_port_vxworks__bfm_port_bar0_wc_release.drawio.svg[bfm_port_bar0_wc_release() のフロー図]
+image::flow_port_vxworks_port_vxworks-bfm_port_bar0_wc_release.drawio.svg[bfm_port_bar0_wc_release() のフロー図]
 
 .bfm_port_bar0_wc_release() の関係図
-image::call_port_vxworks_port_vxworks__bfm_port_bar0_wc_release.drawio.svg[bfm_port_bar0_wc_release() の関係図]
+image::call_port_vxworks_port_vxworks-bfm_port_bar0_wc_release.drawio.svg[bfm_port_bar0_wc_release() の関係図]
 
 == `test/bfm_test.c`
 
@@ -4098,7 +4624,7 @@ image::call_port_vxworks_port_vxworks__bfm_port_bar0_wc_release.drawio.svg[bfm_p
 
 公開メモリの取り決め(server が埋める)は、先頭 64KiB がデータ領域(`(i * 7 + 3) & 0xff` で埋める)、その後ろ 4KiB が 8 バイトの atomic 語 512 個(0 で埋める)。
 
-[[test_bfm_test__on_sig]]
+[[test_bfm_test-on_sig]]
 === `on_sig()`
 [cols="1,5",options="autowidth"]
 .on_sig()
@@ -4117,15 +4643,16 @@ image::call_port_vxworks_port_vxworks__bfm_port_bar0_wc_release.drawio.svg[bfm_p
 |注意事項 a|* 旗を立てるだけで、表示や停止は `run_server()` などのループが旗を見て行う。
 * server 以外(client / bench / info)では SIGQUIT も止める合図として扱う(後片付けをしてから終わる)。
 * `g_server` は `main()` が `bfm_init()` の前に決める。
+|使用関数 a|なし
 |===
 
 .on_sig() のフロー図
-image::flow_test_bfm_test__on_sig.drawio.svg[on_sig() のフロー図]
+image::flow_test_bfm_test-on_sig.drawio.svg[on_sig() のフロー図]
 
 .on_sig() の関係図
-image::call_test_bfm_test__on_sig.drawio.svg[on_sig() の関係図]
+image::call_test_bfm_test-on_sig.drawio.svg[on_sig() の関係図]
 
-[[test_bfm_test__now_ns]]
+[[test_bfm_test-now_ns]]
 === `now_ns()`
 [cols="1,5",options="autowidth"]
 .now_ns()
@@ -4137,15 +4664,16 @@ image::call_test_bfm_test__on_sig.drawio.svg[on_sig() の関係図]
 |戻り値 a|今の時刻(ナノ秒)。
 |前提条件 a|特になし。
 |注意事項 a|特になし。
+|使用関数 a|* `clock_gettime()`(外部)
 |===
 
 .now_ns() のフロー図
-image::flow_test_bfm_test__now_ns.drawio.svg[now_ns() のフロー図]
+image::flow_test_bfm_test-now_ns.drawio.svg[now_ns() のフロー図]
 
 .now_ns() の関係図
-image::call_test_bfm_test__now_ns.drawio.svg[now_ns() の関係図]
+image::call_test_bfm_test-now_ns.drawio.svg[now_ns() の関係図]
 
-[[test_bfm_test__pattern]]
+[[test_bfm_test-pattern]]
 === `pattern()`
 [cols="1,5",options="autowidth"]
 .pattern()
@@ -4162,15 +4690,16 @@ image::call_test_bfm_test__now_ns.drawio.svg[now_ns() の関係図]
 |戻り値 a|その位置の初期値(1 バイト)。
 |前提条件 a|特になし。
 |注意事項 a|特になし。
+|使用関数 a|なし
 |===
 
 .pattern() のフロー図
-image::flow_test_bfm_test__pattern.drawio.svg[pattern() のフロー図]
+image::flow_test_bfm_test-pattern.drawio.svg[pattern() のフロー図]
 
 .pattern() の関係図
-image::call_test_bfm_test__pattern.drawio.svg[pattern() の関係図]
+image::call_test_bfm_test-pattern.drawio.svg[pattern() の関係図]
 
-[[test_bfm_test__fnv1a]]
+[[test_bfm_test-fnv1a]]
 === `fnv1a()`
 [cols="1,5",options="autowidth"]
 .fnv1a()
@@ -4188,15 +4717,16 @@ image::call_test_bfm_test__pattern.drawio.svg[pattern() の関係図]
 |戻り値 a|FNV-1a 64 の hash。
 |前提条件 a|p から n バイトが読めること。
 |注意事項 a|server(`dump_area()`)と client(模型)で同じ値になることを見るために使う。
+|使用関数 a|なし
 |===
 
 .fnv1a() のフロー図
-image::flow_test_bfm_test__fnv1a.drawio.svg[fnv1a() のフロー図]
+image::flow_test_bfm_test-fnv1a.drawio.svg[fnv1a() のフロー図]
 
 .fnv1a() の関係図
-image::call_test_bfm_test__fnv1a.drawio.svg[fnv1a() の関係図]
+image::call_test_bfm_test-fnv1a.drawio.svg[fnv1a() の関係図]
 
-[[test_bfm_test__parse_ip]]
+[[test_bfm_test-parse_ip]]
 === `parse_ip()`
 [cols="1,5",options="autowidth"]
 .parse_ip()
@@ -4214,15 +4744,16 @@ image::call_test_bfm_test__fnv1a.drawio.svg[fnv1a() の関係図]
 |戻り値 a|0: 直せた。-1: 4 つの数が読めない、または 255 を超える数がある。
 |前提条件 a|特になし。
 |注意事項 a|失敗したときは `*out` を書き換えない。
+|使用関数 a|* `sscanf()`(外部)
 |===
 
 .parse_ip() のフロー図
-image::flow_test_bfm_test__parse_ip.drawio.svg[parse_ip() のフロー図]
+image::flow_test_bfm_test-parse_ip.drawio.svg[parse_ip() のフロー図]
 
 .parse_ip() の関係図
-image::call_test_bfm_test__parse_ip.drawio.svg[parse_ip() の関係図]
+image::call_test_bfm_test-parse_ip.drawio.svg[parse_ip() の関係図]
 
-[[test_bfm_test__parse_mac]]
+[[test_bfm_test-parse_mac]]
 === `parse_mac()`
 [cols="1,5",options="autowidth"]
 .parse_mac()
@@ -4240,15 +4771,16 @@ image::call_test_bfm_test__parse_ip.drawio.svg[parse_ip() の関係図]
 |戻り値 a|0: 直せた。-1: 6 つの数が読めない。
 |前提条件 a|特になし。
 |注意事項 a|各数が 255 を超えるかは見ない(下位 8 ビットを使う)。
+|使用関数 a|* `sscanf()`(外部)
 |===
 
 .parse_mac() のフロー図
-image::flow_test_bfm_test__parse_mac.drawio.svg[parse_mac() のフロー図]
+image::flow_test_bfm_test-parse_mac.drawio.svg[parse_mac() のフロー図]
 
 .parse_mac() の関係図
-image::call_test_bfm_test__parse_mac.drawio.svg[parse_mac() の関係図]
+image::call_test_bfm_test-parse_mac.drawio.svg[parse_mac() の関係図]
 
-[[test_bfm_test__usage]]
+[[test_bfm_test-usage]]
 === `usage()`
 [cols="1,5",options="autowidth"]
 .usage()
@@ -4260,15 +4792,16 @@ image::call_test_bfm_test__parse_mac.drawio.svg[parse_mac() の関係図]
 |戻り値 a|なし
 |前提条件 a|特になし。
 |注意事項 a|特になし。
+|使用関数 a|* `printf()`(外部)
 |===
 
 .usage() のフロー図
-image::flow_test_bfm_test__usage.drawio.svg[usage() のフロー図]
+image::flow_test_bfm_test-usage.drawio.svg[usage() のフロー図]
 
 .usage() の関係図
-image::call_test_bfm_test__usage.drawio.svg[usage() の関係図]
+image::call_test_bfm_test-usage.drawio.svg[usage() の関係図]
 
-[[test_bfm_test__fill_area]]
+[[test_bfm_test-fill_area]]
 === `fill_area()`
 [cols="1,5",options="autowidth"]
 .fill_area()
@@ -4280,15 +4813,16 @@ image::call_test_bfm_test__usage.drawio.svg[usage() の関係図]
 |戻り値 a|なし
 |前提条件 a|`bfm_init()` が済んでいて、公開メモリが `AREA_BYTES`(68KiB)以上あること(`run_server()` が確かめる)。
 |注意事項 a|接続を待つたびに呼ぶので、前の接続で書かれた中身は消える。
+|使用関数 a|* <<test_bfm_test-pattern,`pattern()`>>
 |===
 
 .fill_area() のフロー図
-image::flow_test_bfm_test__fill_area.drawio.svg[fill_area() のフロー図]
+image::flow_test_bfm_test-fill_area.drawio.svg[fill_area() のフロー図]
 
 .fill_area() の関係図
-image::call_test_bfm_test__fill_area.drawio.svg[fill_area() の関係図]
+image::call_test_bfm_test-fill_area.drawio.svg[fill_area() の関係図]
 
-[[test_bfm_test__dump_area]]
+[[test_bfm_test-dump_area]]
 === `dump_area()`
 [cols="1,5",options="autowidth"]
 .dump_area()
@@ -4305,15 +4839,17 @@ image::call_test_bfm_test__fill_area.drawio.svg[fill_area() の関係図]
 |戻り値 a|なし
 |前提条件 a|`bfm_init()` が済んでいること。
 |注意事項 a|client が最後に表示する模型の hash と同じ値になるはず。
+|使用関数 a|* `printf()`(外部)
+* <<test_bfm_test-fnv1a,`fnv1a()`>>
 |===
 
 .dump_area() のフロー図
-image::flow_test_bfm_test__dump_area.drawio.svg[dump_area() のフロー図]
+image::flow_test_bfm_test-dump_area.drawio.svg[dump_area() のフロー図]
 
 .dump_area() の関係図
-image::call_test_bfm_test__dump_area.drawio.svg[dump_area() の関係図]
+image::call_test_bfm_test-dump_area.drawio.svg[dump_area() の関係図]
 
-[[test_bfm_test__run_server]]
+[[test_bfm_test-run_server]]
 === `run_server()`
 [cols="1,5",options="autowidth"]
 .run_server()
@@ -4331,15 +4867,23 @@ image::call_test_bfm_test__dump_area.drawio.svg[dump_area() の関係図]
 |前提条件 a|`bfm_init()` が済んでいること。
 |注意事項 a|* 接続の待ちは 500ms ごとに区切り、その間に `g_stop` / `g_dump` を見る。
 * 接続の間に `g_stop` が立つと、hash を表示して接続を返してから終わる。
+|使用関数 a|* `printf()`(外部)
+* <<test_bfm_test-fill_area,`fill_area()`>>
+* <<src_bfm_cm-bfm_accept,`bfm_accept()`>>
+* <<test_bfm_test-dump_area,`dump_area()`>>
+* <<src_bfm_ops-bfm_is_up,`bfm_is_up()`>>
+* <<src_bfm_core-bfm_poll,`bfm_poll()`>>
+* `usleep()`(外部)
+* <<src_bfm_cm-bfm_disconnect,`bfm_disconnect()`>>
 |===
 
 .run_server() のフロー図
-image::flow_test_bfm_test__run_server.drawio.svg[run_server() のフロー図]
+image::flow_test_bfm_test-run_server.drawio.svg[run_server() のフロー図]
 
 .run_server() の関係図
-image::call_test_bfm_test__run_server.drawio.svg[run_server() の関係図]
+image::call_test_bfm_test-run_server.drawio.svg[run_server() の関係図]
 
-[[test_bfm_test__check]]
+[[test_bfm_test-check]]
 === `check()`
 [cols="1,5",options="autowidth"]
 .check()
@@ -4357,15 +4901,16 @@ image::call_test_bfm_test__run_server.drawio.svg[run_server() の関係図]
 |戻り値 a|なし
 |前提条件 a|特になし。
 |注意事項 a|特になし。
+|使用関数 a|* `printf()`(外部)
 |===
 
 .check() のフロー図
-image::flow_test_bfm_test__check.drawio.svg[check() のフロー図]
+image::flow_test_bfm_test-check.drawio.svg[check() のフロー図]
 
 .check() の関係図
-image::call_test_bfm_test__check.drawio.svg[check() の関係図]
+image::call_test_bfm_test-check.drawio.svg[check() の関係図]
 
-[[test_bfm_test__cmp_u32]]
+[[test_bfm_test-cmp_u32]]
 === `cmp_u32()`
 [cols="1,5",options="autowidth"]
 .cmp_u32()
@@ -4383,15 +4928,16 @@ image::call_test_bfm_test__check.drawio.svg[check() の関係図]
 |戻り値 a|`*a > *b` なら 1、`*a < *b` なら -1、等しければ 0。
 |前提条件 a|a と b が `uint32_t` を指していること。
 |注意事項 a|特になし。
+|使用関数 a|なし
 |===
 
 .cmp_u32() のフロー図
-image::flow_test_bfm_test__cmp_u32.drawio.svg[cmp_u32() のフロー図]
+image::flow_test_bfm_test-cmp_u32.drawio.svg[cmp_u32() のフロー図]
 
 .cmp_u32() の関係図
-image::call_test_bfm_test__cmp_u32.drawio.svg[cmp_u32() の関係図]
+image::call_test_bfm_test-cmp_u32.drawio.svg[cmp_u32() の関係図]
 
-[[test_bfm_test__op_write8]]
+[[test_bfm_test-op_write8]]
 === `op_write8()`
 [cols="1,5",options="autowidth"]
 .op_write8()
@@ -4409,15 +4955,16 @@ image::call_test_bfm_test__cmp_u32.drawio.svg[cmp_u32() の関係図]
 |戻り値 a|`bfm_write()` の戻り値。
 |前提条件 a|c が使える接続であること。
 |注意事項 a|書く位置は 64 か所を 64 バイトおきに回る。
+|使用関数 a|* <<src_bfm_ops-bfm_write,`bfm_write()`>>
 |===
 
 .op_write8() のフロー図
-image::flow_test_bfm_test__op_write8.drawio.svg[op_write8() のフロー図]
+image::flow_test_bfm_test-op_write8.drawio.svg[op_write8() のフロー図]
 
 .op_write8() の関係図
-image::call_test_bfm_test__op_write8.drawio.svg[op_write8() の関係図]
+image::call_test_bfm_test-op_write8.drawio.svg[op_write8() の関係図]
 
-[[test_bfm_test__op_write64]]
+[[test_bfm_test-op_write64]]
 === `op_write64()`
 [cols="1,5",options="autowidth"]
 .op_write64()
@@ -4435,15 +4982,16 @@ image::call_test_bfm_test__op_write8.drawio.svg[op_write8() の関係図]
 |戻り値 a|`bfm_write()` の戻り値。
 |前提条件 a|c が使える接続であること。
 |注意事項 a|書く位置は 64 か所を 64 バイトおきに回る。
+|使用関数 a|* <<src_bfm_ops-bfm_write,`bfm_write()`>>
 |===
 
 .op_write64() のフロー図
-image::flow_test_bfm_test__op_write64.drawio.svg[op_write64() のフロー図]
+image::flow_test_bfm_test-op_write64.drawio.svg[op_write64() のフロー図]
 
 .op_write64() の関係図
-image::call_test_bfm_test__op_write64.drawio.svg[op_write64() の関係図]
+image::call_test_bfm_test-op_write64.drawio.svg[op_write64() の関係図]
 
-[[test_bfm_test__op_read8]]
+[[test_bfm_test-op_read8]]
 === `op_read8()`
 [cols="1,5",options="autowidth"]
 .op_read8()
@@ -4461,15 +5009,16 @@ image::call_test_bfm_test__op_write64.drawio.svg[op_write64() の関係図]
 |戻り値 a|`bfm_read()` の戻り値。
 |前提条件 a|c が使える接続であること。
 |注意事項 a|読んだ中身は捨てる。
+|使用関数 a|* <<src_bfm_ops-bfm_read,`bfm_read()`>>
 |===
 
 .op_read8() のフロー図
-image::flow_test_bfm_test__op_read8.drawio.svg[op_read8() のフロー図]
+image::flow_test_bfm_test-op_read8.drawio.svg[op_read8() のフロー図]
 
 .op_read8() の関係図
-image::call_test_bfm_test__op_read8.drawio.svg[op_read8() の関係図]
+image::call_test_bfm_test-op_read8.drawio.svg[op_read8() の関係図]
 
-[[test_bfm_test__op_read64]]
+[[test_bfm_test-op_read64]]
 === `op_read64()`
 [cols="1,5",options="autowidth"]
 .op_read64()
@@ -4487,15 +5036,16 @@ image::call_test_bfm_test__op_read8.drawio.svg[op_read8() の関係図]
 |戻り値 a|`bfm_read()` の戻り値。
 |前提条件 a|c が使える接続であること。
 |注意事項 a|読んだ中身は捨てる。
+|使用関数 a|* <<src_bfm_ops-bfm_read,`bfm_read()`>>
 |===
 
 .op_read64() のフロー図
-image::flow_test_bfm_test__op_read64.drawio.svg[op_read64() のフロー図]
+image::flow_test_bfm_test-op_read64.drawio.svg[op_read64() のフロー図]
 
 .op_read64() の関係図
-image::call_test_bfm_test__op_read64.drawio.svg[op_read64() の関係図]
+image::call_test_bfm_test-op_read64.drawio.svg[op_read64() の関係図]
 
-[[test_bfm_test__op_faa]]
+[[test_bfm_test-op_faa]]
 === `op_faa()`
 [cols="1,5",options="autowidth"]
 .op_faa()
@@ -4513,15 +5063,16 @@ image::call_test_bfm_test__op_read64.drawio.svg[op_read64() の関係図]
 |戻り値 a|`bfm_faa()` の戻り値。
 |前提条件 a|c が使える接続であること。
 |注意事項 a|元の値は捨てる。検査 [4] で使う語 0・1 には触らない。
+|使用関数 a|* <<src_bfm_ops-bfm_faa,`bfm_faa()`>>
 |===
 
 .op_faa() のフロー図
-image::flow_test_bfm_test__op_faa.drawio.svg[op_faa() のフロー図]
+image::flow_test_bfm_test-op_faa.drawio.svg[op_faa() のフロー図]
 
 .op_faa() の関係図
-image::call_test_bfm_test__op_faa.drawio.svg[op_faa() の関係図]
+image::call_test_bfm_test-op_faa.drawio.svg[op_faa() の関係図]
 
-[[test_bfm_test__op_cas]]
+[[test_bfm_test-op_cas]]
 === `op_cas()`
 [cols="1,5",options="autowidth"]
 .op_cas()
@@ -4539,15 +5090,16 @@ image::call_test_bfm_test__op_faa.drawio.svg[op_faa() の関係図]
 |戻り値 a|`bfm_cas()` の戻り値。
 |前提条件 a|c が使える接続であること。
 |注意事項 a|語は 0 で埋まっているので CAS は外れる(値は変わらない)。元の値は捨てる。
+|使用関数 a|* <<src_bfm_ops-bfm_cas,`bfm_cas()`>>
 |===
 
 .op_cas() のフロー図
-image::flow_test_bfm_test__op_cas.drawio.svg[op_cas() のフロー図]
+image::flow_test_bfm_test-op_cas.drawio.svg[op_cas() のフロー図]
 
 .op_cas() の関係図
-image::call_test_bfm_test__op_cas.drawio.svg[op_cas() の関係図]
+image::call_test_bfm_test-op_cas.drawio.svg[op_cas() の関係図]
 
-[[test_bfm_test__lat]]
+[[test_bfm_test-lat]]
 === `lat()`
 [cols="1,5",options="autowidth"]
 .lat()
@@ -4569,15 +5121,24 @@ image::call_test_bfm_test__op_cas.drawio.svg[op_cas() の関係図]
 |注意事項 a|* n は `g_lat` の要素数(200000)に切り詰める。
 * 操作が 1 回でも失敗したら `g_ng` を 1 増やし、表示せずに戻る。
 * 測る間に `g_stop` が立つとループを抜け、測れた回数 m ぶんで並べ替えて表示する(1 回も測れなければ表示せずに戻る)。暖機の間は `g_stop` を見ない。
+|使用関数 a|* <<test_bfm_test-now_ns,`now_ns()`>>
+* `qsort()`(外部)
+* `printf()`(外部)
+* `op_write8()`(関数ポインタ経由)
+* `op_write64()`(関数ポインタ経由)
+* `op_read8()`(関数ポインタ経由)
+* `op_read64()`(関数ポインタ経由)
+* `op_faa()`(関数ポインタ経由)
+* `op_cas()`(関数ポインタ経由)
 |===
 
 .lat() のフロー図
-image::flow_test_bfm_test__lat.drawio.svg[lat() のフロー図]
+image::flow_test_bfm_test-lat.drawio.svg[lat() のフロー図]
 
 .lat() の関係図
-image::call_test_bfm_test__lat.drawio.svg[lat() の関係図]
+image::call_test_bfm_test-lat.drawio.svg[lat() の関係図]
 
-[[test_bfm_test__run_client]]
+[[test_bfm_test-run_client]]
 === `run_client()`
 [cols="1,5",options="autowidth"]
 .run_client()
@@ -4610,15 +5171,36 @@ image::call_test_bfm_test__lat.drawio.svg[lat() の関係図]
 |注意事項 a|* [7] は接続の構造体の `rlen` を一時的に書き換えて手元の範囲検査をすり抜ける。相手が断ると接続はエラーになる。
 * [4] で相手の atomic 語 0・1 を書き換える。[6] の測定はデータ領域の 64 か所と atomic 語 100〜163・200〜263 に触る。
 * 検査が NG でも次の検査へ進む([6] だけは飛ばす)。
+|使用関数 a|* <<src_bfm_cm-bfm_connect,`bfm_connect()`>>
+* `printf()`(外部)
+* <<src_bfm_ops-bfm_remote_size,`bfm_remote_size()`>>
+* <<src_bfm_ops-bfm_bf_active,`bfm_bf_active()`>>
+* <<src_bfm_ops-bfm_inline_max,`bfm_inline_max()`>>
+* <<src_bfm_cm-bfm_disconnect,`bfm_disconnect()`>>
+* <<test_bfm_test-pattern,`pattern()`>>
+* `memset()`(外部)
+* <<src_bfm_ops-bfm_read,`bfm_read()`>>
+* <<src_bfm_ops-bfm_strerror,`bfm_strerror()`>>
+* `memcmp()`(外部)
+* <<test_bfm_test-check,`check()`>>
+* <<src_bfm_ops-bfm_write,`bfm_write()`>>
+* `memcpy()`(外部)
+* <<src_bfm_ops-bfm_write_post,`bfm_write_post()`>>
+* <<src_bfm_ops-bfm_flush,`bfm_flush()`>>
+* <<src_bfm_ops-bfm_faa,`bfm_faa()`>>
+* <<src_bfm_ops-bfm_cas,`bfm_cas()`>>
+* <<test_bfm_test-lat,`lat()`>>
+* <<test_bfm_test-now_ns,`now_ns()`>>
+* <<test_bfm_test-fnv1a,`fnv1a()`>>
 |===
 
 .run_client() のフロー図
-image::flow_test_bfm_test__run_client.drawio.svg[run_client() のフロー図]
+image::flow_test_bfm_test-run_client.drawio.svg[run_client() のフロー図]
 
 .run_client() の関係図
-image::call_test_bfm_test__run_client.drawio.svg[run_client() の関係図]
+image::call_test_bfm_test-run_client.drawio.svg[run_client() の関係図]
 
-[[test_bfm_test__rdtsc]]
+[[test_bfm_test-rdtsc]]
 === `rdtsc()`
 [cols="1,5",options="autowidth"]
 .rdtsc()
@@ -4630,15 +5212,16 @@ image::call_test_bfm_test__run_client.drawio.svg[run_client() の関係図]
 |戻り値 a|タイムスタンプカウンタの値(64 ビット)。
 |前提条件 a|x86 の CPU で動かすこと。
 |注意事項 a|ナノ秒への換算は `tsc_calibrate()` で求めた `g_tsc_per_ns` で行う。
+|使用関数 a|なし
 |===
 
 .rdtsc() のフロー図
-image::flow_test_bfm_test__rdtsc.drawio.svg[rdtsc() のフロー図]
+image::flow_test_bfm_test-rdtsc.drawio.svg[rdtsc() のフロー図]
 
 .rdtsc() の関係図
-image::call_test_bfm_test__rdtsc.drawio.svg[rdtsc() の関係図]
+image::call_test_bfm_test-rdtsc.drawio.svg[rdtsc() の関係図]
 
-[[test_bfm_test__tsc_calibrate]]
+[[test_bfm_test-tsc_calibrate]]
 === `tsc_calibrate()`
 [cols="1,5",options="autowidth"]
 .tsc_calibrate()
@@ -4650,15 +5233,18 @@ image::call_test_bfm_test__rdtsc.drawio.svg[rdtsc() の関係図]
 |戻り値 a|なし
 |前提条件 a|特になし。
 |注意事項 a|200ms かかる。
+|使用関数 a|* <<test_bfm_test-now_ns,`now_ns()`>>
+* <<test_bfm_test-rdtsc,`rdtsc()`>>
+* `usleep()`(外部)
 |===
 
 .tsc_calibrate() のフロー図
-image::flow_test_bfm_test__tsc_calibrate.drawio.svg[tsc_calibrate() のフロー図]
+image::flow_test_bfm_test-tsc_calibrate.drawio.svg[tsc_calibrate() のフロー図]
 
 .tsc_calibrate() の関係図
-image::call_test_bfm_test__tsc_calibrate.drawio.svg[tsc_calibrate() の関係図]
+image::call_test_bfm_test-tsc_calibrate.drawio.svg[tsc_calibrate() の関係図]
 
-[[test_bfm_test__bench_one]]
+[[test_bfm_test-bench_one]]
 === `bench_one()`
 [cols="1,5",options="autowidth"]
 .bench_one()
@@ -4681,15 +5267,22 @@ image::call_test_bfm_test__tsc_calibrate.drawio.svg[tsc_calibrate() の関係図
 |注意事項 a|* 内部の関数 `bfm_ops_post_rw()` / `bfm_ops_poll1()` を直接使う。
 * k 番めの操作は中継バッファの `k * size` を使う(k は出した数を qd で割った余り)。
 * 相手の公開メモリが size より小さい(slots が 0)、qd が 0 か `BENCH_QD_MAX` より大きい、size が `BENCH_SIZE_MAX` より大きいときは、流せないと表示して -1 を返す。
+|使用関数 a|* <<src_bfm_ops-bfm_remote_size,`bfm_remote_size()`>>
+* `printf()`(外部)
+* <<test_bfm_test-rdtsc,`rdtsc()`>>
+* <<src_bfm_ops-bfm_ops_post_rw,`bfm_ops_post_rw()`>>
+* <<src_bfm_ops-bfm_strerror,`bfm_strerror()`>>
+* <<src_bfm_ops-bfm_ops_poll1,`bfm_ops_poll1()`>>
+* `fflush()`(外部)
 |===
 
 .bench_one() のフロー図
-image::flow_test_bfm_test__bench_one.drawio.svg[bench_one() のフロー図]
+image::flow_test_bfm_test-bench_one.drawio.svg[bench_one() のフロー図]
 
 .bench_one() の関係図
-image::call_test_bfm_test__bench_one.drawio.svg[bench_one() の関係図]
+image::call_test_bfm_test-bench_one.drawio.svg[bench_one() の関係図]
 
-[[test_bfm_test__run_bench]]
+[[test_bfm_test-run_bench]]
 === `run_bench()`
 [cols="1,5",options="autowidth"]
 .run_bench()
@@ -4710,15 +5303,23 @@ image::call_test_bfm_test__bench_one.drawio.svg[bench_one() の関係図]
 |前提条件 a|`bfm_init()` が済んでいて、`g_bfm_stage_size` が `BENCH_QD_MAX * BENCH_SIZE_MAX` であること(`main()` が設定する)。
 |注意事項 a|* `bench_one()` が 1 回でも失敗したら残りの組を流さずに接続を返す。
 * 埋め込み(inline)でない write は中継バッファから送るので、流す前に中継バッファ全体を `0x5a ^ i` で埋めておく(内部の構造体の `stage` / `stage_size` を直接使う)。
+|使用関数 a|* <<src_bfm_cm-bfm_connect,`bfm_connect()`>>
+* <<test_bfm_test-tsc_calibrate,`tsc_calibrate()`>>
+* `printf()`(外部)
+* <<src_bfm_ops-bfm_remote_size,`bfm_remote_size()`>>
+* <<src_bfm_ops-bfm_bf_active,`bfm_bf_active()`>>
+* <<src_bfm_ops-bfm_inline_max,`bfm_inline_max()`>>
+* <<test_bfm_test-bench_one,`bench_one()`>>
+* <<src_bfm_cm-bfm_disconnect,`bfm_disconnect()`>>
 |===
 
 .run_bench() のフロー図
-image::flow_test_bfm_test__run_bench.drawio.svg[run_bench() のフロー図]
+image::flow_test_bfm_test-run_bench.drawio.svg[run_bench() のフロー図]
 
 .run_bench() の関係図
-image::call_test_bfm_test__run_bench.drawio.svg[run_bench() の関係図]
+image::call_test_bfm_test-run_bench.drawio.svg[run_bench() の関係図]
 
-[[test_bfm_test__main]]
+[[test_bfm_test-main]]
 === `main()`
 [cols="1,5",options="autowidth"]
 .main()
@@ -4749,10 +5350,23 @@ image::call_test_bfm_test__run_bench.drawio.svg[run_bench() の関係図]
 * bench のときは `bfm_init()` の前に `g_bfm_stage_size` を `BENCH_QD_MAX * BENCH_SIZE_MAX`(4MiB)にする。
 * client / bench で相手の IP と MAC が足りないときは、info の判定へ進み、使い方を表示して 2 を返す。
 * `-h` と知らないオプションは使い方を表示して 2 を返す。
+|使用関数 a|* `getopt()`(外部)
+* <<test_bfm_test-parse_ip,`parse_ip()`>>
+* <<test_bfm_test-usage,`usage()`>>
+* `atoi()`(外部)
+* `signal()`(外部)
+* `strcmp()`(外部)
+* <<src_bfm_core-bfm_init,`bfm_init()`>>
+* <<test_bfm_test-run_server,`run_server()`>>
+* <<test_bfm_test-parse_mac,`parse_mac()`>>
+* <<test_bfm_test-run_bench,`run_bench()`>>
+* <<test_bfm_test-run_client,`run_client()`>>
+* `printf()`(外部)
+* <<src_bfm_core-bfm_shutdown,`bfm_shutdown()`>>
 |===
 
 .main() のフロー図
-image::flow_test_bfm_test__main.drawio.svg[main() のフロー図]
+image::flow_test_bfm_test-main.drawio.svg[main() のフロー図]
 
 .main() の関係図
-image::call_test_bfm_test__main.drawio.svg[main() の関係図]
+image::call_test_bfm_test-main.drawio.svg[main() の関係図]

@@ -921,7 +921,8 @@ def load_desc():
 
 
 def slug(rel, name):
-    return re.sub(r"[^A-Za-z0-9]+", "_", rel.rsplit(".", 1)[0]) + "__" + name
+    # 区切りは "-"("__" にすると、同じ段落に 2 つのリンクが並んだとき AsciiDoc が強調の印と読む)
+    return re.sub(r"[^A-Za-z0-9]+", "_", rel.rsplit(".", 1)[0]) + "-" + name
 
 
 def fslug(f):
@@ -1086,6 +1087,38 @@ def api_section(allf, descs):
     return "".join(out)
 
 
+PORT_LABEL = {"port/linux_vfio/port_linux.c": "Linux 版", "port/vxworks/port_vxworks.c": "VxWorks 版"}
+
+
+def used_functions(f, e):
+    """表の「使用関数」の欄: この関数が呼ぶ関数を、呼ぶ順に並べる(ソースの解析と同じもの)。
+    このソースの関数は節へのリンク。移植層のように実装が 2 つあるものは両方へ、外部の関数・マクロは名前だけ。"""
+    order, targets, kinds = [], {}, {}
+    for nm, t, kind in f["callees"]:
+        if nm not in targets:
+            order.append(nm)
+            targets[nm], kinds[nm] = [], kind
+        if t is not None:
+            targets[nm].append(t)
+    items = []
+    for nm in order:
+        ts = targets[nm]
+        if len(ts) == 1:
+            items.append("<<%s,`%s()`>>" % (fslug(ts[0]), nm))
+        elif ts:
+            impls = "・".join("<<%s,%s>>" % (fslug(t), PORT_LABEL.get(t["file"], t["file"])) for t in ts)
+            items.append("`%s()`(%s)" % (nm, impls))
+        elif kinds[nm] == "macro":
+            items.append("`%s()`(マクロ)" % nm)
+        else:
+            items.append("`%s()`(外部)" % nm)
+    for nm in e.get("indirect", []):
+        items.append("`%s()`(関数ポインタ経由)" % nm)
+    if not items:
+        return "なし"
+    return "\n".join("* %s" % x for x in items)
+
+
 def write_adoc(allf, descs):
     out = []
     out.append("""= bfmem 関数仕様書
@@ -1107,7 +1140,10 @@ bfmem(ConnectX の BlueFlame でノード間のメモリへ write / read / atomi
     out.append("""
 == この文書の読み方
 
-* 各関数の節には、*表*(関数名・処理内容・引数・戻り値・前提条件・注意事項)、*フロー図*、*関係図* を置く。
+* 各関数の節には、*表*(関数名・処理内容・引数・戻り値・前提条件・注意事項・使用関数)、*フロー図*、*関係図* を置く。
+** *使用関数* は、その関数が呼ぶ関数を呼ぶ順に並べたもの(ソースの解析から作る。関係図の右側と同じ)。
+   このソースの関数は名前を押すとその節へ飛ぶ。移植層の関数は Linux 版・VxWorks 版のそれぞれへ飛べる。
+   (外部)は C の標準ライブラリ・OS の関数、(マクロ)はバリアなどのマクロ。
 * *フロー図* はソースの制御の流れ(if・ループ・break・continue・goto・return)をそのまま写したもの。
 ** 角の丸い箱 = 開始・終了・戻る(戻り値)、四角 = 処理、両側に線のある箱 = このソースの関数の呼び出し、
    ひし形 = 判断(下へ「はい」、右へ「いいえ」)、六角形 = 終わりの条件を持たない繰り返し、緑の楕円 = goto の行き先。
@@ -1148,6 +1184,7 @@ bfmem(ConnectX の BlueFlame でノード間のメモリへ write / read / atomi
             out.append("|戻り値 a|%s\n" % e["ret"].strip())
             out.append("|前提条件 a|%s\n" % e["pre"].strip())
             out.append("|注意事項 a|%s\n" % e["notes"].strip())
+            out.append("|使用関数 a|%s\n" % used_functions(f, e))
             out.append("|===\n")
             out.append("\n.%s() のフロー図\nimage::flow_%s.drawio.svg[%s() のフロー図]\n" % (f["name"], sl, f["name"]))
             out.append("\n.%s() の関係図\nimage::call_%s.drawio.svg[%s() の関係図]\n" % (f["name"], sl, f["name"]))
