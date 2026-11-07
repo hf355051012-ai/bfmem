@@ -39,7 +39,8 @@ wsl.exe -d Ubuntu-22.04 -- bash -c "cd /mnt/c/Users/fukud/Documents/bfmem && mak
 
 `doc/spec/bfmem_spec.adoc`(AsciiDoc、1 ファイル)と図(`doc/spec/images/*.drawio.svg`、draw.io で編集できる SVG)は
 `doc/spec/gen.py` が作る。WSL に asciidoctor(`sudo apt install asciidoctor`)があれば、図を埋め込んだ
-`doc/spec/bfmem_spec.html` も一緒に作る(警告が出たら失敗にする)。**ソースの関数を足す・消す・引数を変える・制御の流れを変えたら、`doc/spec/desc/*.json` を直して作り直すこと。**
+`docs/spec.html` も一緒に作る(警告が出たら失敗にする)。`docs/` は GitHub Pages で公開している
+(https://hf355051012-ai.github.io/bfmem/spec.html。master へ push すると更新される)。**ソースの関数を足す・消す・引数を変える・制御の流れを変えたら、`doc/spec/desc/*.json` を直して作り直すこと。**
 
 ```bash
 wsl.exe -d Ubuntu-22.04 -- bash -c "cd /mnt/c/Users/fukud/Documents/bfmem && python3 doc/spec/gen.py --check && python3 doc/spec/gen.py"

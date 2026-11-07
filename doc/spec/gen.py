@@ -2,7 +2,7 @@
 """bfmem の関数仕様書を作る。
 
   python3 doc/spec/gen.py            # 全部を検査して doc/spec/bfmem_spec.adoc と images/*.drawio.svg を作る
-                                     # (asciidoctor があれば bfmem_spec.html も作る)
+                                     # (asciidoctor があれば docs/spec.html も作る)
   python3 doc/spec/gen.py --check    # 検査だけ(記述と関数の対応、引数の名前、フローの書き方)
 
 入力:
@@ -14,7 +14,8 @@
   - doc/spec/bfmem_spec.adoc(1 つのファイル)
   - doc/spec/images/flow_*.drawio.svg / call_*.drawio.svg
     (draw.io の「編集できる SVG」。SVG として表示でき、draw.io でそのまま開いて編集できる)
-  - doc/spec/bfmem_spec.html(asciidoctor があるときだけ。図を埋め込んだ 1 ファイル)
+  - docs/spec.html(asciidoctor があるときだけ。図を埋め込んだ 1 ファイル。GitHub Pages で公開する
+    https://hf355051012-ai.github.io/bfmem/spec.html)
 """
 import html
 import json
@@ -1102,14 +1103,16 @@ def main():
 
 
 def write_html():
-    """asciidoctor があれば bfmem_spec.html も作る(:data-uri: で図を埋め込むので 1 ファイルで見られる)。
+    """asciidoctor があれば docs/spec.html も作る(:data-uri: で図を埋め込むので 1 ファイルで見られる)。
+    docs/ は GitHub Pages で公開している(master の /docs)。
     警告が 1 つでも出たら失敗にする(表の崩れなどを見逃さないため)。"""
     exe = shutil.which("asciidoctor")
     if exe is None:
         print("注意: asciidoctor が無いので HTML は作らない(sudo apt install asciidoctor)")
         return
     src = os.path.join(SPEC, "bfmem_spec.adoc")
-    dst = os.path.join(SPEC, "bfmem_spec.html")
+    dst = os.path.join(ROOT, "docs", "spec.html")
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
     r = subprocess.run([exe, "--failure-level=WARN", "-o", dst, src], cwd=SPEC)
     if r.returncode != 0:
         print("NG: asciidoctor が失敗した(上の警告を見ること)")

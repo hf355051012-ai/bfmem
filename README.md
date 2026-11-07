@@ -32,7 +32,7 @@ WQE を UAR の BlueFlame の窓へ MMIO で書き込んで送る。相手の CP
 | `port/linux_vfio/port_linux.c` | 移植層: Linux + VFIO(試験環境)|
 | `port/vxworks/port_vxworks.c` | 移植層: VxWorks(**未検証**)|
 | `test/bfm_test.c` | 試験プログラム(server / client / bench / info)|
-| `doc/spec/bfmem_spec.adoc` | **関数仕様書**(全ソースの全関数。表・フロー図・関係図。図は `doc/spec/images/*.drawio.svg`)。`doc/spec/gen.py` で作る。HTML 版は `doc/spec/bfmem_spec.html`(図を埋め込んだ 1 ファイル。asciidoctor があれば gen.py が一緒に作る) |
+| `doc/spec/bfmem_spec.adoc` | **関数仕様書**(全ソースの全関数。表・フロー図・関係図。図は `doc/spec/images/*.drawio.svg`)。`doc/spec/gen.py` で作る。HTML 版は `docs/spec.html`(図を埋め込んだ 1 ファイル。asciidoctor があれば gen.py が一緒に作る)。**Web で見られる: https://hf355051012-ai.github.io/bfmem/spec.html**(GitHub Pages、master の `docs/`)|
 
 ## API
 
