@@ -273,13 +273,37 @@
       ]
     },
     {
+      "func": "op_faa32",
+      "summary": "相手の公開メモリの `ATOM_OFF + 8 * 300` からの 4 バイトの語 64 個のうち `i & 63` 番めへ `bfm_faa32()` で 1 を足す(遅延の測定用)。",
+      "args": {"c": "接続", "i": "何回めか(語を決める)"},
+      "ret": "`bfm_faa32()` の戻り値。",
+      "pre": "c が使える接続であること。",
+      "notes": "元の値は捨てる。",
+      "flow": [
+        {"call": "bfm_faa32(c, ATOM_OFF + 8 * 300 + (i & 63) * 4, 1, &o) を呼ぶ"},
+        {"return": "bfm_faa32() の戻り値"}
+      ]
+    },
+    {
+      "func": "op_cas32",
+      "summary": "相手の公開メモリの `ATOM_OFF + 8 * 400` からの 4 バイトの語 64 個のうち `i & 63` 番めへ `bfm_cas32()` で比較値 1・置き換え値 2 の CAS を出す(遅延の測定用)。",
+      "args": {"c": "接続", "i": "何回めか(語を決める)"},
+      "ret": "`bfm_cas32()` の戻り値。",
+      "pre": "c が使える接続であること。",
+      "notes": "語は 0 で埋まっているので CAS は外れる(値は変わらない)。元の値は捨てる。",
+      "flow": [
+        {"call": "bfm_cas32(c, ATOM_OFF + 8 * 400 + (i & 63) * 4, 1, 2, &o) を呼ぶ"},
+        {"return": "bfm_cas32() の戻り値"}
+      ]
+    },
+    {
       "func": "lat",
       "summary": "操作 fn を 1 個ずつ完了まで待つ形で n 回流し、1 回ごとの遅延の中央値・平均・最小・p99・p99.9 を表示する。先に `n / 10 + 100` 回を暖機として流す。",
       "args": {"c": "接続", "name": "表示する操作の名前", "fn": "流す操作(`op_write8` など)", "n": "測る回数"},
       "ret": "なし",
       "pre": "c が使える接続であること。",
       "notes": "* n は `g_lat` の要素数(200000)に切り詰める。\n* 操作が 1 回でも失敗したら `g_ng` を 1 増やし、表示せずに戻る。\n* 測る間に `g_stop` が立つとループを抜け、測れた回数 m ぶんで並べ替えて表示する(1 回も測れなければ表示せずに戻る)。暖機の間は `g_stop` を見ない。",
-      "indirect": ["op_write8", "op_write64", "op_read8", "op_read64", "op_faa", "op_cas"],
+      "indirect": ["op_write8", "op_write64", "op_read8", "op_read64", "op_faa", "op_cas", "op_faa32", "op_cas32"],
       "flow": [
         {"if": "n > g_lat の要素数 ?", "then": [{"do": "n = g_lat の要素数"}]},
         {"do": "i = 0"},
@@ -311,11 +335,11 @@
     },
     {
       "func": "run_client",
-      "summary": "掛け側の本体。相手へ接続し、手元に公開メモリのデータ領域の模型を持って、次の検査をして結果を表示する。\n\n* [1] いろいろな長さ・半端な位置の read と 64KiB まとめての read\n* [2] inline に収まる長さと収まらない長さの write と読み戻し\n* [3] `bfm_write_post()` を 5000 回と `bfm_flush()` の後の読み戻し\n* [4] FAA と CAS の元の値の並び、相手のメモリの語 1 がホスト順の 1000 であること\n* [5] データ領域全体の読み戻し\n* [6] 遅延(`lat()`)と `bfm_write_post()` の速さ、その後の読み戻し(ここまで NG が無いときだけ)\n* [7] 公開メモリの外の read を相手が断ること(oob のときだけ)\n\n最後に模型の hash を表示して接続を返す。",
+      "summary": "掛け側の本体。相手へ接続し、手元に公開メモリのデータ領域の模型を持って、次の検査をして結果を表示する。\n\n* [1] いろいろな長さ・半端な位置の read と 64KiB まとめての read\n* [2] inline に収まる長さと収まらない長さの write と読み戻し\n* [3] `bfm_write_post()` を 5000 回と `bfm_flush()` の後の読み戻し\n* [4] FAA と CAS の元の値の並び、相手のメモリの語 1 がホスト順の 1000 であること\n* [4b] 4 バイトの FAA と CAS(語 2 の前半 +16 と後半 +20)の元の値の並び、0 への折り返し、相手のメモリのバイト順、隣の語 1 が変わらないこと\n* [5] データ領域全体の読み戻し\n* [6] 遅延(`lat()`)と `bfm_write_post()` の速さ、その後の読み戻し(ここまで NG が無いときだけ)\n* [7] 公開メモリの外の read を相手が断ること(oob のときだけ)\n\n最後に模型の hash を表示して接続を返す。",
       "args": {"ip": "相手の IPv4 アドレス", "mac": "相手の MAC アドレス", "port": "接続の番号", "iters": "[6] の遅延の測定の回数", "oob": "0 以外なら [7] を行う"},
       "ret": "0: すべて OK。1: 接続できない、相手の公開メモリが小さい、または NG があった。",
       "pre": "`bfm_init()` が済んでいること。相手が server で、公開メモリを取り決めどおりに埋めていること。",
-      "notes": "* [7] は接続の構造体の `rlen` を一時的に書き換えて手元の範囲検査をすり抜ける。相手が断ると接続はエラーになる。\n* [4] で相手の atomic 語 0・1 を書き換える。[6] の測定はデータ領域の 64 か所と atomic 語 100〜163・200〜263 に触る。\n* 検査が NG でも次の検査へ進む([6] だけは飛ばす)。",
+      "notes": "* [7] は接続の構造体の `rlen` を一時的に書き換えて手元の範囲検査をすり抜ける。相手が断ると接続はエラーになる。\n* [4] で相手の atomic 語 0・1 を、[4b] で語 2 を書き換える。[6] の測定はデータ領域の 64 か所と atomic 語 100〜163・200〜263(8 バイト)、300〜331・400〜431(4 バイトの語として)に触る。\n* 検査が NG でも次の検査へ進む([6] だけは飛ばす)。",
       "flow": [
         {"call": "c = bfm_connect(ip, mac, port, 0) を呼ぶ"},
         {"if": "c == NULL ?", "then": [{"return": "1"}]},
@@ -422,6 +446,44 @@
         {"do": "v = 0"},
         {"call": "bfm_read(c, ATOM_OFF + 8, &v, 8) を呼ぶ"},
         {"call": "check(\"[4] 相手のメモリの語 1 がホスト順の 1000\", bfm_read() == BFM_OK && v == 1000) を呼ぶ"},
+        {"do": "[4b] ok = 1、old32 = 0、i = 0"},
+        {"while": "i < 1000 && ok ?", "body": [
+          {"call": "bfm_faa32(c, ATOM_OFF + 16, 1, &old32) を呼ぶ"},
+          {"if": "bfm_faa32() != BFM_OK、または old32 != i ?", "then": [{"do": "ok = 0"}]},
+          {"do": "i++"}
+        ]},
+        {"if": "ok ?", "then": [
+          {"call": "bfm_faa32(c, ATOM_OFF + 16, 0xfffffc18, &old32) を呼ぶ(0 に折り返す)"},
+          {"if": "bfm_faa32() != BFM_OK、または old32 != 1000 ?", "then": [{"do": "ok = 0"}]}
+        ]},
+        {"if": "ok ?", "then": [
+          {"call": "bfm_faa32(c, ATOM_OFF + 16, 0x01020304, &old32) を呼ぶ"},
+          {"if": "bfm_faa32() != BFM_OK、または old32 != 0 ?", "then": [{"do": "ok = 0"}]}
+        ]},
+        {"if": "ok ?", "then": [
+          {"call": "bfm_faa32(c, ATOM_OFF + 16, 0, &old32) を呼ぶ"},
+          {"if": "bfm_faa32() != BFM_OK、または old32 != 0x01020304 ?", "then": [{"do": "ok = 0"}]}
+        ]},
+        {"call": "check(\"[4b] FAA32 ...\", ok) を呼ぶ"},
+        {"do": "ok = 1、i = 0"},
+        {"while": "i < 1000 && ok ?", "body": [
+          {"call": "bfm_cas32(c, ATOM_OFF + 20, i, i + 1, &old32) を呼ぶ"},
+          {"if": "bfm_cas32() != BFM_OK、または old32 != i ?", "then": [{"do": "ok = 0"}]},
+          {"do": "i++"}
+        ]},
+        {"if": "ok ?", "then": [
+          {"call": "bfm_cas32(c, ATOM_OFF + 20, 7, 99, &old32) を呼ぶ"},
+          {"if": "bfm_cas32() != BFM_OK、または old32 != 1000 ?", "then": [{"do": "ok = 0"}]}
+        ]},
+        {"if": "ok ?", "then": [
+          {"call": "bfm_cas32(c, ATOM_OFF + 20, 1000, 0x0a0b0c0d, &old32) を呼ぶ"},
+          {"if": "bfm_cas32() != BFM_OK、または old32 != 1000 ?", "then": [{"do": "ok = 0"}]}
+        ]},
+        {"call": "check(\"[4b] CAS32 ...\", ok) を呼ぶ"},
+        {"call": "rc = bfm_read(c, ATOM_OFF + 16, b, 8) を呼び、8 バイトを表示"},
+        {"call": "check(\"[4b] 相手のメモリがホスト順\", rc == BFM_OK && b が 04 03 02 01 0d 0c 0b 0a) を呼ぶ"},
+        {"call": "bfm_read(c, ATOM_OFF + 8, &v, 8) を呼ぶ"},
+        {"call": "check(\"[4b] 隣の 8 バイトの語 1 が 1000 のまま\", bfm_read() == BFM_OK && v == 1000) を呼ぶ"},
         {"call": "[5] rc = bfm_read(c, 0, buf, DATA_BYTES) を呼ぶ"},
         {"call": "check(\"[5] ...\", rc == BFM_OK && buf と g_model が一致) を呼ぶ"},
         {"if": "[6] !g_stop && g_ng == 0 ?", "then": [
@@ -436,6 +498,8 @@
           {"call": "lat(c, \"read 64B\", op_read64, iters) を呼ぶ"},
           {"call": "lat(c, \"FAA\", op_faa, iters) を呼ぶ"},
           {"call": "lat(c, \"CAS\", op_cas, iters) を呼ぶ"},
+          {"call": "lat(c, \"FAA32\", op_faa32, iters) を呼ぶ"},
+          {"call": "lat(c, \"CAS32\", op_cas32, iters) を呼ぶ"},
           {"do": "n = 200000"},
           {"call": "t0 = now_ns() を呼ぶ"},
           {"do": "i = 0"},

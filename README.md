@@ -51,6 +51,8 @@ bfm_flush(c);                                 /* bfm_write_post() の分を待�
 bfm_read(c, off, dst, len);
 bfm_cas(c, off, expect, desired, &old);       /* 8 バイト、off は 8 の倍数 */
 bfm_faa(c, off, add, &old);
+bfm_cas32(c, off, expect, desired, &old32);   /* 4 バイト、off は 4 の倍数(拡張 atomic)*/
+bfm_faa32(c, off, add, &old32);
 
 bfm_poll();                                   /* ときどき呼ぶ(切断要求・FW のページ要求)*/
 bfm_disconnect(c);
@@ -173,6 +175,19 @@ REP が落ちたら掛け側が REQ を送り直し、受け側は確立済み�
 両端とも bfmem なので、相手のメモリの中の atomic の語は常にホスト順(リトルエンディアン)になる。
 **CQE に入って返る元の値だけは、この設定によらずビッグエンディアン**なので、`bfm_cas()` / `bfm_faa()` が直して返す。
 
+4 バイトの `bfm_cas32()` / `bfm_faa32()` は mlx5 の拡張 atomic(masked atomic。命令 0x14 / 0x15、ctrl の
+opmod = 0x08 で大きさ 4 バイト)で出す。IB の規格には無いので、相手も mlx5 の bfmem であることが前提。
+両端の装置が拡張 atomic の 4 バイトに対応していること(atomic の能力の `atomic_ops` の bit2・3 と
+`atomic_size_qp` の bit2。ConnectX-4 Lx は 0xf / 0x3c で対応。無ければ `BFM_E_PARAM`)。
+
+| | 8 バイト | 4 バイト |
+|---|---|---|
+| 相手のメモリの語 | ホスト順 | **ホスト順**(8 バイト用の設定が効く)|
+| CQE で返る元の値 | ビッグエンディアン | ビッグエンディアン |
+| 中継バッファで返る元の値(`g_bfm_scatter_cqe` = 0)| ホスト順 | **ビッグエンディアン** |
+
+どれも関数の中で直してホスト順の数で返す(ConnectX-4 Lx の実機で確かめた。2026-11-07)。
+
 ### ConnectX-7 への備え(実機では未確認)
 
 | 違い | 対応 |
@@ -273,8 +288,9 @@ sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 client 192.168.101.21 <�
 | [2] | write 1〜220 バイト(inline)と 221〜8,220 バイト(中継バッファ)、毎回読み戻す |
 | [3] | write_post 1〜32 バイト x 5,000 + flush の後に全体を読み戻す |
 | [4] | FAA +1 x 1,000(元の値の並び)、+2^32、CAS 0→1,000、外れる比較値。相手のメモリの語がホスト順であること |
+| [4b] | 4 バイトの FAA +1 x 1,000、0 への折り返し、CAS 0→1,000、外れる比較値。相手のメモリのバイト順、隣の語が変わらないこと |
 | [5] | データ領域を読み戻して模型と比べる |
-| [6] | 遅延(write / read 8・64 バイト、FAA、CAS)と write_post の速さ。測った後にもう一度読み戻して比べる |
+| [6] | 遅延(write / read 8・64 バイト、FAA、CAS、FAA32、CAS32)と write_post の速さ。測った後にもう一度読み戻して比べる |
 | 最後 | 模型の hash を出す(相手が切断のときに出す hash と同じであること)|
 | [7] | (`-x`)公開メモリの外を読むと相手の NIC が REMOTE_ACCESS で断る |
 
@@ -293,6 +309,9 @@ sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 client 192.168.101.21 <�
     なることも PAT の一覧で確かめた。
 - **CQE に入って返る atomic の元の値は、HCA の設定によらずビッグエンディアン**(メモリへ書かせた値は設定どおり)。
   `bfm_cas()` / `bfm_faa()` はこれを直して返す。ConnectX-7 でも同じかは未確認(試験の `[4]` で分かる)。
+- **4 バイトの CAS / FAA(拡張 atomic)を両方向・通常 / `-S` / `-B` / `-x` で通した**(2026-11-07)。
+  中継バッファで返る 4 バイトの元の値だけがビッグエンディアンで、最初は `-S` で NG になった。
+  遅延は 8 バイトと同じ(中央値 FAA32 1,623ns / CAS32 1,662ns、8 バイトは 1,638 / 1,686ns)。
 - **相手からの read / atomic の遅延は、受け側の CPU の C-state で約 300ns 変わる。** `g_bfm_cpu_awake`(既定 1)で
   Linux では対策した(FAA 2,150 → 1,760〜1,930ns)。hugepage(IOMMU の変換を減らす)は効かなかった。
 - まだ: VxWorks、ConnectX-7。`write_post` は BlueFlame なしのほうが速い

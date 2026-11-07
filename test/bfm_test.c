@@ -166,6 +166,8 @@ static int op_read8(bfm_conn_t *c, uint32_t i) { uint8_t d[8]; return bfm_read(c
 static int op_read64(bfm_conn_t *c, uint32_t i) { uint8_t d[64]; return bfm_read(c, (i & 63u) * 64u, d, 64); }
 static int op_faa(bfm_conn_t *c, uint32_t i) { uint64_t o; return bfm_faa(c, ATOM_OFF + 8u * 100u + (i & 63u) * 8u, 1, &o); }
 static int op_cas(bfm_conn_t *c, uint32_t i) { uint64_t o; return bfm_cas(c, ATOM_OFF + 8u * 200u + (i & 63u) * 8u, 1, 2, &o); }
+static int op_faa32(bfm_conn_t *c, uint32_t i) { uint32_t o; return bfm_faa32(c, ATOM_OFF + 8u * 300u + (i & 63u) * 4u, 1, &o); }
+static int op_cas32(bfm_conn_t *c, uint32_t i) { uint32_t o; return bfm_cas32(c, ATOM_OFF + 8u * 400u + (i & 63u) * 4u, 1, 2, &o); }
 
 static void lat(bfm_conn_t *c, const char *name, op_fn fn, uint32_t n)
 {
@@ -266,6 +268,35 @@ static int run_client(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t
         check("[4] 相手のメモリの語 1 がホスト順の 1000",
               bfm_read(c, ATOM_OFF + 8u, &v, 8) == BFM_OK && v == 1000u);
     }
+    /* [4b] 4 バイトの atomic(語 2 の前半 = +16 を FAA、後半 = +20 を CAS)。
+     *     FAA +1 x1000、2^32 - 1000 を足して 0 に折り返すこと(隣へ桁が上がらない)、
+     *     CAS 0 -> 1000、外れる比較値で変わらないこと、相手のメモリのバイト順。 */
+    {
+        int ok = 1;
+        uint32_t old = 0;
+        for (uint32_t i = 0; i < 1000u && ok; i++)
+            if (bfm_faa32(c, ATOM_OFF + 16u, 1, &old) != BFM_OK || old != i) ok = 0;
+        if (ok && (bfm_faa32(c, ATOM_OFF + 16u, 0xfffffc18u, &old) != BFM_OK || old != 1000u)) ok = 0;
+        if (ok && (bfm_faa32(c, ATOM_OFF + 16u, 0x01020304u, &old) != BFM_OK || old != 0)) ok = 0;
+        if (ok && (bfm_faa32(c, ATOM_OFF + 16u, 0, &old) != BFM_OK || old != 0x01020304u)) ok = 0;
+        check("[4b] FAA32 +1 x1000、0 への折り返し(元の値の並び)", ok);
+        ok = 1;
+        for (uint32_t i = 0; i < 1000u && ok; i++)
+            if (bfm_cas32(c, ATOM_OFF + 20u, i, i + 1u, &old) != BFM_OK || old != i) ok = 0;
+        if (ok && (bfm_cas32(c, ATOM_OFF + 20u, 7, 99, &old) != BFM_OK || old != 1000u)) ok = 0;
+        if (ok && (bfm_cas32(c, ATOM_OFF + 20u, 1000, 0x0a0b0c0du, &old) != BFM_OK || old != 1000u)) ok = 0;
+        check("[4b] CAS32 0->1000(毎回成功)、外れる比較値で変わらない", ok);
+        uint8_t b[8] = {0};
+        uint64_t v = 0;
+        rc = bfm_read(c, ATOM_OFF + 16u, b, 8);
+        printf("client: 相手のメモリ +16..+23: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+               b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+        check("[4b] 相手のメモリがホスト順(04 03 02 01 0d 0c 0b 0a)",
+              rc == BFM_OK && b[0] == 4 && b[1] == 3 && b[2] == 2 && b[3] == 1 &&
+              b[4] == 0x0d && b[5] == 0x0c && b[6] == 0x0b && b[7] == 0x0a);
+        check("[4b] 隣の 8 バイトの語 1 が 1000 のまま",
+              bfm_read(c, ATOM_OFF + 8u, &v, 8) == BFM_OK && v == 1000u);
+    }
     /* [5] 全体を読み戻して模型と突き合わせる。 */
     {
         rc = bfm_read(c, 0, buf, DATA_BYTES);
@@ -280,6 +311,8 @@ static int run_client(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t
         lat(c, "read 64B", op_read64, iters);
         lat(c, "FAA", op_faa, iters);
         lat(c, "CAS", op_cas, iters);
+        lat(c, "FAA32", op_faa32, iters);
+        lat(c, "CAS32", op_cas32, iters);
         const uint32_t n = 200000u;
         const uint64_t t0 = now_ns();
         for (uint32_t i = 0; i < n; i++)

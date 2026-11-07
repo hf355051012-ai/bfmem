@@ -317,3 +317,13 @@ sudo build/bfmem_test -d 0000:b3:00.0 -i 192.168.101.21 -n 10000 bench 192.168.1
   遅延(中央値): write 8B 1,335ns / read 8B 1,644ns / FAA 1,638ns(BlueFlame なしでは 1,702 / 1,961 / 1,952ns)。
 - Precision → OptiPlex: 通常 / `-x` とも NG 0、hash 一致。bench(各 1 万回)は 8KiB 以上で約 2.89 GB/s と前と同じ。
 - 終わった後、両方とも mlx5_core に戻した(Precision の `ens1f0np0` には 192.168.101.21 を付け直した)。
+
+記録(2026-11-07、4 バイトの CAS / FAA を足した後): **合格。**
+- client の `[4b]`(`bfm_faa32()` / `bfm_cas32()`)を、OptiPlex → Precision で通常 / `-S` / `-B` / `-x`、
+  Precision → OptiPlex で通常 / `-S` の計 6 通り流して全部 OK、hash は両側で `e92cdeb4e6b0c81d`。
+- 相手のメモリの語 2 は `04 03 02 01 0d 0c 0b 0a` = ホスト順(8 バイト用のホスト順の設定が 4 バイトにも効く)。
+- **最初は `-S` だけ `[4b]` が NG。** 中継バッファへ返る 4 バイトの元の値が `00 00 00 01`(ビッグエンディアン)
+  だった(8 バイトはホスト順で返る)。CQE で返る値はどちらもビッグエンディアン。`atomic32_result()` を直した。
+- 遅延(中央値、OptiPlex → Precision): FAA32 1,623ns / CAS32 1,662ns(同じ回の 8 バイトは 1,638 / 1,686ns)。
+  `-S` では 1,779 / 1,853ns、`-B` では 1,976 / 2,035ns。
+- 終わった後、両方とも mlx5_core に戻した(Precision の `ens1f0np0` には 192.168.101.21 を付け直した)。

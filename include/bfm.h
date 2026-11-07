@@ -14,6 +14,8 @@
  *   bfm_read(c, off, dst, len);
  *   bfm_cas(c, off, expect, desired, &old);
  *   bfm_faa(c, off, add, &old);
+ *   bfm_cas32(c, off, expect, desired, &old32);   // 4 バイト(拡張 atomic)
+ *   bfm_faa32(c, off, add, &old32);
  *   bfm_poll();                         // ときどき呼ぶ(相手からの切断と FW のページ要求に答える)
  *   bfm_disconnect(c);
  *   bfm_shutdown();
@@ -98,6 +100,12 @@ int bfm_cas(bfm_conn_t *c, uint64_t off, uint64_t expect, uint64_t desired, uint
 
 /* 8 バイトの fetch-and-add。off は 8 の倍数。*old に足す前の値が入る。 */
 int bfm_faa(bfm_conn_t *c, uint64_t off, uint64_t add, uint64_t *old);
+
+/* 4 バイトの compare-and-swap。off は 4 の倍数。*old に元の値が入る。 */
+int bfm_cas32(bfm_conn_t *c, uint64_t off, uint32_t expect, uint32_t desired, uint32_t *old);
+
+/* 4 バイトの fetch-and-add。off は 4 の倍数。*old に足す前の値が入る。 */
+int bfm_faa32(bfm_conn_t *c, uint64_t off, uint32_t add, uint32_t *old);
 
 /* ---- 情報 ---- */
 

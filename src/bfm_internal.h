@@ -91,6 +91,9 @@
 #define MLX5_OPCODE_RDMA_READ    0x10u
 #define MLX5_OPCODE_ATOMIC_CS    0x11u
 #define MLX5_OPCODE_ATOMIC_FA    0x12u
+#define MLX5_OPCODE_ATOMIC_MASKED_CS 0x14u          /* 拡張 atomic(大きさは ctrl の opmod で指定)*/
+#define MLX5_OPCODE_ATOMIC_MASKED_FA 0x15u
+#define MLX5_OPMOD_EXT_ATOMIC(log_sz) (0x08u | ((log_sz) - 2u))   /* 4 バイト = 0x08 */
 #define MLX5_WQE_CTRL_CQ_UPDATE  0x08u
 #define MLX5_SEND_WQE_BB         64u
 #define MLX5_BF_OFFSET           0x800u   /* UAR ページの中の BlueFlame の窓(ドアベルも同じ位置)*/

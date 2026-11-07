@@ -42,6 +42,8 @@ bfmem の関数のうち、外から使うもの。関数名を押すと、そ�
 |<<src_bfm_ops-bfm_read,`bfm_read()`>> |読む。32 バイトまでは応答が CQE に入るので、dst へ CPU で写す。
 |<<src_bfm_ops-bfm_cas,`bfm_cas()`>> |8 バイトの compare-and-swap。off は 8 の倍数。`*old` に元の値が入る (`*old` == expect なら置き換わった)。
 |<<src_bfm_ops-bfm_faa,`bfm_faa()`>> |8 バイトの fetch-and-add。off は 8 の倍数。`*old` に足す前の値が入る。
+|<<src_bfm_ops-bfm_cas32,`bfm_cas32()`>> |4 バイトの compare-and-swap。off は 4 の倍数。`*old` に元の値が入る。
+|<<src_bfm_ops-bfm_faa32,`bfm_faa32()`>> |4 バイトの fetch-and-add。off は 4 の倍数。`*old` に足す前の値が入る。
 2+h|情報
 |<<src_bfm_ops-bfm_inline_max,`bfm_inline_max()`>> |WQE に埋め込める write の最大バイト数。
 |<<src_bfm_ops-bfm_bf_active,`bfm_bf_active()`>> |1 = BlueFlame で WQE を送っている(WC の窓が取れた)。
@@ -3615,12 +3617,38 @@ image::flow_src_bfm_ops-atomic_result.drawio.svg[atomic_result() のフロー図
 .atomic_result() の関係図
 image::call_src_bfm_ops-atomic_result.drawio.svg[atomic_result() の関係図]
 
+[[src_bfm_ops-atomic32_result]]
+=== `atomic32_result()`
+[cols="1,5",options="autowidth"]
+.atomic32_result()
+|===
+|関数名 |`atomic32_result`(`src/bfm_ops.c` 356 行目)
+|宣言 |`static uint32_t atomic32_result(struct bfm_conn *c)`
+|処理内容 a|4 バイトの atomic の元の値を数にする。応答が CQE に入っていればそこから、そうでなければ中継バッファから、`bfm_rd32be()` でビッグエンディアンとして読む。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct bfm_conn *` !`c` !atomic を終えた接続
+!===
+|戻り値 a|atomic の元の値(ホスト順)。
+|前提条件 a|`c` の直前の完了が、この 4 バイトの atomic の完了であること。
+|注意事項 a|4 バイトの元の値は、CQE に入っても中継バッファへ書かれてもビッグエンディアン(ConnectX-4 Lx で確認)。ホスト順の設定(`atomic_req_8B_endianness_mode`)は、4 バイトでは相手のメモリの更新にだけ効き、返る値には効かない(8 バイトの中継バッファとは違う)。
+|使用関数 a|* `bfm_rd32be()`(外部)
+|===
+
+.atomic32_result() のフロー図
+image::flow_src_bfm_ops-atomic32_result.drawio.svg[atomic32_result() のフロー図]
+
+.atomic32_result() の関係図
+image::call_src_bfm_ops-atomic32_result.drawio.svg[atomic32_result() の関係図]
+
 [[src_bfm_ops-atomic_op]]
 === `atomic_op()`
 [cols="1,5",options="autowidth"]
 .atomic_op()
 |===
-|関数名 |`atomic_op`(`src/bfm_ops.c` 353 行目)
+|関数名 |`atomic_op`(`src/bfm_ops.c` 362 行目)
 |宣言 |`static int atomic_op(struct bfm_conn *c, uint32_t opcode, uint64_t off, uint64_t swap_add, uint64_t cmp, uint64_t *old)`
 |処理内容 a|8 バイトの atomic(CAS・FAA)を 1 個出して完了を待ち、元の値を `*old` に返す。WQE は制御セグメント・remote address セグメント・atomic セグメント(byte 32 に `swap_add`、byte 40 に `cmp`)・元の値を受けるデータセグメント(中継バッファ)の 64 バイト。
 |引数 a|
@@ -3655,12 +3683,55 @@ image::flow_src_bfm_ops-atomic_op.drawio.svg[atomic_op() のフロー図]
 .atomic_op() の関係図
 image::call_src_bfm_ops-atomic_op.drawio.svg[atomic_op() の関係図]
 
+[[src_bfm_ops-atomic32_op]]
+=== `atomic32_op()`
+[cols="1,5",options="autowidth"]
+.atomic32_op()
+|===
+|関数名 |`atomic32_op`(`src/bfm_ops.c` 388 行目)
+|宣言 |`static int atomic32_op(struct bfm_conn *c, uint32_t opcode, uint64_t off, uint32_t swap_add, uint32_t cmp, uint32_t *old)`
+|処理内容 a|4 バイトの atomic(拡張 atomic = masked atomic。IB の規格には無い mlx5 の拡張)を 1 個出して完了を待ち、元の値を `*old` に返す。WQE は制御セグメント(opmod に大きさ `MLX5_OPMOD_EXT_ATOMIC(2)` = 0x08)・remote address セグメント・atomic セグメント 16 バイト・元の値を受けるデータセグメント(中継バッファ、4 バイト)の 64 バイト。atomic セグメントは、CAS なら swap・compare・swap_mask・compare_mask(mask は全ビット)、FAA なら add・field_boundary(0 = 32 ビットで 1 つの数)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`struct bfm_conn *` !`c` !操作する接続
+!`uint32_t` !`opcode` !`MLX5_OPCODE_ATOMIC_MASKED_CS` か `MLX5_OPCODE_ATOMIC_MASKED_FA`
+!`uint64_t` !`off` !相手の公開メモリの先頭からのオフセット
+!`uint32_t` !`swap_add` !CAS なら置き換える値、FAA なら足す値
+!`uint32_t` !`cmp` !CAS なら比べる値(FAA では使わない)
+!`uint32_t *` !`old` !元の値を入れる先(NULL なら返さない)
+!===
+|戻り値 a|`BFM_OK`: 終わった。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗。`BFM_E_PARAM`: 相手のアドレス(`raddr + off`)が 4 の倍数でない、または自分の装置が拡張 atomic の 4 バイトに対応していない(atomic の能力の `atomic_ops` の bit2・3 と `atomic_size_qp` の bit2)。そのほか `post()` / `wait_done()` の戻り値。
+|前提条件 a|`bfm_write()` と同じ。相手の装置も拡張 atomic の 4 バイトに対応し、QP の `atomic_mode` が 3 以上であること(bfmem どうしなら `setup_atomic_caps()` がそう決める)。
+|注意事項 a|* 失敗したときは `*old` を書かない。
+* 相手のメモリの語はホスト順(リトルエンディアン)で更新される(ConnectX-4 Lx で確認)。
+* 相手が対応していないと、エラー完了で接続が使えなくなる。
+|使用関数 a|* <<src_bfm_ops-check_range,`check_range()`>>
+* `memset()`(外部)
+* <<src_bfm_ops-build_ctrl,`build_ctrl()`>>
+* <<src_bfm_ops-put32,`put32()`>>
+* `MLX5_OPMOD_EXT_ATOMIC()`(外部)
+* <<src_bfm_ops-build_raddr,`build_raddr()`>>
+* <<src_bfm_ops-build_dseg,`build_dseg()`>>
+* `bfm_dma_addr()`(外部)
+* <<src_bfm_ops-post,`post()`>>
+* <<src_bfm_ops-wait_done,`wait_done()`>>
+* <<src_bfm_ops-atomic32_result,`atomic32_result()`>>
+|===
+
+.atomic32_op() のフロー図
+image::flow_src_bfm_ops-atomic32_op.drawio.svg[atomic32_op() のフロー図]
+
+.atomic32_op() の関係図
+image::call_src_bfm_ops-atomic32_op.drawio.svg[atomic32_op() の関係図]
+
 [[src_bfm_ops-bfm_cas]]
 === `bfm_cas()`
 [cols="1,5",options="autowidth"]
 .bfm_cas()
 |===
-|関数名 |`bfm_cas`(`src/bfm_ops.c` 372 行目)
+|関数名 |`bfm_cas`(`src/bfm_ops.c` 413 行目)
 |宣言 |`int bfm_cas(bfm_conn_t *c, uint64_t off, uint64_t expect, uint64_t desired, uint64_t *old)`
 |処理内容 a|相手の公開メモリ + `off` の 8 バイトに compare-and-swap を行う。値が `expect` なら `desired` に置き換え、元の値を `*old` に返す。
 |引数 a|
@@ -3690,7 +3761,7 @@ image::call_src_bfm_ops-bfm_cas.drawio.svg[bfm_cas() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_faa()
 |===
-|関数名 |`bfm_faa`(`src/bfm_ops.c` 377 行目)
+|関数名 |`bfm_faa`(`src/bfm_ops.c` 418 行目)
 |宣言 |`int bfm_faa(bfm_conn_t *c, uint64_t off, uint64_t add, uint64_t *old)`
 |処理内容 a|相手の公開メモリ + `off` の 8 バイトに fetch-and-add を行い、足す前の値を `*old` に返す。
 |引数 a|
@@ -3714,12 +3785,73 @@ image::flow_src_bfm_ops-bfm_faa.drawio.svg[bfm_faa() のフロー図]
 .bfm_faa() の関係図
 image::call_src_bfm_ops-bfm_faa.drawio.svg[bfm_faa() の関係図]
 
+[[src_bfm_ops-bfm_cas32]]
+=== `bfm_cas32()`
+[cols="1,5",options="autowidth"]
+.bfm_cas32()
+|===
+|関数名 |`bfm_cas32`(`src/bfm_ops.c` 423 行目)
+|宣言 |`int bfm_cas32(bfm_conn_t *c, uint64_t off, uint32_t expect, uint32_t desired, uint32_t *old)`
+|処理内容 a|相手の公開メモリ + `off` の 4 バイトに compare-and-swap を行う。値が `expect` なら `desired` に置き換え、元の値を `*old` に返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_conn_t *` !`c` !操作する接続
+!`uint64_t` !`off` !相手の公開メモリの先頭からのオフセット(4 の倍数)
+!`uint32_t` !`expect` !比べる値
+!`uint32_t` !`desired` !置き換える値
+!`uint32_t *` !`old` !元の値を入れる先(NULL なら返さない)
+!===
+|戻り値 a|`atomic32_op()` の戻り値。
+|前提条件 a|`atomic32_op()` と同じ(両端の装置が拡張 atomic の 4 バイトに対応していること)。
+|注意事項 a|* `*old == expect` なら置き換わった。
+* 相手のメモリの語はホスト順。
+|使用関数 a|* <<src_bfm_ops-atomic32_op,`atomic32_op()`>>
+|===
+
+.bfm_cas32() のフロー図
+image::flow_src_bfm_ops-bfm_cas32.drawio.svg[bfm_cas32() のフロー図]
+
+.bfm_cas32() の関係図
+image::call_src_bfm_ops-bfm_cas32.drawio.svg[bfm_cas32() の関係図]
+
+[[src_bfm_ops-bfm_faa32]]
+=== `bfm_faa32()`
+[cols="1,5",options="autowidth"]
+.bfm_faa32()
+|===
+|関数名 |`bfm_faa32`(`src/bfm_ops.c` 428 行目)
+|宣言 |`int bfm_faa32(bfm_conn_t *c, uint64_t off, uint32_t add, uint32_t *old)`
+|処理内容 a|相手の公開メモリ + `off` の 4 バイトに fetch-and-add を行い、足す前の値を `*old` に返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_conn_t *` !`c` !操作する接続
+!`uint64_t` !`off` !相手の公開メモリの先頭からのオフセット(4 の倍数)
+!`uint32_t` !`add` !足す値
+!`uint32_t *` !`old` !足す前の値を入れる先(NULL なら返さない)
+!===
+|戻り値 a|`atomic32_op()` の戻り値。
+|前提条件 a|`atomic32_op()` と同じ。
+|注意事項 a|* 32 ビットで折り返す(隣の語へ桁は上がらない)。
+* 相手のメモリの語はホスト順。
+|使用関数 a|* <<src_bfm_ops-atomic32_op,`atomic32_op()`>>
+|===
+
+.bfm_faa32() のフロー図
+image::flow_src_bfm_ops-bfm_faa32.drawio.svg[bfm_faa32() のフロー図]
+
+.bfm_faa32() の関係図
+image::call_src_bfm_ops-bfm_faa32.drawio.svg[bfm_faa32() の関係図]
+
 [[src_bfm_ops-bfm_inline_max]]
 === `bfm_inline_max()`
 [cols="1,5",options="autowidth"]
 .bfm_inline_max()
 |===
-|関数名 |`bfm_inline_max`(`src/bfm_ops.c` 382 行目)
+|関数名 |`bfm_inline_max`(`src/bfm_ops.c` 433 行目)
 |宣言 |`uint32_t bfm_inline_max(void)`
 |処理内容 a|WQE に埋め込める write の最大バイト数(`INLINE_MAX` = `BFM_WQE_MAX` - 32 - 4)を返す。
 |引数 |なし
@@ -3740,7 +3872,7 @@ image::call_src_bfm_ops-bfm_inline_max.drawio.svg[bfm_inline_max() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_bf_active()
 |===
-|関数名 |`bfm_bf_active`(`src/bfm_ops.c` 387 行目)
+|関数名 |`bfm_bf_active`(`src/bfm_ops.c` 438 行目)
 |宣言 |`int bfm_bf_active(const bfm_conn_t *c)`
 |処理内容 a|接続が BlueFlame で WQE を送っている(WC の窓が取れた)かを返す。
 |引数 a|
@@ -3766,7 +3898,7 @@ image::call_src_bfm_ops-bfm_bf_active.drawio.svg[bfm_bf_active() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_is_up()
 |===
-|関数名 |`bfm_is_up`(`src/bfm_ops.c` 392 行目)
+|関数名 |`bfm_is_up`(`src/bfm_ops.c` 443 行目)
 |宣言 |`int bfm_is_up(const bfm_conn_t *c)`
 |処理内容 a|接続が使えるかを返す(`conn_usable()`)。
 |引数 a|
@@ -3792,7 +3924,7 @@ image::call_src_bfm_ops-bfm_is_up.drawio.svg[bfm_is_up() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_remote_size()
 |===
-|関数名 |`bfm_remote_size`(`src/bfm_ops.c` 397 行目)
+|関数名 |`bfm_remote_size`(`src/bfm_ops.c` 448 行目)
 |宣言 |`uint64_t bfm_remote_size(const bfm_conn_t *c)`
 |処理内容 a|相手の公開メモリの大きさ(`off` の上限)を返す。
 |引数 a|
@@ -3818,7 +3950,7 @@ image::call_src_bfm_ops-bfm_remote_size.drawio.svg[bfm_remote_size() の関係�
 [cols="1,5",options="autowidth"]
 .bfm_last_syndrome()
 |===
-|関数名 |`bfm_last_syndrome`(`src/bfm_ops.c` 402 行目)
+|関数名 |`bfm_last_syndrome`(`src/bfm_ops.c` 453 行目)
 |宣言 |`uint8_t bfm_last_syndrome(const bfm_conn_t *c)`
 |処理内容 a|直前のエラー完了の syndrome を返す。
 |引数 a|
@@ -3844,7 +3976,7 @@ image::call_src_bfm_ops-bfm_last_syndrome.drawio.svg[bfm_last_syndrome() の関�
 [cols="1,5",options="autowidth"]
 .bfm_strerror()
 |===
-|関数名 |`bfm_strerror`(`src/bfm_ops.c` 407 行目)
+|関数名 |`bfm_strerror`(`src/bfm_ops.c` 458 行目)
 |宣言 |`const char *bfm_strerror(int rc)`
 |処理内容 a|ライブラリの戻り値を、表示用の説明の文字列に直す。
 |引数 a|
@@ -5384,12 +5516,66 @@ image::flow_test_bfm_test-op_cas.drawio.svg[op_cas() のフロー図]
 .op_cas() の関係図
 image::call_test_bfm_test-op_cas.drawio.svg[op_cas() の関係図]
 
+[[test_bfm_test-op_faa32]]
+=== `op_faa32()`
+[cols="1,5",options="autowidth"]
+.op_faa32()
+|===
+|関数名 |`op_faa32`(`test/bfm_test.c` 169 行目)
+|宣言 |`static int op_faa32(bfm_conn_t *c, uint32_t i)`
+|処理内容 a|相手の公開メモリの `ATOM_OFF + 8 * 300` からの 4 バイトの語 64 個のうち `i & 63` 番めへ `bfm_faa32()` で 1 を足す(遅延の測定用)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_conn_t *` !`c` !接続
+!`uint32_t` !`i` !何回めか(語を決める)
+!===
+|戻り値 a|`bfm_faa32()` の戻り値。
+|前提条件 a|c が使える接続であること。
+|注意事項 a|元の値は捨てる。
+|使用関数 a|* <<src_bfm_ops-bfm_faa32,`bfm_faa32()`>>
+|===
+
+.op_faa32() のフロー図
+image::flow_test_bfm_test-op_faa32.drawio.svg[op_faa32() のフロー図]
+
+.op_faa32() の関係図
+image::call_test_bfm_test-op_faa32.drawio.svg[op_faa32() の関係図]
+
+[[test_bfm_test-op_cas32]]
+=== `op_cas32()`
+[cols="1,5",options="autowidth"]
+.op_cas32()
+|===
+|関数名 |`op_cas32`(`test/bfm_test.c` 170 行目)
+|宣言 |`static int op_cas32(bfm_conn_t *c, uint32_t i)`
+|処理内容 a|相手の公開メモリの `ATOM_OFF + 8 * 400` からの 4 バイトの語 64 個のうち `i & 63` 番めへ `bfm_cas32()` で比較値 1・置き換え値 2 の CAS を出す(遅延の測定用)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_conn_t *` !`c` !接続
+!`uint32_t` !`i` !何回めか(語を決める)
+!===
+|戻り値 a|`bfm_cas32()` の戻り値。
+|前提条件 a|c が使える接続であること。
+|注意事項 a|語は 0 で埋まっているので CAS は外れる(値は変わらない)。元の値は捨てる。
+|使用関数 a|* <<src_bfm_ops-bfm_cas32,`bfm_cas32()`>>
+|===
+
+.op_cas32() のフロー図
+image::flow_test_bfm_test-op_cas32.drawio.svg[op_cas32() のフロー図]
+
+.op_cas32() の関係図
+image::call_test_bfm_test-op_cas32.drawio.svg[op_cas32() の関係図]
+
 [[test_bfm_test-lat]]
 === `lat()`
 [cols="1,5",options="autowidth"]
 .lat()
 |===
-|関数名 |`lat`(`test/bfm_test.c` 170 行目)
+|関数名 |`lat`(`test/bfm_test.c` 172 行目)
 |宣言 |`static void lat(bfm_conn_t *c, const char *name, op_fn fn, uint32_t n)`
 |処理内容 a|操作 fn を 1 個ずつ完了まで待つ形で n 回流し、1 回ごとの遅延の中央値・平均・最小・p99・p99.9 を表示する。先に `n / 10 + 100` 回を暖機として流す。
 |引数 a|
@@ -5415,6 +5601,8 @@ image::call_test_bfm_test-op_cas.drawio.svg[op_cas() の関係図]
 * `op_read64()`(関数ポインタ経由)
 * `op_faa()`(関数ポインタ経由)
 * `op_cas()`(関数ポインタ経由)
+* `op_faa32()`(関数ポインタ経由)
+* `op_cas32()`(関数ポインタ経由)
 |===
 
 .lat() のフロー図
@@ -5428,7 +5616,7 @@ image::call_test_bfm_test-lat.drawio.svg[lat() の関係図]
 [cols="1,5",options="autowidth"]
 .run_client()
 |===
-|関数名 |`run_client`(`test/bfm_test.c` 192 行目)
+|関数名 |`run_client`(`test/bfm_test.c` 194 行目)
 |宣言 |`static int run_client(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t iters, int oob)`
 |処理内容 a|掛け側の本体。相手へ接続し、手元に公開メモリのデータ領域の模型を持って、次の検査をして結果を表示する。
 
@@ -5436,6 +5624,7 @@ image::call_test_bfm_test-lat.drawio.svg[lat() の関係図]
 * [2] inline に収まる長さと収まらない長さの write と読み戻し
 * [3] `bfm_write_post()` を 5000 回と `bfm_flush()` の後の読み戻し
 * [4] FAA と CAS の元の値の並び、相手のメモリの語 1 がホスト順の 1000 であること
+* [4b] 4 バイトの FAA と CAS(語 2 の前半 +16 と後半 +20)の元の値の並び、0 への折り返し、相手のメモリのバイト順、隣の語 1 が変わらないこと
 * [5] データ領域全体の読み戻し
 * [6] 遅延(`lat()`)と `bfm_write_post()` の速さ、その後の読み戻し(ここまで NG が無いときだけ)
 * [7] 公開メモリの外の read を相手が断ること(oob のときだけ)
@@ -5454,7 +5643,7 @@ image::call_test_bfm_test-lat.drawio.svg[lat() の関係図]
 |戻り値 a|0: すべて OK。1: 接続できない、相手の公開メモリが小さい、または NG があった。
 |前提条件 a|`bfm_init()` が済んでいること。相手が server で、公開メモリを取り決めどおりに埋めていること。
 |注意事項 a|* [7] は接続の構造体の `rlen` を一時的に書き換えて手元の範囲検査をすり抜ける。相手が断ると接続はエラーになる。
-* [4] で相手の atomic 語 0・1 を書き換える。[6] の測定はデータ領域の 64 か所と atomic 語 100〜163・200〜263 に触る。
+* [4] で相手の atomic 語 0・1 を、[4b] で語 2 を書き換える。[6] の測定はデータ領域の 64 か所と atomic 語 100〜163・200〜263(8 バイト)、300〜331・400〜431(4 バイトの語として)に触る。
 * 検査が NG でも次の検査へ進む([6] だけは飛ばす)。
 |使用関数 a|* <<src_bfm_cm-bfm_connect,`bfm_connect()`>>
 * `printf()`(外部)
@@ -5474,6 +5663,8 @@ image::call_test_bfm_test-lat.drawio.svg[lat() の関係図]
 * <<src_bfm_ops-bfm_flush,`bfm_flush()`>>
 * <<src_bfm_ops-bfm_faa,`bfm_faa()`>>
 * <<src_bfm_ops-bfm_cas,`bfm_cas()`>>
+* <<src_bfm_ops-bfm_faa32,`bfm_faa32()`>>
+* <<src_bfm_ops-bfm_cas32,`bfm_cas32()`>>
 * <<test_bfm_test-lat,`lat()`>>
 * <<test_bfm_test-now_ns,`now_ns()`>>
 * <<test_bfm_test-fnv1a,`fnv1a()`>>
@@ -5490,7 +5681,7 @@ image::call_test_bfm_test-run_client.drawio.svg[run_client() の関係図]
 [cols="1,5",options="autowidth"]
 .rdtsc()
 |===
-|関数名 |`rdtsc`(`test/bfm_test.c` 321 行目)
+|関数名 |`rdtsc`(`test/bfm_test.c` 354 行目)
 |宣言 |`static uint64_t rdtsc(void)`
 |処理内容 a|`rdtsc` 命令で CPU のタイムスタンプカウンタを読む。
 |引数 |なし
@@ -5511,7 +5702,7 @@ image::call_test_bfm_test-rdtsc.drawio.svg[rdtsc() の関係図]
 [cols="1,5",options="autowidth"]
 .tsc_calibrate()
 |===
-|関数名 |`tsc_calibrate`(`test/bfm_test.c` 328 行目)
+|関数名 |`tsc_calibrate`(`test/bfm_test.c` 361 行目)
 |宣言 |`static void tsc_calibrate(void)`
 |処理内容 a|200ms 眠る前後の `now_ns()` と `rdtsc()` の差から、1 ナノ秒あたりのカウンタの数 `g_tsc_per_ns` を求める。
 |引数 |なし
@@ -5534,7 +5725,7 @@ image::call_test_bfm_test-tsc_calibrate.drawio.svg[tsc_calibrate() の関係図]
 [cols="1,5",options="autowidth"]
 .bench_one()
 |===
-|関数名 |`bench_one`(`test/bfm_test.c` 340 行目)
+|関数名 |`bench_one`(`test/bfm_test.c` 373 行目)
 |宣言 |`static int bench_one(bfm_conn_t *c, int is_read, uint32_t size, uint32_t qd, uint32_t n)`
 |処理内容 a|write(is_read = 0)か read(is_read = 1)を size バイトで n 回、常に qd 個を出しておく形で流し、IOPS・MB/s・平均遅延を 1 行表示する。1 回ごとに完了通知を求め(完了は出した順に来る)、出してから完了を拾うまでを遅延とする。相手のアドレスは size ずつずらし、相手の公開メモリの中の最大 1024 か所を回る。
 |引数 a|
@@ -5572,7 +5763,7 @@ image::call_test_bfm_test-bench_one.drawio.svg[bench_one() の関係図]
 [cols="1,5",options="autowidth"]
 .run_bench()
 |===
-|関数名 |`run_bench`(`test/bfm_test.c` 377 行目)
+|関数名 |`run_bench`(`test/bfm_test.c` 410 行目)
 |宣言 |`static int run_bench(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t n)`
 |処理内容 a|bench の本体。相手へ接続し、write と read のそれぞれについて、大きさ 4・8・32・64・128・256・512・8192・65536・262144 バイトと多重度 1・4・8・16 の組を `bench_one()` で n 回ずつ流す。
 |引数 a|
@@ -5609,7 +5800,7 @@ image::call_test_bfm_test-run_bench.drawio.svg[run_bench() の関係図]
 [cols="1,5",options="autowidth"]
 .main()
 |===
-|関数名 |`main`(`test/bfm_test.c` 403 行目)
+|関数名 |`main`(`test/bfm_test.c` 436 行目)
 |宣言 |`int main(int argc, char **argv)`
 |処理内容 a|オプションを読んで設定の変数を決め、シグナルの受け口を登録し、ライブラリを立ち上げて、引数の動き(server / client / bench / info)を行い、ライブラリを止める。
 
