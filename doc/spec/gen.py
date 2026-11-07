@@ -316,18 +316,44 @@ def step_kind(st):
     return ks[0]
 
 
-def expand_switch(st):
-    """switch を if の連なりに直す。cases: [{"case": "値", "body": [...]}, ..., {"default": true, "body": [...]}]"""
+def split_switch(st):
+    """switch を (case の比べ方の文と本体の組の並び, default の本体) に分ける。
+    cases: [{"case": "値", "body": [...]}, ..., {"default": true, "body": [...]}]"""
     expr = st["switch"]
     cases = st["cases"]
     default = [c for c in cases if c.get("default")]
-    normal = [c for c in cases if not c.get("default")]
-    tail = default[0]["body"] if default else []
-    for c in reversed(normal):
+    normal = []
+    for c in cases:
+        if c.get("default"):
+            continue
         if set(c) - {"case", "body"}:
             raise FlowError("switch の case に使えない項目: %r" % (c,))
-        tail = [{"if": "%s が %s ?" % (expr, c["case"]), "then": c["body"], "else": tail}]
-    return tail
+        normal.append(("%s が %s ?" % (expr, c["case"]), c.get("body", [])))
+    return normal, (default[0].get("body", []) if default else [])
+
+
+def split_elseif(st):
+    """if A {X} else if B {Y} ... else {Z} の連なりなら ([(A, X), (B, Y), ...], Z) を返す。連なりでなければ None。
+    (else が「if 1 つだけ」のときを連なりとみなす。はい / いいえ の名前を変えた if は対象にしない)"""
+    rows, cur = [], st
+    while True:
+        if "yes" in cur or "no" in cur:
+            return None
+        rows.append((cur["if"], cur.get("then", [])))
+        els = cur.get("else", [])
+        if len(els) == 1 and isinstance(els[0], dict) and step_kind(els[0]) == "if":
+            cur = els[0]
+            continue
+        return (rows, els) if len(rows) >= 2 else None
+
+
+def ladder_of(st, k):
+    """梯子の形に描く手順なら (比べる文と本体の組の並び, 最後の本体) を返す。"""
+    if k == "switch":
+        return split_switch(st)
+    if k == "if":
+        return split_elseif(st)
+    return None
 
 
 def node_size(kind, text):
@@ -390,9 +416,32 @@ class Layout:
             first = False
         return L, R, H
 
+    def ladder_geom(self, normal, default):
+        """梯子(switch・else if の連なり)の寸法。比べるひし形を縦に並べ、はいなら右の列へ本体を置く。
+        戻り値: (段ごとの (文, 本体, ひし形の高さ, 本体の高さ), 最後の本体, 本体の列の中心までの距離,
+                 合流の通路までの距離, 最後の本体の (L, R, H))"""
+        rows, Lmax, Rmax = [], 0, 0
+        for text, body in normal:
+            _, dh, _ = node_size("if", text)
+            Lb, Rb, Hb = self.measure(body) if body else (0, 0, 0)
+            Lmax, Rmax = max(Lmax, Lb), max(Rmax, Rb)
+            rows.append((text, body, dh, Hb))
+        bx_off = DIA_W / 2 + HGAP + max(Lmax, 40)
+        lane_off = bx_off + max(Rmax, 40) + HGAP / 2
+        return rows, default, bx_off, lane_off, (self.measure(default) if default else (0, 0, 0))
+
+    @staticmethod
+    def switch_row_h(dh, body, Hb):
+        """case 1 つぶんの高さ(本体はひし形の中央より VGAP 下から始める)。"""
+        return max(dh, dh / 2 + VGAP + Hb) if body else dh
+
     def measure1(self, st, k):
-        if k == "switch":
-            return self.measure(expand_switch(st))
+        lad = ladder_of(st, k)
+        if lad:
+            rows, default, bx_off, lane_off, (Ld, Rd, Hd) = self.ladder_geom(*lad)
+            H = sum(self.switch_row_h(dh, body, Hb) + VGAP for _, body, dh, Hb in rows)
+            H += (Hd + VGAP) if default else 0
+            return max(DIA_W / 2, Ld), max(lane_off + 10, Rd), H - VGAP + VGAP / 2
         if k in ("do", "call", "return", "label", "end"):
             w, h, _ = node_size(k, st[k] if isinstance(st[k], str) else "")
             return w / 2, w / 2, h
@@ -462,9 +511,38 @@ class Layout:
             outs, y = self.place1(st, k, cx, y, outs)
         return outs, y
 
+    def place_ladder(self, lad, cx, y, outs):
+        """switch・else if の連なりを梯子の形に置く(段が多くても横に広がらない)。
+        左の列: 比べるひし形を上から順に(いいえ = 下の段へ)。右の列: その段の本体(はい = 右へ)。
+        本体の終わりは右の合流の通路へ出て、下でまとまる。どれにも合わなければ左の列の下の最後の本体へ。"""
+        rows, default, bx_off, lane_off, _ = self.ladder_geom(*lad)
+        bx, lane = cx + bx_off, cx + lane_off
+        joined = []                                   # 本体から合流の通路へ出た線
+        cur_in, yy = outs, y
+        for text, body, dh, Hb in rows:
+            d = self.new_node("if", text, cx, yy)
+            self.connect(cur_in, d)
+            cy = yy + dh / 2
+            into = [(d["id"], [(cx + d["w"] / 2, cy), (bx, cy)], "はい")]
+            ob, bb = self.place(body, bx, cy + VGAP, into) if body else (into, cy)
+            for src, pts, lab in ob:
+                lx, ly = pts[-1]
+                joined.append((src, dedup(list(pts) + [(lx, ly + 8), (lane, ly + 8)]), lab))
+            cur_in = [(d["id"], [(cx, yy + dh)], "いいえ")]
+            yy += self.switch_row_h(dh, body, Hb) + VGAP
+        if default:
+            od, end_y = self.place(default, cx, yy, cur_in)
+        else:
+            od, end_y = cur_in, yy - VGAP
+        bottom = end_y + VGAP / 2
+        res = [(src, pts + [(pts[-1][0], bottom)], lab) for src, pts, lab in od]
+        res += [(src, pts + [(lane, bottom)], lab) for src, pts, lab in joined]
+        return res, bottom
+
     def place1(self, st, k, cx, y, outs):
-        if k == "switch":
-            return self.place(expand_switch(st), cx, y, outs)
+        lad = ladder_of(st, k)
+        if lad:
+            return self.place_ladder(lad, cx, y, outs)
         if k in ("do", "call", "label"):
             nd = self.new_node(k, st[k], cx, y)
             self.connect(outs, nd)
@@ -930,6 +1008,9 @@ bfmem(ConnectX の BlueFlame でノード間のメモリへ write / read / atomi
 ** 角の丸い箱 = 開始・終了・戻る(戻り値)、四角 = 処理、両側に線のある箱 = このソースの関数の呼び出し、
    ひし形 = 判断(下へ「はい」、右へ「いいえ」)、六角形 = 終わりの条件を持たない繰り返し、緑の楕円 = goto の行き先。
 ** ループのひし形から下が繰り返す本体。本体の終わりからは左側の線でひし形へ戻る。
+** switch と else if の連なりは梯子の形に描く: 判断のひし形を縦に並べ、*当てはまれば右(「はい」)* へ進んで
+   その処理、当てはまらなければ下(「いいえ」)の判断へ。各処理の終わりは右端の線でまとまって下へ続く。
+   どれにも当てはまらないときの処理(switch の default・最後の else)は、左の列のいちばん下。
 * *関係図* は、左がこの関数を呼ぶ関数、右がこの関数が呼ぶ関数。ソースを解析して作った。
 ** 白 = このソースの関数(下の小さい字は定義しているファイル)、灰色 = 外部の関数(C の標準ライブラリ・OS・コンパイラ組み込み)とバリアのマクロ、
    破線 = 関数ポインタ経由・OS から呼ばれるもの。

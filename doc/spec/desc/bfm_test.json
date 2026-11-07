@@ -653,17 +653,9 @@
                 {"do": "ret = 2"}
               ], "else": [
                 {"if": "bench ?", "then": [
-                  {"if": "iters != 0 ?", "then": [
-                    {"call": "ret = run_bench(ip, mac, port, iters) を呼ぶ"}
-                  ], "else": [
-                    {"call": "ret = run_bench(ip, mac, port, 100000) を呼ぶ"}
-                  ]}
+                  {"call": "ret = run_bench(ip, mac, port, iters ? iters : 100000) を呼ぶ"}
                 ], "else": [
-                  {"if": "iters != 0 ?", "then": [
-                    {"call": "ret = run_client(ip, mac, port, iters, oob) を呼ぶ"}
-                  ], "else": [
-                    {"call": "ret = run_client(ip, mac, port, 20000, oob) を呼ぶ"}
-                  ]}
+                  {"call": "ret = run_client(ip, mac, port, iters ? iters : 20000, oob) を呼ぶ"}
                 ]}
               ]}
             ]}
