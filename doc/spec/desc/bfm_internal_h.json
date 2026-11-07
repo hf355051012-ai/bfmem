@@ -1,0 +1,47 @@
+{
+  "file": "src/bfm_internal.h",
+  "summary": "ライブラリの中だけで使う定義(アプリケーションは `include/bfm.h` だけを見る)。装置の状態 `bfm_dev_t`(`g_bfm`)・接続 `struct bfm_conn`・ファイルどうしの間の関数の宣言・ログのマクロ(`BFM_LOG()` / `BFM_DBG()`)と、複数のコアから接続・切断・`bfm_poll()` を呼べるようにする鍵 `bfm_lock_t` を置く。鍵は x86-64 の `xchg` で取り、取れなければ `pause` しながら回って待つ `static inline` の関数で、OS の機能は使わない。接続をまたぐ状態(GSI・受けた REQ の待ち行列・接続の枠・FW のコマンド・EQ)を触るところは `g_bfm_ctl_lock`(`src/bfm_core.c`)を取る。データ経路(write / read / atomic / T10-DIF)は鍵を使わない。",
+  "functions": [
+    {
+      "func": "bfm_cpu_relax",
+      "summary": "回って待つ間に 1 回 `pause` を実行する。",
+      "args": {},
+      "ret": "なし。",
+      "pre": "なし。",
+      "notes": "`pause` は、回って待つ間の電力と、同じコアのもう一方のハイパースレッドへの邪魔を減らし、鍵が空いたときにメモリの順序の違反でパイプラインを捨てるのを避ける。`memory` の破壊指定でコンパイラ障壁も兼ねる(待っている値をレジスタに残さない)。",
+      "flow": [
+        {"do": "pause を実行する"}
+      ]
+    },
+    {
+      "func": "bfm_lock",
+      "summary": "鍵 `l` を取る。取れるまで回って待つ。",
+      "args": {
+        "l": "取る鍵"
+      },
+      "ret": "なし(戻ったときは鍵を持っている)。",
+      "pre": "`l` は 0 で始まっていること(`bfm_init()` が `bfm_unlock()` で空ける)。同じ鍵を持ったまま、もう一度取らないこと(入れ子にできない)。",
+      "notes": "`__atomic_exchange_n()`(x86-64 の `xchg`)で 1 を書き、元が 0 なら取れた(ACQUIRE: 後ろの読み書きは鍵を取る前へ出ない)。取れなければ、空くまでは書かずに読むだけで回る(キャッシュラインを奪い合わない)。順番待ちはしないので公平ではない。回って待つので、同じ CPU の上で鍵を持つタスクより優先度の高いタスクが待つと進まない。",
+      "flow": [
+        {"while": "__atomic_exchange_n(l->v, 1)(ACQUIRE)の元の値が 0 でない(取れなかった)?", "body": [
+          {"while": "l->v が 0 でない(まだ持たれている)?", "body": [
+            {"call": "bfm_cpu_relax()"}
+          ]}
+        ]}
+      ]
+    },
+    {
+      "func": "bfm_unlock",
+      "summary": "鍵 `l` を空ける。",
+      "args": {
+        "l": "空ける鍵"
+      },
+      "ret": "なし。",
+      "pre": "`l` を持っていること(`bfm_init()` だけは、0 で始めるために持たずに呼ぶ)。",
+      "notes": "`__atomic_store_n()` で 0 を書く(RELEASE: 鍵を持つ間の読み書きは、空けた後へずれない)。x86-64 では普通の書き込み 1 つになる。",
+      "flow": [
+        {"do": "__atomic_store_n(l->v, 0)(RELEASE)"}
+      ]
+    }
+  ]
+}

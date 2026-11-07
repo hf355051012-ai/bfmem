@@ -35,6 +35,7 @@ DESC = os.path.join(SPEC, "desc")
 # 章の順番。group はリンクの単位(同じ名前の関数がどちらの移植層のものかを決める)。
 FILES = [
     ("include/bfm_port.h", ["linux", "vxworks"]),
+    ("src/bfm_internal.h", ["linux", "vxworks"]),
     ("src/bfm_core.c", ["linux", "vxworks"]),
     ("src/bfm_mem.c", ["linux", "vxworks"]),
     ("src/bfm_pci.c", ["linux", "vxworks"]),
@@ -228,7 +229,8 @@ def build_graph():
         same = [f for f in cands if f["file"] == caller["file"]]
         if same:
             return same[0]
-        glob = [f for f in cands if not f["static"]]
+        # ヘッダの static inline の関数は、そのヘッダを読み込んだどのファイルからも呼べる
+        glob = [f for f in cands if not f["static"] or f["file"].endswith(".h")]
         return glob[0] if glob else None
 
     for f in allf:
