@@ -1,7 +1,8 @@
 # bfmem
 
 ConnectX(mlx5)の **BlueFlame** を使って、ノード間で相手のメモリへ直接
-**write / read / atomic(CAS・FAA)** を打つためのライブラリ。RoCE v2 の RC QP を 1 本張り、
+**write / read / atomic(CAS・FAA)** を打つためのライブラリ。T10-DIF(512 + 8 バイトのブロック)を
+付け外し・検査しながら運ぶ読み書きもある(NIC のオフロードあり / なし)。RoCE v2 の RC QP を 1 本張り、
 WQE を UAR の BlueFlame の窓へ MMIO で書き込んで送る。相手の CPU は何もしない(相手の NIC が応答する)。
 
 - 対象は **x86-64(Intel)の VxWorks(論理アドレス = 物理アドレス)どうし**。設計と試験は
@@ -28,6 +29,7 @@ WQE を UAR の BlueFlame の窓へ MMIO で書き込んで送る。相手の CP
 | `src/mlx5_qp.c` | QP(RC と GSI)の作成と状態遷移 |
 | `src/bfm_cm.c` | 接続の確立と切断(GSI の上の bfmem だけの REQ / REP / BYE)|
 | `src/bfm_ops.c` | データ経路(BlueFlame で WQE を送る、完了を拾う)|
+| `src/bfm_dif.c` | T10-DIF の読み書き(CPU で行う SW と、NIC の署名オフロードを使う HW)|
 | `src/bfm_mem.c` | DMA 領域からの静的な切り出し |
 | `port/linux_vfio/port_linux.c` | 移植層: Linux + VFIO(試験環境)|
 | `port/vxworks/port_vxworks.c` | 移植層: VxWorks(**未検証**。VxWorks 固有の関数は使わない)|
@@ -53,6 +55,10 @@ bfm_cas(c, off, expect, desired, &old);       /* 8 バイト、off は 8 の倍�
 bfm_faa(c, off, add, &old);
 bfm_cas32(c, off, expect, desired, &old32);   /* 4 バイト、off は 4 の倍数(拡張 atomic)*/
 bfm_faa32(c, off, add, &old32);
+
+bfm_dif_t d = { .op = BFM_DIF_INSERT, .mode = BFM_DIF_SW, .app_tag = 0x1234, .ref_tag = lba };
+bfm_dif_write(c, off, src, nblocks, &d, &err); /* T10-DIF(下の「T10-DIF」)*/
+bfm_dif_read(c, off, dst, nblocks, &d, &err);
 
 bfm_poll();                                   /* ときどき呼ぶ(切断要求・FW のページ要求)*/
 bfm_disconnect(c);
@@ -178,7 +184,7 @@ REP が落ちたら掛け側が REQ を送り直し、受け側は確立済み�
 4 バイトの `bfm_cas32()` / `bfm_faa32()` は mlx5 の拡張 atomic(masked atomic。命令 0x14 / 0x15、ctrl の
 opmod = 0x08 で大きさ 4 バイト)で出す。IB の規格には無いので、相手も mlx5 の bfmem であることが前提。
 両端の装置が拡張 atomic の 4 バイトに対応していること(atomic の能力の `atomic_ops` の bit2・3 と
-`atomic_size_qp` の bit2。ConnectX-4 Lx は 0xf / 0x3c で対応。無ければ `BFM_E_PARAM`)。
+`atomic_size_qp` の bit2。ConnectX-4 Lx は 0xf / 0x3c で対応。無ければ `BFM_E_NOTSUP`)。
 
 | | 8 バイト | 4 バイト |
 |---|---|---|
@@ -187,6 +193,43 @@ opmod = 0x08 で大きさ 4 バイト)で出す。IB の規格には無いので
 | 中継バッファで返る元の値(`g_bfm_scatter_cqe` = 0)| ホスト順 | **ビッグエンディアン** |
 
 どれも関数の中で直してホスト順の数で返す(ConnectX-4 Lx の実機で確かめた。2026-11-07)。
+
+### T10-DIF(`src/bfm_dif.c`)
+
+1 ブロック = データ 512 バイト + 保護情報(PI)8 バイトで、PI はデータの直後に置く(520 バイトおき)。
+PI は guard(データの CRC16、多項式 0x8BB7)・app tag・ref tag(ブロックごとに 1 増える。Type 1)で、どれもビッグエンディアン。
+`bfm_dif_write()` / `bfm_dif_read()` は、入る側(write は自分のメモリ、read は相手のメモリ)の形のブロックを
+出る側の形に変えて運ぶ。
+
+| 操作 | 入る側 → 出る側 | すること |
+|---|---|---|
+| `BFM_DIF_CHECK` | 520 → 520 | PI を検査し、そのまま渡す |
+| `BFM_DIF_CHECK_SWAP` | 520 → 520 | PI を検査し、app tag / ref tag を `new_app_tag` / `new_ref_tag` に置き換える(guard はそのまま)|
+| `BFM_DIF_INSERT` | 512 → 520 | PI を作って付ける |
+| `BFM_DIF_CHECK_DELETE` | 520 → 512 | PI を検査し、取り除く |
+
+- 検査するもの(guard・app tag・ref tag)は `check` で選ぶ。誤りがあれば `BFM_E_DIF` を返し、
+  `bfm_dif_err_t` にブロックの番号・種類・あるべき値・実際の値を入れる。
+- app tag の 0xffff を「検査しない」とみなす扱い(escape)はしない。
+- 出る側の app tag・ref tag は、入る側と同じ値ならバイトをそのまま写し、違えば新しい値を書く。guard は入る側にあれば写す
+  (NIC のオフロードと同じ決め方。SW と HW で結果が同じになる)。
+
+**モード(`mode`)**
+
+| | `BFM_DIF_SW`(オフロードなし)| `BFM_DIF_HW`(オフロードあり)|
+|---|---|---|
+| 使える装置 | どれでも(**ConnectX-4 はこれだけ**)| 署名オフロード(能力の `sho`)がある装置(ConnectX-5 以降を想定、**ConnectX-7 を想定して書いた**)。`bfm_dif_hw_supported()` が 1 |
+| 形を変えるもの | CPU(CRC は 8 バイトずつ表を引く)| NIC(通る途中で検査・付け外し)|
+| 手順 | 中継バッファで形を変えて RDMA | UMR で署名つき MKey を張り、SET_PSV × 2 の後、その MKey を手元にして RDMA |
+| 誤りがあったとき | write はその回の分を送らない | write でも送ってしまうことがある(誤りは SIG_ERR の CQE で後から分かる)|
+| 実機での確認 | ConnectX-4 Lx で確認(2026-11-07)| **未確認**(ConnectX-4 Lx に `sho` が無い)|
+
+- HW の作りは Linux の mlx5_ib の署名 MR(`IB_WR_REG_MR_INTEGRITY`、`set_sig_umr_wr()`・`mlx5_set_bsf()`・`set_psv_wr()`)と
+  `rdma_rw_ctx_signature_init()` に合わせた。接続ごとに署名つき MKey 1 個と PSV 2 個を `bfm_init()` で作る。
+  QP は `fre`(UMR を出せる)を立てて作る。UMR の fence は能力の `umr_fence` に従う。
+- どちらのモードも中継バッファ(`g_bfm_stage_size`、既定 64KiB = 126 ブロック)ずつ運ぶ。
+- 遅延(ConnectX-4 Lx、OptiPlex → Precision、4KiB = 8 ブロック、中央値): SW の write INSERT 5,470ns・
+  write CHECK 5,573ns・read CHECK 5,704ns・read CHECK_DELETE 5,482ns(CRC を 1 バイトずつ引いていたときは約 14,100ns)。
 
 ### ConnectX-7 への備え(実機では未確認)
 
@@ -292,6 +335,7 @@ sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 client 192.168.101.21 <�
 | [5] | データ領域を読み戻して模型と比べる |
 | [6] | 遅延(write / read 8・64 バイト、FAA、CAS、FAA32、CAS32)と write_post の速さ。測った後にもう一度読み戻して比べる |
 | 最後 | 模型の hash を出す(相手が切断のときに出す hash と同じであること)|
+| [8] | T10-DIF: 4 つの操作を write / read の両方(8 通り)で、相手のメモリ・手元の結果と独立に作った期待値を比べる。誤りの検出(guard・ref tag・app tag)。SW は常に、HW は使えるときだけ。使えなければ `BFM_E_NOTSUP` を確かめる。DIF の遅延 |
 | [7] | (`-x`)公開メモリの外を読むと相手の NIC が REMOTE_ACCESS で断る |
 
 ## 確かめたこと / まだのこと
@@ -312,7 +356,9 @@ sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 client 192.168.101.21 <�
 - **4 バイトの CAS / FAA(拡張 atomic)を両方向・通常 / `-S` / `-B` / `-x` で通した**(2026-11-07)。
   中継バッファで返る 4 バイトの元の値だけがビッグエンディアンで、最初は `-S` で NG になった。
   遅延は 8 バイトと同じ(中央値 FAA32 1,623ns / CAS32 1,662ns、8 バイトは 1,638 / 1,686ns)。
+- **T10-DIF のオフロードなし(SW)を両方向・通常 / `-S` / `-B` で通した**(2026-11-07)。4 つの操作の write / read と
+  誤りの検出が全部 OK。**オフロードあり(HW)は、ConnectX-4 Lx に署名オフロード(`sho`)が無いので試せていない。**
 - **相手からの read / atomic の遅延は、受け側の CPU の C-state で約 300ns 変わる。** `g_bfm_cpu_awake`(既定 1)で
   Linux では対策した(FAA 2,150 → 1,760〜1,930ns)。hugepage(IOMMU の変換を減らす)は効かなかった。
-- まだ: VxWorks、ConnectX-7。`write_post` は BlueFlame なしのほうが速い
+- まだ: VxWorks、ConnectX-7、T10-DIF のオフロード(`BFM_DIF_HW`)。`write_post` は BlueFlame なしのほうが速い
   (11.4 → 13.1 Mops)ので、続けて出すときの扱いは見直しの余地がある。

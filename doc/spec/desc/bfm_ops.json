@@ -54,18 +54,23 @@
     },
     {
       "func": "poll_one",
-      "summary": "CQ から CQE を 1 個読む。CQ の消費位置(`cq_cc`)の CQE の owner ビットと opcode を見て、新しい CQE が無ければ 0 を返す。あれば消費位置を進めて CQ の doorbell record に書く。エラー完了なら syndrome を記録し、接続を `BFM_CS_ERROR` にする。正常な完了なら、CQE の WQE カウンタが指す WQE までを済んだ扱いにし(`sq_done` を進める)、応答データを CQE に抱えていればその CQE を `last_scat` に覚える。",
+      "summary": "CQ から CQE を 1 個読む。CQ の消費位置(`cq_cc`)の CQE の owner ビットと opcode を見て、新しい CQE が無ければ 0 を返す。あれば消費位置を進めて CQ の doorbell record に書く。署名の誤り(SIG_ERR)なら中身を接続に覚えて 0 を返す(WQE の完了ではない)。エラー完了なら syndrome を記録し、接続を `BFM_CS_ERROR` にする。正常な完了なら、CQE の WQE カウンタが指す WQE までを済んだ扱いにし(`sq_done` を進める)、応答データを CQE に抱えていればその CQE を `last_scat` に覚える。",
       "args": {"c": "完了を拾う接続"},
       "ret": "1: 正常な完了を 1 個拾った。0: まだ CQE が無い。負: エラー完了(`map_syndrome()` の値。`BFM_E_REMOTE` / `BFM_E_RETRY` / `BFM_E_CQE`)。",
       "pre": "`c` の QP・CQ が作られ、`bfm_ops_attach()` 済みであること。",
-      "notes": "* CQE は投稿の順に来るので、正常な完了 1 個でその WQE までの全部(通知なしで出したものを含む)を済んだ扱いにする。\n* 済んだ位置は、CQE の WQE カウンタ(16 ビット)を `sq_done` の 32 ビットへ広げ、その WQE の大きさ(`wqe_bbs[]`)を足して求める。\n* エラー完了では `sq_done` を進めない。接続が `BFM_CS_UP` のときだけ表示して `BFM_CS_ERROR` にする(2 回目以降は表示しない)。\n* `last_scat` は CQ のリングの中を指すので、次の CQE を拾うまでに読むこと。",
+      "notes": "* CQE は投稿の順に来るので、正常な完了 1 個でその WQE までの全部(通知なしで出したものを含む)を済んだ扱いにする。\n* 済んだ位置は、CQE の WQE カウンタ(16 ビット)を `sq_done` の 32 ビットへ広げ、その WQE の大きさ(`wqe_bbs[]`)を足して求める。\n* エラー完了では `sq_done` を進めない。接続が `BFM_CS_UP` のときだけ表示して `BFM_CS_ERROR` にする(2 回目以降は表示しない)。\n* `last_scat` は CQ のリングの中を指すので、次の CQE を拾うまでに読むこと。\n* SIG_ERR の CQE(T10-DIF の検査の誤り)は、その WQE の普通の完了の前に来る。`sig_err` などに覚え、`bfm_dif.c` が見て消す(Linux の `mlx5_poll_one()` と同じ扱い)。",
       "flow": [
         {"do": "cqe = CQ のリングの (cq_cc & (CQ_N - 1)) 番目(64 バイト)"},
         {"do": "op_own = cqe[63]"},
         {"if": "owner ビットが今の周回と合わない、または opcode == MLX5_CQE_INVALID ?", "then": [{"return": "0"}]},
         {"do": "bfm_rmb()。opcode = op_own >> 4、cnt = CQE の WQE カウンタ(byte 60、BE)"},
         {"do": "cq_cc++。cq_dbr[0] = cq_cc の下位 24 ビット(BE)"},
-        {"if": "opcode が MLX5_CQE_REQ_ERR / MLX5_CQE_RESP_ERR / MLX5_CQE_SIG_ERR ?", "then": [
+        {"if": "opcode == MLX5_CQE_SIG_ERR ?", "then": [
+          {"do": "sig_err = 1。sig_exp_ts・sig_act_ts・sig_exp_ref・sig_act_ref(byte 16〜31)、sig_synd(byte 32)、sig_off(byte 40)を覚える"},
+          {"do": "BFM_DBG で中身を表示"},
+          {"return": "0"}
+        ]},
+        {"if": "opcode が MLX5_CQE_REQ_ERR / MLX5_CQE_RESP_ERR ?", "then": [
           {"do": "last_synd = cqe[55]、last_vsynd = cqe[54]"},
           {"if": "c->state == BFM_CS_UP ?", "then": [
             {"call": "BFM_LOG で syndrome と syndrome_str() の名前を表示"},
@@ -307,6 +312,71 @@
       ]
     },
     {
+      "func": "bfm_ops_check_range",
+      "summary": "`check_range()` を 64 ビットの長さで使えるようにしたもの(`bfm_dif.c` から使う)。",
+      "args": {"c": "接続", "off": "相手の公開メモリの先頭からのオフセット", "len": "バイト数(64 ビット)"},
+      "ret": "`BFM_E_PARAM`: `len` が 32 ビットを超える。そのほか `check_range()` の戻り値。",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"if": "len > 0xffffffff ?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"call": "check_range(c, off, len) を呼ぶ"},
+        {"return": "check_range() の戻り値"}
+      ]
+    },
+    {
+      "func": "bfm_ops_post",
+      "summary": "組んだ WQE を `post()` で出す(`bfm_dif.c` から使う)。",
+      "args": {"c": "接続", "w": "組んだ WQE", "bbs": "WQEBB の数"},
+      "ret": "`post()` の戻り値。",
+      "pre": "`post()` と同じ。",
+      "notes": "特になし。",
+      "flow": [
+        {"call": "post(c, w, bbs) を呼ぶ"},
+        {"return": "post() の戻り値"}
+      ]
+    },
+    {
+      "func": "bfm_ops_wait_all",
+      "summary": "出した WQE が全部終わるまで待つ(`wait_done(c, qp.sq_pc)`。`bfm_dif.c` から使う)。",
+      "args": {"c": "接続"},
+      "ret": "`wait_done()` の戻り値。",
+      "pre": "最後に出した WQE が完了通知を求めていること。",
+      "notes": "特になし。",
+      "flow": [
+        {"call": "wait_done(c, qp.sq_pc) を呼ぶ"},
+        {"return": "wait_done() の戻り値"}
+      ]
+    },
+    {
+      "func": "bfm_ops_ctrl",
+      "summary": "制御セグメント(16 バイト)を組む。`build_ctrl()` と違い、fm_ce_se(fence・通知・solicited)と imm(UMR なら MKey)を指定できる(`bfm_dif.c` から使う)。",
+      "args": {"c": "接続", "w": "WQE の作業域", "opcode": "WQE の opcode", "ds": "WQE の大きさ(16 バイト単位)", "fm_ce_se": "byte 11 に入れる値", "imm": "byte 12〜15 に入れる値"},
+      "ret": "なし",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"call": "put32(w, 0, (sq_pc の下位 16 ビット << 8) | opcode) を呼ぶ"},
+        {"call": "put32(w, 4, qpn8 | ds) を呼ぶ"},
+        {"call": "put32(w, 8, fm_ce_se) を呼ぶ"},
+        {"call": "put32(w, 12, imm) を呼ぶ"}
+      ]
+    },
+    {
+      "func": "bfm_ops_build_rdma",
+      "summary": "RDMA の read / write の WQE を 1 個(1 WQEBB、完了通知あり)組む。手元は `lkey` + `addr` の `len` バイト(T10-DIF のオフロードでは署名つき MKey のアドレス 0)。",
+      "args": {"c": "接続", "w": "WQE の作業域(64 バイト)", "is_read": "1 = read、0 = write", "off": "相手の公開メモリの先頭からのオフセット", "lkey": "手元の MKey", "addr": "手元のアドレス", "len": "バイト数", "fence": "fm_ce_se に足す fence"},
+      "ret": "なし",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"do": "w の 64 バイトを 0 で埋める"},
+        {"call": "bfm_ops_ctrl(c, w, RDMA_READ / RDMA_WRITE, 3, CQ_UPDATE | fence, 0) を呼ぶ"},
+        {"call": "build_raddr(c, w, off) を呼ぶ"},
+        {"call": "put32(w, 32, len)、put32(w, 36, lkey)、put64(w, 40, addr) を呼ぶ"}
+      ]
+    },
+    {
       "func": "bfm_write",
       "summary": "相手の公開メモリ + `off` へ `len` バイト書き、相手の NIC が受け取った(完了が返った)ところで戻る。`INLINE_MAX` バイトまではデータを WQE に埋め込んで 1 個の WQE で出す。それより長いものは、中継バッファの大きさずつ中継バッファへ写して RDMA write で送り、1 回ごとに完了を待つ。",
       "args": {"c": "書く接続", "off": "相手の公開メモリの先頭からのオフセット", "src": "書くデータ", "len": "長さ(バイト)"},
@@ -468,14 +538,14 @@
       "func": "atomic32_op",
       "summary": "4 バイトの atomic(拡張 atomic = masked atomic。IB の規格には無い mlx5 の拡張)を 1 個出して完了を待ち、元の値を `*old` に返す。WQE は制御セグメント(opmod に大きさ `MLX5_OPMOD_EXT_ATOMIC(2)` = 0x08)・remote address セグメント・atomic セグメント 16 バイト・元の値を受けるデータセグメント(中継バッファ、4 バイト)の 64 バイト。atomic セグメントは、CAS なら swap・compare・swap_mask・compare_mask(mask は全ビット)、FAA なら add・field_boundary(0 = 32 ビットで 1 つの数)。",
       "args": {"c": "操作する接続", "opcode": "`MLX5_OPCODE_ATOMIC_MASKED_CS` か `MLX5_OPCODE_ATOMIC_MASKED_FA`", "off": "相手の公開メモリの先頭からのオフセット", "swap_add": "CAS なら置き換える値、FAA なら足す値", "cmp": "CAS なら比べる値(FAA では使わない)", "old": "元の値を入れる先(NULL なら返さない)"},
-      "ret": "`BFM_OK`: 終わった。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗。`BFM_E_PARAM`: 相手のアドレス(`raddr + off`)が 4 の倍数でない、または自分の装置が拡張 atomic の 4 バイトに対応していない(atomic の能力の `atomic_ops` の bit2・3 と `atomic_size_qp` の bit2)。そのほか `post()` / `wait_done()` の戻り値。",
+      "ret": "`BFM_OK`: 終わった。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗。`BFM_E_PARAM`: 相手のアドレス(`raddr + off`)が 4 の倍数でない。`BFM_E_NOTSUP`: 自分の装置が拡張 atomic の 4 バイトに対応していない(atomic の能力の `atomic_ops` の bit2・3 と `atomic_size_qp` の bit2)。そのほか `post()` / `wait_done()` の戻り値。",
       "pre": "`bfm_write()` と同じ。相手の装置も拡張 atomic の 4 バイトに対応し、QP の `atomic_mode` が 3 以上であること(bfmem どうしなら `setup_atomic_caps()` がそう決める)。",
       "notes": "* 失敗したときは `*old` を書かない。\n* 相手のメモリの語はホスト順(リトルエンディアン)で更新される(ConnectX-4 Lx で確認)。\n* 相手が対応していないと、エラー完了で接続が使えなくなる。",
       "flow": [
         {"call": "rc = check_range(c, off, 4) を呼ぶ"},
         {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
         {"if": "(raddr + off) & 3 != 0 ?", "then": [{"return": "BFM_E_PARAM"}]},
-        {"if": "拡張 CS / FA が無い、または 4 バイトに対応していない?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"if": "拡張 CS / FA が無い、または 4 バイトに対応していない?", "then": [{"return": "BFM_E_NOTSUP"}]},
         {"do": "w(64 バイト)を 0 で埋める"},
         {"call": "build_ctrl(c, w, opcode, 4, 1) を呼ぶ"},
         {"call": "put32(w, 0, opmod 0x08 | sq_pc | opcode) を呼ぶ(大きさを入れる)"},
@@ -615,6 +685,8 @@
           {"case": "BFM_E_REMOTE", "body": [{"return": "\"相手が拒否(rkey・範囲・権限)\""}]},
           {"case": "BFM_E_RETRY", "body": [{"return": "\"再送が尽きた(相手に届かない)\""}]},
           {"case": "BFM_E_CQE", "body": [{"return": "\"エラー完了\""}]},
+          {"case": "BFM_E_DIF", "body": [{"return": "\"T10-DIF の検査で誤り\""}]},
+          {"case": "BFM_E_NOTSUP", "body": [{"return": "\"装置が対応していない\""}]},
           {"default": true, "body": [{"return": "\"?\""}]}
         ]}
       ]

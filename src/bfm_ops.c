@@ -68,7 +68,22 @@ static int poll_one(struct bfm_conn *c)
     const uint16_t cnt = bfm_rd16be(cqe + 60);
     c->qp.cq_cc++;
     c->qp.cq_dbr[0] = bfm_cpu_to_be32(c->qp.cq_cc & 0xffffffu);
-    if (opcode == MLX5_CQE_REQ_ERR || opcode == MLX5_CQE_RESP_ERR || opcode == MLX5_CQE_SIG_ERR) {
+    if (opcode == MLX5_CQE_SIG_ERR) {
+        /* 署名(T10-DIF)の誤り。WQE の完了ではない(その WQE の普通の完了が後で来る)。
+         * 中身を覚えておき、bfm_dif.c が見る(Linux の mlx5_poll_one() と同じ扱い)。 */
+        c->sig_err = 1;
+        c->sig_exp_ts = bfm_rd32be(cqe + 16);
+        c->sig_act_ts = bfm_rd32be(cqe + 20);
+        c->sig_exp_ref = bfm_rd32be(cqe + 24);
+        c->sig_act_ref = bfm_rd32be(cqe + 28);
+        c->sig_synd = bfm_rd16be(cqe + 32);
+        c->sig_off = bfm_rd64be(cqe + 40);
+        BFM_DBG("bfm: 接続 %d: SIG_ERR syndrome 0x%04x 位置 %llu ts %08x/%08x ref %08x/%08x\n", c->index,
+                c->sig_synd, (unsigned long long)c->sig_off, c->sig_exp_ts, c->sig_act_ts,
+                c->sig_exp_ref, c->sig_act_ref);
+        return 0;
+    }
+    if (opcode == MLX5_CQE_REQ_ERR || opcode == MLX5_CQE_RESP_ERR) {
         c->last_synd = cqe[55];
         c->last_vsynd = cqe[54];
         if (c->state == BFM_CS_UP) {
@@ -256,6 +271,52 @@ int bfm_ops_poll1(struct bfm_conn *c)
     return poll_one(c);
 }
 
+/* ---------------------------------------------------------------------
+ * bfm_dif.c から使う部品(bfm_internal.h)
+ * ------------------------------------------------------------------- */
+
+/* 接続が使え、相手の公開メモリの [off, off + len) に収まるか(len は 64 ビット)。 */
+int bfm_ops_check_range(const struct bfm_conn *c, uint64_t off, uint64_t len)
+{
+    if (len > 0xffffffffu) return BFM_E_PARAM;
+    return check_range(c, off, (uint32_t)len);
+}
+
+/* 組んだ WQE を出す(post())。 */
+int bfm_ops_post(struct bfm_conn *c, const uint64_t *w, uint32_t bbs)
+{
+    return post(c, w, bbs);
+}
+
+/* 出したものが全部終わるまで待つ。 */
+int bfm_ops_wait_all(struct bfm_conn *c)
+{
+    return wait_done(c, c->qp.sq_pc);
+}
+
+/* 制御セグメントを組む(fm_ce_se = fence・通知・solicited、imm = UMR なら MKey)。 */
+void bfm_ops_ctrl(struct bfm_conn *c, uint64_t *w, uint32_t opcode, uint32_t ds, uint8_t fm_ce_se,
+                  uint32_t imm)
+{
+    put32(w, 0, ((c->qp.sq_pc & 0xffffu) << 8) | opcode);
+    put32(w, 4, c->qpn8 | ds);
+    put32(w, 8, fm_ce_se);
+    put32(w, 12, imm);
+}
+
+/* RDMA の read / write を 1 個組む(1 WQEBB、完了通知あり)。手元は lkey + addr の len バイト。 */
+void bfm_ops_build_rdma(struct bfm_conn *c, uint64_t *w, int is_read, uint64_t off, uint32_t lkey,
+                        uint64_t addr, uint32_t len, uint8_t fence)
+{
+    memset(w, 0, 64);
+    bfm_ops_ctrl(c, w, is_read ? MLX5_OPCODE_RDMA_READ : MLX5_OPCODE_RDMA_WRITE, 3u,
+                 (uint8_t)(MLX5_WQE_CTRL_CQ_UPDATE | fence), 0);
+    build_raddr(c, w, off);
+    put32(w, 32, len);
+    put32(w, 36, lkey);
+    put64(w, 40, addr);
+}
+
 int bfm_write(bfm_conn_t *c, uint64_t off, const void *src, uint32_t len)
 {
     uint64_t w[BFM_WQE_MAX / 8u];
@@ -392,7 +453,7 @@ static int atomic32_op(struct bfm_conn *c, uint32_t opcode, uint64_t off, uint32
     int rc = check_range(c, off, 4u);
     if (rc != BFM_OK) return rc;
     if (((c->raddr + off) & 3u) != 0) return BFM_E_PARAM;
-    if ((g_bfm.atomic_ops & 0x0cu) != 0x0cu || (g_bfm.atomic_size_qp & 0x04u) == 0) return BFM_E_PARAM;
+    if ((g_bfm.atomic_ops & 0x0cu) != 0x0cu || (g_bfm.atomic_size_qp & 0x04u) == 0) return BFM_E_NOTSUP;
     memset(w, 0, sizeof(w));
     build_ctrl(c, w, opcode, 4u, 1);
     put32(w, 0, (MLX5_OPMOD_EXT_ATOMIC(2u) << 24) | ((c->qp.sq_pc & 0xffffu) << 8) | opcode);
@@ -467,6 +528,8 @@ const char *bfm_strerror(int rc)
     case BFM_E_REMOTE:  return "相手が拒否(rkey・範囲・権限)";
     case BFM_E_RETRY:   return "再送が尽きた(相手に届かない)";
     case BFM_E_CQE:     return "エラー完了";
+    case BFM_E_DIF:     return "T10-DIF の検査で誤り";
+    case BFM_E_NOTSUP:  return "装置が対応していない";
     default:            return "?";
     }
 }

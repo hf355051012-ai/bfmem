@@ -74,6 +74,7 @@
 #define MLX5_CMD_ALLOC_UAR       0x802u
 #define MLX5_CMD_DEALLOC_UAR     0x803u
 #define MLX5_CMD_ACCESS_REG      0x805u
+#define MLX5_CMD_CREATE_PSV      0x600u
 
 #define MLX5_REG_PMTU            0x5003u
 #define MLX5_REG_PAOS            0x5006u
@@ -94,7 +95,12 @@
 #define MLX5_OPCODE_ATOMIC_MASKED_CS 0x14u          /* 拡張 atomic(大きさは ctrl の opmod で指定)*/
 #define MLX5_OPCODE_ATOMIC_MASKED_FA 0x15u
 #define MLX5_OPMOD_EXT_ATOMIC(log_sz) (0x08u | ((log_sz) - 2u))   /* 4 バイト = 0x08 */
+#define MLX5_OPCODE_SET_PSV      0x20u
+#define MLX5_OPCODE_UMR          0x25u
 #define MLX5_WQE_CTRL_CQ_UPDATE  0x08u
+#define MLX5_WQE_CTRL_SOLICITED  0x02u
+#define MLX5_FENCE_SMALL         (1u << 5)   /* fm_ce_se の fence: INITIATOR_SMALL */
+#define MLX5_FENCE_STRONG        (3u << 5)   /* STRONG_ORDERING */
 #define MLX5_SEND_WQE_BB         64u
 #define MLX5_BF_OFFSET           0x800u   /* UAR ページの中の BlueFlame の窓(ドアベルも同じ位置)*/
 #define MLX5_INLINE_SEG          0x80000000u
@@ -158,6 +164,8 @@ typedef struct {
     uint8_t  qp_ts_format;           /* QPC の ts_format に書く値 */
     uint16_t atomic_ops, atomic_size_qp;
     uint8_t  atomic_mode;            /* QPC の atomic_mode(0 = 相手からの atomic を受けない)*/
+    uint8_t  sho;                    /* 署名(T10-DIF)のオフロードがある */
+    uint8_t  umr_fence;              /* UMR の WQE に付ける fence(fm_ce_se の値)*/
 
     /* 資源 */
     uint32_t eq_uarn, eqn, eq_cc;
@@ -215,6 +223,13 @@ struct bfm_conn {
     uint32_t stage_size;
     const volatile uint8_t *last_scat;  /* 直前の CQE が応答データを抱えていればその CQE */
 
+    /* 署名の誤り(SIG_ERR の CQE。poll_one() が入れ、bfm_dif.c が見て消す)*/
+    uint8_t  sig_err;
+    uint16_t sig_synd;               /* bit13 guard / bit12 app tag / bit11 ref tag */
+    uint32_t sig_exp_ts, sig_act_ts; /* guard << 16 | app tag(あるべき値 / 実際の値)*/
+    uint32_t sig_exp_ref, sig_act_ref;
+    uint64_t sig_off;                /* 誤りの位置(署名つき MKey の中のバイト)*/
+
     /* 相手 */
     uint32_t peer_ip;
     uint8_t  peer_mac[6];
@@ -261,6 +276,8 @@ void mlx5_hca_teardown(bfm_dev_t *d);
 int  mlx5_alloc_uar(bfm_dev_t *d, uint32_t *uarn);
 int  mlx5_cq_create(bfm_dev_t *d, uint32_t uarn, volatile uint8_t *buf, uint32_t log_n,
                     volatile uint32_t *dbr, uint32_t *cqn);
+int  mlx5_create_psv2(bfm_dev_t *d, uint32_t psv[2]);
+int  mlx5_create_sig_mkey(bfm_dev_t *d, uint8_t key8, uint32_t *mkey);
 
 /* mlx5_qp.c */
 int  mlx5_qp_create(bfm_dev_t *d, bfm_qp_t *qp, uint8_t st, uint8_t cs_req);
@@ -285,5 +302,16 @@ void bfm_conn_mark_error(uint32_t qpn, const char *why);
 int  bfm_ops_post_rw(struct bfm_conn *c, int is_read, uint64_t off, uint32_t stage_off,
                      const void *src, uint32_t len);
 int  bfm_ops_poll1(struct bfm_conn *c);
+/* bfm_dif.c から使う。 */
+int  bfm_ops_check_range(const struct bfm_conn *c, uint64_t off, uint64_t len);
+int  bfm_ops_post(struct bfm_conn *c, const uint64_t *w, uint32_t bbs);
+int  bfm_ops_wait_all(struct bfm_conn *c);
+void bfm_ops_ctrl(struct bfm_conn *c, uint64_t *w, uint32_t opcode, uint32_t ds, uint8_t fm_ce_se,
+                  uint32_t imm);
+void bfm_ops_build_rdma(struct bfm_conn *c, uint64_t *w, int is_read, uint64_t off, uint32_t lkey,
+                        uint64_t addr, uint32_t len, uint8_t fence);
+
+/* bfm_dif.c */
+int  bfm_dif_init(void);
 
 #endif /* BFM_INTERNAL_H */

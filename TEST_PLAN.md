@@ -327,3 +327,17 @@ sudo build/bfmem_test -d 0000:b3:00.0 -i 192.168.101.21 -n 10000 bench 192.168.1
 - 遅延(中央値、OptiPlex → Precision): FAA32 1,623ns / CAS32 1,662ns(同じ回の 8 バイトは 1,638 / 1,686ns)。
   `-S` では 1,779 / 1,853ns、`-B` では 1,976 / 2,035ns。
 - 終わった後、両方とも mlx5_core に戻した(Precision の `ens1f0np0` には 192.168.101.21 を付け直した)。
+
+記録(2026-11-07、T10-DIF を足した後): **オフロードなし(SW)は合格。オフロードあり(HW)は試せない。**
+- `info -v`: 両方の ConnectX-4 Lx とも `sho=0`(署名オフロードが無い)、`umr_fence=0`。`bfm_dif_hw_supported()` は 0。
+- client の `[8]`(300 ブロック = 中継バッファ 3 回分)を、OptiPlex → Precision で通常 / `-S`、Precision → OptiPlex で
+  `-B` の 3 通り流して全部 OK、hash も一致。
+  - write INSERT / CHECK / CHECK_SWAP / CHECK_DELETE と read CHECK / CHECK_SWAP / CHECK_DELETE / INSERT の 8 通りが、
+    試験の側でビットごとの CRC で作った期待値と一致(相手のメモリは `bfm_read()` で読んで比べた)。
+  - 誤りの検出: write のブロック 200 の guard(あるべき 0x09be / 実際 0xc063)、期待する ref tag のずれ(ブロック 0)、
+    相手のメモリのブロック 150 の app tag(0x1234 / 0x1274)を、ブロックと種類まで正しく返した。
+  - `BFM_DIF_HW` は `BFM_E_NOTSUP` を返した。
+- 遅延(4KiB = 8 ブロック、中央値、OptiPlex → Precision): write INSERT 5,470ns / write CHECK 5,573ns /
+  read CHECK 5,704ns / read CHECK_DELETE 5,482ns。CRC を 1 バイトずつ引いていた最初の版は約 14,100ns で、
+  8 バイトずつ引く形(slice-by-8)にして縮んだ。
+- 終わった後、両方とも mlx5_core に戻した(Precision の `ens1f0np0` には 192.168.101.21 を付け直した)。

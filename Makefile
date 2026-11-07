@@ -16,7 +16,8 @@ ALL_CFLAGS := $(WARN) -Iinclude -Iport/x86 $(CFLAGS)
 BUILD   := build
 
 LIB_SRCS := src/bfm_config.c src/bfm_core.c src/bfm_mem.c src/bfm_pci.c \
-            src/mlx5_cmd.c src/mlx5_hca.c src/mlx5_qp.c src/bfm_cm.c src/bfm_ops.c
+            src/mlx5_cmd.c src/mlx5_hca.c src/mlx5_qp.c src/bfm_cm.c src/bfm_ops.c \
+            src/bfm_dif.c
 X86_SRCS := port/x86/bfm_x86.c
 LINUX_SRCS := port/linux_vfio/port_linux.c
 LIB_OBJS := $(patsubst %.c,$(BUILD)/%.o,$(LIB_SRCS) $(X86_SRCS) $(LINUX_SRCS)) \

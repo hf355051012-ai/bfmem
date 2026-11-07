@@ -137,6 +137,12 @@ static int setup_general_caps(bfm_dev_t *d)
     d->bf_cap = (uint8_t)((c[76] & 0x80u) ? 1u : 0u);                 /* bit 0x260 */
     uint8_t log_bf = c[77] & 0x1fu;                                   /* bit 0x26b log_bf_reg_size */
     d->num_vhca_ports = c[194];                                       /* bit 0x610 */
+    d->sho = (uint8_t)((c[66] & 0x01u) ? 1u : 0u);                    /* bit 0x217 sho(署名のオフロード)*/
+    {
+        const uint8_t uf = (uint8_t)((c[65] >> 4) & 0x03u);           /* bit 0x20a umr_fence */
+        /* Linux の mlx5_get_umr_fence(): 0 = STRONG、1 = SMALL、2 = 要らない */
+        d->umr_fence = (uint8_t)(uf == 1u ? MLX5_FENCE_SMALL : uf == 2u ? 0u : MLX5_FENCE_STRONG);
+    }
     if (port_type != 1u) {
         BFM_LOG("bfm: ポートが Ethernet ではない (port_type=%u)。RoCE は使えない\n", port_type);
         return BFM_E_HW;
@@ -148,8 +154,9 @@ static int setup_general_caps(bfm_dev_t *d)
     }
     d->bf_buf_size = (1u << log_bf) / 2u;   /* 窓は 2 面(rdma-core の mlx5 と同じ)*/
     if (d->bf_buf_size > BFM_WQE_MAX) d->bf_buf_size = BFM_WQE_MAX;
-    BFM_DBG("bfm: log_max_ra_req/res=%u/%u bf=%u bf_buf=%u num_vhca_ports=%u\n",
-            d->log_max_ra_req_qp, d->log_max_ra_res_qp, d->bf_cap, d->bf_buf_size, d->num_vhca_ports);
+    BFM_DBG("bfm: log_max_ra_req/res=%u/%u bf=%u bf_buf=%u num_vhca_ports=%u sho=%u umr_fence=%u\n",
+            d->log_max_ra_req_qp, d->log_max_ra_res_qp, d->bf_cap, d->bf_buf_size, d->num_vhca_ports,
+            d->sho, (unsigned)((c[65] >> 4) & 0x03u));
     return set_cap(d, MLX5_CAP_GENERAL, "SET_HCA_CAP(general)");
 }
 
@@ -246,6 +253,50 @@ static int create_mkey_pa(bfm_dev_t *d, uint8_t access, uint64_t start, uint64_t
     bfm_wr64be(&mkc[16], start);                   /* start_addr */
     bfm_wr64be(&mkc[24], len);                     /* len */
     const int rc = mlx5_cmd(d, in, sizeof(in), out, sizeof(out), what);
+    if (rc == BFM_OK) *mkey = (bfm_rd24be(&out[9]) << 8) | key8;
+    return rc;
+}
+
+/*=================================================================
+ * 署名(T10-DIF)のオフロードの資源(Linux の mlx5_alloc_integrity_descs() と同じ形)。
+ * PSV(署名の途中の状態を持つもの)を 2 つ作る。[0] = メモリ側、[1] = ワイヤ側。
+ *   create_psv_in : [8] num_psv << 4  [9..11] pd
+ *   create_psv_out: [17..19] psv0_index  [21..23] psv1_index
+ * ===============================================================*/
+int mlx5_create_psv2(bfm_dev_t *d, uint32_t psv[2])
+{
+    uint8_t in[16] = {0}, out[32];
+    bfm_wr16be(&in[0], MLX5_CMD_CREATE_PSV);
+    in[8] = (uint8_t)(2u << 4);
+    bfm_wr24be(&in[9], d->pdn);
+    const int rc = mlx5_cmd(d, in, sizeof(in), out, sizeof(out), "CREATE_PSV");
+    if (rc != BFM_OK) return rc;
+    psv[0] = bfm_rd24be(&out[17]);
+    psv[1] = bfm_rd24be(&out[21]);
+    return BFM_OK;
+}
+
+/*=================================================================
+ * 署名つきの MKey を作る。中身(KLM と BSF)は使うたびに UMR の WQE で入れるので、
+ * 「空き」(free)・umr_en・KLM の形で作り、BSF 64 バイト(4 octword)と変換 4 octword の
+ * 枠だけを持たせる。ローカルの読み書きだけを許す。
+ *   mkc: [0] free(0x40)  [2] umr_en | lw | lr | access_mode_1_0 = KLM(2)  [4..6] qpn  [7] mkey_7_0
+ *        [12] bsf_en(0x40)  [13..15] pd  [32..35] bsf_octword_size  [52..55] translations_octword_size
+ * ===============================================================*/
+int mlx5_create_sig_mkey(bfm_dev_t *d, uint8_t key8, uint32_t *mkey)
+{
+    uint8_t in[272] = {0}, out[16];
+    bfm_wr16be(&in[0], MLX5_CMD_CREATE_MKEY);
+    uint8_t *mkc = &in[16];
+    mkc[0] = 0x40u;
+    mkc[2] = 0x8eu;
+    bfm_wr24be(&mkc[4], 0xffffffu);
+    mkc[7] = key8;
+    mkc[12] = 0x40u;
+    bfm_wr24be(&mkc[13], d->pdn);
+    bfm_wr32be(&mkc[32], 4u);
+    bfm_wr32be(&mkc[52], 4u);
+    const int rc = mlx5_cmd(d, in, sizeof(in), out, sizeof(out), "CREATE_MKEY(署名)");
     if (rc == BFM_OK) *mkey = (bfm_rd24be(&out[9]) << 8) | key8;
     return rc;
 }

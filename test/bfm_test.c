@@ -191,6 +191,8 @@ static void lat(bfm_conn_t *c, const char *name, op_fn fn, uint32_t n)
            g_lat[(uint64_t)n * 999u / 1000u]);
 }
 
+static void run_dif(bfm_conn_t *c, uint32_t iters);
+
 static int run_client(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t iters, int oob)
 {
     bfm_conn_t *c = bfm_connect(ip, mac, port, 0);
@@ -325,6 +327,8 @@ static int run_client(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t
         rc = bfm_read(c, 0, buf, DATA_BYTES);
         check("[6] 測った後のデータ領域が模型と一致", rc == BFM_OK && memcmp(buf, g_model, DATA_BYTES) == 0);
     }
+    /* [8] T10-DIF(データ領域とは別の所を使う)。 */
+    if (!g_stop) run_dif(c, iters);
     printf("client: 模型の hash = %016llx(相手の server が切断のときに出す値と同じはず)\n",
            (unsigned long long)fnv1a(g_model, DATA_BYTES));
     /* [7] 範囲の外。相手の NIC が REMOTE_ACCESS で断ること(相手の MKey が範囲を持っていること)。 */
@@ -340,6 +344,237 @@ static int run_client(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t
     printf("client: 結果 %s(NG %d 件)\n", g_ng ? "NG" : "OK", g_ng);
     (void)bfm_disconnect(c);
     return g_ng ? 1 : 0;
+}
+
+/* ---------------------------------------------------------------------
+ * [8] T10-DIF(bfm_dif_write / bfm_dif_read)
+ *
+ * 相手の公開メモリの DIF_OFF から(データ領域・atomic 語とは別の所)を使う。
+ *   R1 = DIF_OFF          520 バイトおきの形(PI つき)
+ *   R2 = DIF_OFF + 256KiB 512 バイトおきの形(PI なし)
+ * ブロック数 DIF_N は中継バッファ(64KiB = 126 ブロック)を 3 回に分けて運ぶ数。
+ * PI は試験の側で独立に作り(CRC はビットごとの計算)、ライブラリの結果と突き合わせる。
+ * SW は常に、HW は bfm_dif_hw_supported() のときだけ試す。
+ * ------------------------------------------------------------------- */
+
+#define DIF_OFF   (1024u * 1024u)
+#define DIF_R2    (DIF_OFF + 256u * 1024u)
+#define DIF_N     300u
+#define DIF_BS    (BFM_DIF_BLOCK + BFM_DIF_PI)
+#define DIF_APP   0x1234u
+#define DIF_REF   0x00100000u
+#define DIF_APP2  0xbeefu
+#define DIF_REF2  0x7000fff0u            /* 途中で 0x7001xxxx に繰り上がる */
+
+static uint8_t g_dplain[DIF_N * BFM_DIF_BLOCK], g_dpi[DIF_N * DIF_BS];
+static uint8_t g_dexp[DIF_N * DIF_BS], g_dout[DIF_N * DIF_BS], g_draw[DIF_N * DIF_BS];
+
+/* CRC16 T10-DIF をビットごとに(ライブラリの表引きとは別の書き方で)計算する。 */
+static uint16_t crc16_bitwise(const uint8_t *p, uint32_t n)
+{
+    uint16_t crc = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        crc ^= (uint16_t)(p[i] << 8);
+        for (int k = 0; k < 8; k++)
+            crc = (uint16_t)((crc & 0x8000u) ? (((uint32_t)crc << 1) ^ 0x8bb7u) : ((uint32_t)crc << 1));
+    }
+    return crc;
+}
+
+/* plain(512 バイトおき)から、PI つき(520 バイトおき)の期待値を作る。 */
+static void dif_make(const uint8_t *plain, uint8_t *out, uint16_t app, uint32_t ref)
+{
+    for (uint32_t i = 0; i < DIF_N; i++) {
+        uint8_t *b = out + i * DIF_BS;
+        memcpy(b, plain + i * BFM_DIF_BLOCK, BFM_DIF_BLOCK);
+        const uint16_t g = crc16_bitwise(b, BFM_DIF_BLOCK);
+        const uint32_t r = ref + i;
+        b[512] = (uint8_t)(g >> 8); b[513] = (uint8_t)g;
+        b[514] = (uint8_t)(app >> 8); b[515] = (uint8_t)app;
+        b[516] = (uint8_t)(r >> 24); b[517] = (uint8_t)(r >> 16); b[518] = (uint8_t)(r >> 8); b[519] = (uint8_t)r;
+    }
+}
+
+static const char *dif_what(uint8_t w)
+{
+    return w == BFM_DIF_CHK_GUARD ? "guard" : w == BFM_DIF_CHK_APP ? "app" : w == BFM_DIF_CHK_REF ? "ref" : "?";
+}
+
+/* 誤りが期待どおりか(BFM_E_DIF、ブロック、種類)を確かめて表示する。 */
+static void dif_expect_err(const char *name, int rc, const bfm_dif_err_t *e, uint32_t block, uint8_t what)
+{
+    char s[160];
+    if (rc == BFM_E_DIF) {
+        snprintf(s, sizeof(s), "%s(%s ブロック %u、あるべき 0x%x / 実際 0x%x)", name, dif_what(e->what),
+                 e->block, e->expected, e->actual);
+    } else {
+        snprintf(s, sizeof(s), "%s(rc=%d %s)", name, rc, bfm_strerror(rc));
+    }
+    check(s, rc == BFM_E_DIF && e->block == block && e->what == what);
+}
+
+static void dif_tests(bfm_conn_t *c, uint8_t mode)
+{
+    const char *m = (mode == BFM_DIF_HW) ? "HW" : "SW";
+    char name[96];
+    bfm_dif_t d;
+    bfm_dif_err_t e;
+    int rc;
+    uint32_t seed = (mode == BFM_DIF_HW) ? 777u : 333u;
+    for (uint32_t i = 0; i < sizeof(g_dplain); i++) {
+        seed = seed * 1103515245u + 12345u;
+        g_dplain[i] = (uint8_t)(seed >> 16);
+    }
+    memset(&d, 0, sizeof(d));
+    d.mode = mode;
+    d.check = BFM_DIF_CHK_ALL;
+    d.app_tag = DIF_APP;
+    d.ref_tag = DIF_REF;
+    d.new_app_tag = DIF_APP2;
+    d.new_ref_tag = DIF_REF2;
+#define DIF_CHECK(fmt, cond) do { snprintf(name, sizeof(name), "[8] %s: " fmt, m); check(name, (cond)); } while (0)
+
+    /* write INSERT: 512 -> 相手 R1 に 520(PI を作る) */
+    d.op = BFM_DIF_INSERT;
+    rc = bfm_dif_write(c, DIF_OFF, g_dplain, DIF_N, &d, &e);
+    dif_make(g_dplain, g_dexp, DIF_APP, DIF_REF);
+    DIF_CHECK("write INSERT(相手に PI を作る)", rc == BFM_OK && bfm_read(c, DIF_OFF, g_draw, DIF_N * DIF_BS) == BFM_OK &&
+              memcmp(g_draw, g_dexp, DIF_N * DIF_BS) == 0);
+    memcpy(g_dpi, g_dexp, sizeof(g_dpi));               /* 以下、相手の R1 = g_dpi */
+
+    /* read CHECK: R1 の 520 を検査して 520 のまま */
+    d.op = BFM_DIF_CHECK;
+    memset(g_dout, 0, sizeof(g_dout));
+    rc = bfm_dif_read(c, DIF_OFF, g_dout, DIF_N, &d, &e);
+    DIF_CHECK("read CHECK(520 のまま)", rc == BFM_OK && memcmp(g_dout, g_dpi, DIF_N * DIF_BS) == 0);
+
+    /* read CHECK_SWAP: tag を置き換えて 520 */
+    d.op = BFM_DIF_CHECK_SWAP;
+    rc = bfm_dif_read(c, DIF_OFF, g_dout, DIF_N, &d, &e);
+    dif_make(g_dplain, g_dexp, DIF_APP2, DIF_REF2);
+    DIF_CHECK("read CHECK_SWAP(app / ref を置き換え)", rc == BFM_OK && memcmp(g_dout, g_dexp, DIF_N * DIF_BS) == 0);
+
+    /* read CHECK_DELETE: 520 -> 512 */
+    d.op = BFM_DIF_CHECK_DELETE;
+    memset(g_dout, 0, sizeof(g_dout));
+    rc = bfm_dif_read(c, DIF_OFF, g_dout, DIF_N, &d, &e);
+    DIF_CHECK("read CHECK_DELETE(PI を除く)", rc == BFM_OK && memcmp(g_dout, g_dplain, sizeof(g_dplain)) == 0);
+
+    /* 次のデータ(手元で PI を作る)。write CHECK で R1 に 520 のまま */
+    for (uint32_t i = 0; i < sizeof(g_dplain); i++) g_dplain[i] = (uint8_t)(g_dplain[i] * 5u + 1u);
+    dif_make(g_dplain, g_dpi, DIF_APP, DIF_REF);
+    d.op = BFM_DIF_CHECK;
+    rc = bfm_dif_write(c, DIF_OFF, g_dpi, DIF_N, &d, &e);
+    DIF_CHECK("write CHECK(520 のまま)", rc == BFM_OK && bfm_read(c, DIF_OFF, g_draw, DIF_N * DIF_BS) == BFM_OK &&
+              memcmp(g_draw, g_dpi, DIF_N * DIF_BS) == 0);
+
+    /* write CHECK_SWAP: 相手には置き換えた tag */
+    d.op = BFM_DIF_CHECK_SWAP;
+    rc = bfm_dif_write(c, DIF_OFF, g_dpi, DIF_N, &d, &e);
+    dif_make(g_dplain, g_dexp, DIF_APP2, DIF_REF2);
+    DIF_CHECK("write CHECK_SWAP(app / ref を置き換え)", rc == BFM_OK &&
+              bfm_read(c, DIF_OFF, g_draw, DIF_N * DIF_BS) == BFM_OK && memcmp(g_draw, g_dexp, DIF_N * DIF_BS) == 0);
+
+    /* write CHECK_DELETE: R2 に 512 */
+    d.op = BFM_DIF_CHECK_DELETE;
+    rc = bfm_dif_write(c, DIF_R2, g_dpi, DIF_N, &d, &e);
+    DIF_CHECK("write CHECK_DELETE(相手に 512)", rc == BFM_OK &&
+              bfm_read(c, DIF_R2, g_draw, sizeof(g_dplain)) == BFM_OK && memcmp(g_draw, g_dplain, sizeof(g_dplain)) == 0);
+
+    /* read INSERT: R2 の 512 -> 手元に 520 */
+    d.op = BFM_DIF_INSERT;
+    rc = bfm_dif_read(c, DIF_R2, g_dout, DIF_N, &d, &e);
+    DIF_CHECK("read INSERT(手元で PI を作る)", rc == BFM_OK && memcmp(g_dout, g_dpi, DIF_N * DIF_BS) == 0);
+
+    /* 誤りの検出。write: 手元のブロック 200 のデータを 1 バイト変える -> guard */
+    d.op = BFM_DIF_CHECK;
+    g_dpi[200u * DIF_BS + 17u] ^= 0x01u;
+    memset(&e, 0, sizeof(e));
+    rc = bfm_dif_write(c, DIF_OFF, g_dpi, DIF_N, &d, &e);
+    snprintf(name, sizeof(name), "[8] %s: write CHECK でブロック 200 の guard の誤り", m);
+    dif_expect_err(name, rc, &e, 200u, BFM_DIF_CHK_GUARD);
+    g_dpi[200u * DIF_BS + 17u] ^= 0x01u;
+    /* write: 期待する ref tag を 1 ずらす -> ブロック 0 の ref */
+    d.ref_tag = DIF_REF + 1u;
+    memset(&e, 0, sizeof(e));
+    rc = bfm_dif_write(c, DIF_OFF, g_dpi, DIF_N, &d, &e);
+    snprintf(name, sizeof(name), "[8] %s: write CHECK で ref tag の誤り(ブロック 0)", m);
+    dif_expect_err(name, rc, &e, 0u, BFM_DIF_CHK_REF);
+    d.ref_tag = DIF_REF;
+    /* read: 相手の R1 に、ブロック 150 の app tag だけを変えたものを置く -> app */
+    memcpy(g_draw, g_dpi, sizeof(g_dpi));
+    g_draw[150u * DIF_BS + 515u] ^= 0x40u;
+    rc = bfm_write(c, DIF_OFF, g_draw, DIF_N * DIF_BS);
+    memset(&e, 0, sizeof(e));
+    if (rc == BFM_OK) rc = bfm_dif_read(c, DIF_OFF, g_dout, DIF_N, &d, &e);
+    snprintf(name, sizeof(name), "[8] %s: read CHECK でブロック 150 の app tag の誤り", m);
+    dif_expect_err(name, rc, &e, 150u, BFM_DIF_CHK_APP);
+    /* 同じものを app tag を検査せずに読めば通る(誤りの後も使えること)*/
+    d.check = BFM_DIF_CHK_GUARD | BFM_DIF_CHK_REF;
+    rc = bfm_dif_read(c, DIF_OFF, g_dout, DIF_N, &d, &e);
+    DIF_CHECK("read CHECK(app tag を検査しない)で通る", rc == BFM_OK && memcmp(g_dout, g_draw, DIF_N * DIF_BS) == 0);
+    d.check = BFM_DIF_CHK_ALL;
+#undef DIF_CHECK
+}
+
+/* DIF の遅延(8 ブロック = 4KiB、1 回ずつ完了を待つ)を SW / HW で比べる。 */
+static void dif_lat(bfm_conn_t *c, uint8_t mode, uint8_t op, int is_read, uint32_t n)
+{
+    bfm_dif_t d;
+    memset(&d, 0, sizeof(d));
+    d.op = op;
+    d.mode = mode;
+    d.check = BFM_DIF_CHK_ALL;
+    d.app_tag = DIF_APP;
+    d.ref_tag = DIF_REF;
+    const uint64_t remote = DIF_OFF;                     /* 520 バイトおきの形(read INSERT は測らない)*/
+    if (n > sizeof(g_lat) / sizeof(g_lat[0])) n = sizeof(g_lat) / sizeof(g_lat[0]);
+    dif_make(g_dplain, g_dpi, DIF_APP, DIF_REF);
+    for (uint32_t i = 0; i < n + 100u; i++) {
+        const uint64_t t0 = now_ns();
+        const int rc = is_read ? bfm_dif_read(c, remote, g_dout, 8u, &d, NULL)
+                               : bfm_dif_write(c, remote, op == BFM_DIF_INSERT ? (const void *)g_dplain
+                                                                              : (const void *)g_dpi, 8u, &d, NULL);
+        if (rc != BFM_OK) {
+            printf("client: DIF の遅延: %s(rc=%d)\n", bfm_strerror(rc), rc);
+            g_ng++;
+            return;
+        }
+        if (i >= 100u) g_lat[i - 100u] = (uint32_t)(now_ns() - t0);
+    }
+    qsort(g_lat, n, sizeof(g_lat[0]), cmp_u32);
+    static const char *ops[] = {"CHECK", "CHECK_SWAP", "INSERT", "CHECK_DELETE"};
+    printf("client: 遅延 DIF %s %-5s %-12s 4KiB x%u: 中央値 %u ns / p99 %u\n", mode == BFM_DIF_HW ? "HW" : "SW",
+           is_read ? "read" : "write", ops[op], n, g_lat[n / 2u], g_lat[(uint64_t)n * 99u / 100u]);
+}
+
+static void run_dif(bfm_conn_t *c, uint32_t iters)
+{
+    if (bfm_remote_size(c) < DIF_R2 + DIF_N * DIF_BS) {
+        printf("client: [8] 相手の公開メモリが小さいので T10-DIF の検査を飛ばす\n");
+        return;
+    }
+    printf("client: [8] T10-DIF(%u ブロック)。オフロード %s\n", DIF_N,
+           bfm_dif_hw_supported() ? "あり(SW と HW を試す)" : "なし(SW だけ)");
+    dif_tests(c, BFM_DIF_SW);
+    if (bfm_dif_hw_supported()) {
+        dif_tests(c, BFM_DIF_HW);
+    } else {
+        bfm_dif_t d;
+        memset(&d, 0, sizeof(d));
+        d.mode = BFM_DIF_HW;
+        check("[8] オフロードなしの装置で BFM_DIF_HW は BFM_E_NOTSUP",
+              bfm_dif_write(c, DIF_OFF, g_dplain, 1, &d, NULL) == BFM_E_NOTSUP);
+    }
+    if (g_stop || g_ng) return;
+    const uint32_t n = iters < 5000u ? iters : 5000u;
+    for (uint8_t mode = BFM_DIF_SW; mode <= BFM_DIF_HW; mode++) {
+        if (mode == BFM_DIF_HW && !bfm_dif_hw_supported()) break;
+        dif_lat(c, mode, BFM_DIF_INSERT, 0, n);
+        dif_lat(c, mode, BFM_DIF_CHECK, 0, n);
+        dif_lat(c, mode, BFM_DIF_CHECK, 1, n);
+        dif_lat(c, mode, BFM_DIF_CHECK_DELETE, 1, n);
+    }
 }
 
 /* ---------------------------------------------------------------------
@@ -483,10 +718,10 @@ int main(int argc, char **argv)
         }
     } else if (strcmp(mode, "info") == 0) {
         printf("info: %s bf=%u bf_buf=%u atomic ops=0x%x size_qp=0x%x mode=%u ts_format=%u "
-               "read/atomic req/res=%u/%u FW ページ %u\n", g_bfm.name, g_bfm.bf_cap, g_bfm.bf_buf_size,
-               g_bfm.atomic_ops, g_bfm.atomic_size_qp, g_bfm.atomic_mode,
+               "read/atomic req/res=%u/%u FW ページ %u sho=%u T10-DIF オフロード %s\n", g_bfm.name,
+               g_bfm.bf_cap, g_bfm.bf_buf_size, g_bfm.atomic_ops, g_bfm.atomic_size_qp, g_bfm.atomic_mode,
                g_bfm.qp_ts_format, 1u << g_bfm.log_max_ra_req_qp, 1u << g_bfm.log_max_ra_res_qp,
-               g_bfm.fw_pages_used);
+               g_bfm.fw_pages_used, g_bfm.sho, bfm_dif_hw_supported() ? "あり" : "なし");
     } else {
         usage();
         ret = 2;

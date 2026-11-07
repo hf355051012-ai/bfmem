@@ -41,6 +41,8 @@
 #define BFM_E_REMOTE    (-6)   /* 相手が拒否した(rkey・範囲・権限)*/
 #define BFM_E_RETRY     (-7)   /* 再送が尽きた(相手に届かない)*/
 #define BFM_E_CQE       (-8)   /* そのほかのエラー完了 */
+#define BFM_E_DIF       (-9)   /* T10-DIF の検査で誤りを見つけた(bfm_dif_err_t に詳しく)*/
+#define BFM_E_NOTSUP    (-10)  /* 装置が対応していない(T10-DIF のオフロードなど)*/
 
 typedef struct bfm_conn bfm_conn_t;
 
@@ -106,6 +108,70 @@ int bfm_cas32(bfm_conn_t *c, uint64_t off, uint32_t expect, uint32_t desired, ui
 
 /* 4 バイトの fetch-and-add。off は 4 の倍数。*old に足す前の値が入る。 */
 int bfm_faa32(bfm_conn_t *c, uint64_t off, uint32_t add, uint32_t *old);
+
+/* ---- T10-DIF(512 + 8 バイトのブロック)----
+ *
+ * 1 ブロック = データ 512 バイト + 保護情報(PI)8 バイト。PI はデータの直後に置く(520 バイトおき)。
+ *   PI[0..1] guard   = データ 512 バイトの CRC16(T10-DIF、多項式 0x8BB7、初期値 0)、ビッグエンディアン
+ *   PI[2..3] app tag = ビッグエンディアン
+ *   PI[4..7] ref tag = ビッグエンディアン。ブロックごとに 1 増える(Type 1)
+ * PI の無い形は 512 バイトおき。
+ *
+ * 操作(入る側 = write では自分のメモリ、read では相手のメモリ。出る側はその反対):
+ *   BFM_DIF_CHECK         入る側の PI を検査し、そのまま渡す(520 -> 520)
+ *   BFM_DIF_CHECK_SWAP    入る側の PI を検査し、app tag / ref tag を new_* に置き換える(520 -> 520。guard はそのまま)
+ *   BFM_DIF_INSERT        PI を作って付ける(512 -> 520)
+ *   BFM_DIF_CHECK_DELETE  入る側の PI を検査し、取り除く(520 -> 512)
+ * mode:
+ *   BFM_DIF_SW  CPU が CRC を計算する(どの装置でも使える。ConnectX-4 もこれ)
+ *   BFM_DIF_HW  NIC の署名オフロード(署名つき MKey)。bfm_dif_hw_supported() が 1 のときだけ
+ * 検査で誤りを見つけたら BFM_E_DIF を返し、*err に場所と中身を入れる。read では誤りの前の
+ * ブロックまで dst に書いてある。write では、SW は誤りのある範囲を送らず、HW は送ってしまう
+ * ことがある(誤りは送った後に分かる)。app tag の 0xffff を「検査しない」とみなす扱い(escape)はしない。 */
+#define BFM_DIF_BLOCK 512u
+#define BFM_DIF_PI    8u
+
+enum { BFM_DIF_CHECK = 0, BFM_DIF_CHECK_SWAP = 1, BFM_DIF_INSERT = 2, BFM_DIF_CHECK_DELETE = 3 };
+enum { BFM_DIF_SW = 0, BFM_DIF_HW = 1 };
+
+#define BFM_DIF_CHK_GUARD 0x1u
+#define BFM_DIF_CHK_APP   0x2u
+#define BFM_DIF_CHK_REF   0x4u
+#define BFM_DIF_CHK_ALL   0x7u
+
+typedef struct {
+    uint8_t  op;            /* BFM_DIF_CHECK など */
+    uint8_t  mode;          /* BFM_DIF_SW / BFM_DIF_HW */
+    uint8_t  check;         /* 検査するもの(BFM_DIF_CHK_*)。INSERT では使わない */
+    uint16_t app_tag;       /* 入る側の app tag(INSERT では付ける値)*/
+    uint32_t ref_tag;       /* 最初のブロックの ref tag(INSERT では付ける値)*/
+    uint16_t new_app_tag;   /* CHECK_SWAP で置き換える app tag */
+    uint32_t new_ref_tag;   /* CHECK_SWAP で置き換える、最初のブロックの ref tag */
+} bfm_dif_t;
+
+typedef struct {
+    uint32_t block;         /* 誤りのあったブロック(先頭からの番号)*/
+    uint8_t  what;          /* BFM_DIF_CHK_GUARD / APP / REF */
+    uint32_t expected;      /* あるべき値 */
+    uint32_t actual;        /* 実際の値 */
+} bfm_dif_err_t;
+
+/* src の nblocks ブロックを、形を変えて相手の公開メモリ + off へ書く。
+ * src の形は入る側(CHECK・SWAP・DELETE は 520 バイトおき、INSERT は 512 バイトおき)。
+ * err は NULL でもよい。 */
+int bfm_dif_write(bfm_conn_t *c, uint64_t off, const void *src, uint32_t nblocks,
+                  const bfm_dif_t *dif, bfm_dif_err_t *err);
+
+/* 相手の公開メモリ + off から nblocks ブロックを読み、形を変えて dst に置く。
+ * dst の形は出る側(CHECK・SWAP・INSERT は 520 バイトおき、DELETE は 512 バイトおき)。 */
+int bfm_dif_read(bfm_conn_t *c, uint64_t off, void *dst, uint32_t nblocks,
+                 const bfm_dif_t *dif, bfm_dif_err_t *err);
+
+/* 1 = BFM_DIF_HW が使える(装置に署名オフロード(sho)があり、資源を用意できた)。 */
+int bfm_dif_hw_supported(void);
+
+/* データ 512 バイトの PI(8 バイト)を作る(アプリケーションが PI つきのデータを用意するため)。 */
+void bfm_dif_make_pi(const void *data, uint16_t app_tag, uint32_t ref_tag, uint8_t pi[8]);
 
 /* ---- 情報 ---- */
 

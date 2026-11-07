@@ -140,7 +140,7 @@
     },
     {
       "func": "setup_general_caps",
-      "summary": "general の能力を読み、要るもの(`page_request_disable`・`log_max_ra_req_qp`・`log_max_ra_res_qp`・`port_type`・`roce`・`bf`・`log_bf_reg_size`・`num_vhca_ports`)を取り出して `d` に入れ、今の値のまま `SET_HCA_CAP` で書き戻す。BlueFlame の 1 面の大きさ `bf_buf_size` を `2^log_bf_reg_size / 2`(上限 `BFM_WQE_MAX`)にする。",
+      "summary": "general の能力を読み、要るもの(`page_request_disable`・`log_max_ra_req_qp`・`log_max_ra_res_qp`・`port_type`・`roce`・`bf`・`log_bf_reg_size`・`num_vhca_ports`・署名オフロードの `sho`・`umr_fence`)を取り出して `d` に入れ、今の値のまま `SET_HCA_CAP` で書き戻す。BlueFlame の 1 面の大きさ `bf_buf_size` を `2^log_bf_reg_size / 2`(上限 `BFM_WQE_MAX`)にする。",
       "args": {"d": "装置"},
       "ret": "`BFM_OK`: 読めて書き戻せた。`BFM_E_HW`: ポートが Ethernet でない。そのほか `query_cap()` / `set_cap()` の戻り値。",
       "pre": "`HOST_ENDIANNESS` を書いた後で、`INIT_HCA` の前であること。",
@@ -148,7 +148,8 @@
       "flow": [
         {"call": "rc = query_cap(d, MLX5_CAP_GENERAL, \"QUERY_HCA_CAP(general)\") を呼ぶ"},
         {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-        {"do": "能力から page_request_disable・log_max_ra_req_qp・log_max_ra_res_qp・bf_cap・num_vhca_ports を d へ、port_type・roce・log_bf を局所変数へ取り出す"},
+        {"do": "能力から page_request_disable・log_max_ra_req_qp・log_max_ra_res_qp・bf_cap・num_vhca_ports・sho を d へ、port_type・roce・log_bf を局所変数へ取り出す"},
+        {"do": "d->umr_fence = umr_fence が 1 なら FENCE_SMALL、2 なら 0、それ以外は FENCE_STRONG(Linux の mlx5_get_umr_fence())"},
         {"if": "port_type != 1(Ethernet でない)?", "then": [
           {"do": "BFM_LOG で「RoCE は使えない」を表示"},
           {"return": "BFM_E_HW"}
@@ -258,6 +259,35 @@
         {"if": "len == 0 ?", "then": [{"do": "mkc の length64 を立てる(mkc[12] = 0x80)"}]},
         {"call": "rc = mlx5_cmd(d, in, 272, out, 16, what) を呼ぶ"},
         {"if": "rc == BFM_OK ?", "then": [{"do": "*mkey = (out の byte 9〜11 << 8) OR key8"}]},
+        {"return": "rc"}
+      ]
+    },
+    {
+      "func": "mlx5_create_psv2",
+      "summary": "PSV(署名の途中の状態を持つもの)を 2 つ作る(`CREATE_PSV`、Linux の `mlx5_core_create_psv()`)。`psv[0]` をメモリ側、`psv[1]` をワイヤ側に使う。",
+      "args": {"d": "装置", "psv": "作った PSV の番号を入れる先(2 個)"},
+      "ret": "`BFM_OK`、または `mlx5_cmd()` の戻り値。",
+      "pre": "PD を作ってあること。",
+      "notes": "入力: [8] num_psv << 4、[9..11] pd。出力: [17..19] psv0_index、[21..23] psv1_index。",
+      "flow": [
+        {"do": "入力を作る: opcode = CREATE_PSV、num_psv = 2、pd = d->pdn"},
+        {"call": "rc = mlx5_cmd(d, in, 16, out, 32, \"CREATE_PSV\") を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"do": "psv[0] = out[17..19]、psv[1] = out[21..23]"},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "mlx5_create_sig_mkey",
+      "summary": "署名つきの MKey を作る(Linux の `mlx5_alloc_integrity_descs()` の MKey と同じ形)。中身は使うたびに UMR で入れるので、空き(free)・umr_en・KLM の形で、BSF 4 octword と変換 4 octword の枠を持たせる。ローカルの読み書きだけを許す。",
+      "args": {"d": "装置", "key8": "鍵の下位 8 ビット", "mkey": "作った MKey を入れる先"},
+      "ret": "`BFM_OK`、または `mlx5_cmd()` の戻り値。",
+      "pre": "PD を作ってあること。",
+      "notes": "mkc: [0] free、[2] umr_en | lw | lr | access_mode = KLM(0x8e)、[4..6] qpn = 0xffffff、[7] mkey_7_0、[12] bsf_en、[13..15] pd、[32..35] bsf_octword_size = 4、[52..55] translations_octword_size = 4。",
+      "flow": [
+        {"do": "入力を作る: opcode = CREATE_MKEY と mkc の各欄"},
+        {"call": "rc = mlx5_cmd(d, in, 272, out, 16, \"CREATE_MKEY(署名)\") を呼ぶ"},
+        {"if": "rc == BFM_OK ?", "then": [{"do": "*mkey = (MKey の番号 << 8) | key8"}]},
         {"return": "rc"}
       ]
     },

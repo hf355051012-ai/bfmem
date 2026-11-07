@@ -56,6 +56,7 @@
         {"do": "qp->has_cq = 1、qp->cq_cc = 0"},
         {"do": "qp->sq = qp->wq + rq_bytes。WQ と dbr[0..1] を 0 で埋める"},
         {"do": "入力を 0 で埋め、opcode = CREATE_QP と QPC の各欄(st・pd・mtu と log_msg_max・log_rq_size・log_sq_size・ts_format・uar_page・cqn_snd・cqn_rcv・dbr_addr・rq_type・cs_req)を書く"},
+        {"if": "st == MLX5_QP_ST_RC ?", "then": [{"do": "qpc[114] = 0x08(fre: UMR を出せる。T10-DIF のオフロードで使う)"}]},
         {"do": "WQ の各ページの物理アドレスを入力の 272 バイト目以降に並べる"},
         {"call": "rc = mlx5_cmd(d, in, 272 + npages x 8, out, 16, \"CREATE_QP\") を呼ぶ"},
         {"if": "rc != BFM_OK ?", "then": [

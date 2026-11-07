@@ -1,0 +1,456 @@
+{
+  "file": "src/bfm_dif.c",
+  "summary": "T10-DIF(512 + 8 バイトのブロック)をつけた転送(`bfm_dif_write()` / `bfm_dif_read()`)。入る側の形のブロックを出る側の形に変えて運ぶ。write は自分のメモリが入る側・相手のメモリが出る側、read はその反対。\n\n* `BFM_DIF_SW`(オフロードなし): CPU が中継バッファで形を変える(CRC は 8 バイトずつ表を引く)。どの装置でも使える。\n* `BFM_DIF_HW`(オフロードあり): NIC の署名オフロード。Linux の `IB_WR_REG_MR_INTEGRITY` と同じ手順で、(前に使っていれば MKey を空きに戻す UMR)→ 署名つき MKey を張る UMR(KLM か 520 バイトおきの strided block と BSF)→ SET_PSV × 2 → 署名つき MKey を手元のバッファとした RDMA を出す。検査の誤りは SIG_ERR の CQE で知る(`poll_one()` が覚える)。接続ごとの MKey と PSV は `bfm_dif_init()` で作っておく。**ConnectX-4 Lx には署名オフロード(`sho`)が無いので、実機では確かめていない**(ConnectX-7 を想定して Linux の作りに合わせた)。",
+  "functions": [
+    {
+      "func": "crc_table_init",
+      "summary": "CRC16(T10-DIF、多項式 0x8BB7)の表 `s_crc_tab[8][256]` を作る。`s_crc_tab[0]` は 1 バイトずつの表、`s_crc_tab[k][n]` はバイト n の後に 0 が k バイト続くときの CRC(8 バイトずつ引くため)。",
+      "args": {},
+      "ret": "なし",
+      "pre": "特になし(`crc16()` が最初に呼ぶ)。",
+      "notes": "特になし。",
+      "flow": [
+        {"do": "i = 0"},
+        {"while": "i < 256 ?", "body": [
+          {"do": "c = i << 8"},
+          {"do": "8 回: c = 最上位ビットが 1 なら (c << 1) ^ 0x8bb7、でなければ c << 1"},
+          {"do": "s_crc_tab[0][i] = c"},
+          {"do": "i++"}
+        ]},
+        {"do": "k = 1"},
+        {"while": "k < 8 ?", "body": [
+          {"do": "i = 0"},
+          {"while": "i < 256 ?", "body": [
+            {"do": "c = s_crc_tab[k - 1][i]"},
+            {"do": "s_crc_tab[k][i] = (c << 8) ^ s_crc_tab[0][c >> 8]"},
+            {"do": "i++"}
+          ]},
+          {"do": "k++"}
+        ]}
+      ]
+    },
+    {
+      "func": "crc16",
+      "summary": "`p` の `len` バイトの CRC16(T10-DIF: 多項式 0x8BB7、初期値 0、反転なし)を求める。8 バイトずつ表を引き(slice-by-8)、残りを 1 バイトずつ処理する。",
+      "args": {"p": "データ", "len": "バイト数"},
+      "ret": "CRC16 の値。",
+      "pre": "特になし。",
+      "notes": "表がまだ無ければ(`s_crc_tab[0][1] == 0`)最初に `crc_table_init()` で作る。",
+      "flow": [
+        {"do": "crc = 0"},
+        {"if": "s_crc_tab[0][1] == 0 ?", "then": [{"call": "crc_table_init() を呼ぶ"}]},
+        {"while": "len >= 8 ?", "body": [
+          {"do": "crc = s_crc_tab[7][p[0] ^ (crc >> 8)] ^ s_crc_tab[6][p[1] ^ (crc & 0xff)] ^ s_crc_tab[5][p[2]] ^ … ^ s_crc_tab[0][p[7]]"},
+          {"do": "len -= 8、p += 8"}
+        ]},
+        {"while": "len > 0 ?", "body": [
+          {"do": "crc = ((crc << 8) ^ s_crc_tab[0][(crc >> 8) ^ *p]) & 0xffff"},
+          {"do": "len--、p++"}
+        ]},
+        {"return": "crc"}
+      ]
+    },
+    {
+      "func": "bfm_dif_make_pi",
+      "summary": "データ 512 バイトの PI(8 バイト)を作る。`pi[0..1]` = データの CRC16、`pi[2..3]` = `app_tag`、`pi[4..7]` = `ref_tag`(どれもビッグエンディアン)。",
+      "args": {"data": "データ 512 バイト", "app_tag": "app tag", "ref_tag": "ref tag", "pi": "作った PI を入れる先(8 バイト)"},
+      "ret": "なし",
+      "pre": "特になし(`bfm_init()` の前でも使える)。",
+      "notes": "アプリケーションが、CHECK などで送る PI つきのデータを用意するためのもの。",
+      "flow": [
+        {"call": "bfm_wr16be(&pi[0], crc16(data, 512)) を呼ぶ"},
+        {"do": "pi[2..3] = app_tag、pi[4..7] = ref_tag(BE)"}
+      ]
+    },
+    {
+      "func": "make_plan",
+      "summary": "操作 `d` を「入る側・出る側」の形(`struct plan`)に直す。両側の PI の有無とブロックの大きさ(520 か 512)、入る側の tag と出る側の tag、検査するもの(INSERT では 0)を決める。CHECK_SWAP では出る側の tag を `new_app_tag` / `new_ref_tag` にする。",
+      "args": {"d": "操作", "p": "結果を入れる先"},
+      "ret": "`BFM_OK`。`BFM_E_PARAM`: `d->op` が知らない値。",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"do": "p を 0 で埋める。in_app = out_app = d->app_tag、in_ref = out_ref = d->ref_tag、check = d->check & BFM_DIF_CHK_ALL"},
+        {"switch": "d->op", "cases": [
+          {"case": "BFM_DIF_CHECK", "body": [{"do": "in_pi = 1、out_pi = 1"}]},
+          {"case": "BFM_DIF_CHECK_SWAP", "body": [{"do": "in_pi = 1、out_pi = 1、out_app = d->new_app_tag、out_ref = d->new_ref_tag"}]},
+          {"case": "BFM_DIF_INSERT", "body": [{"do": "in_pi = 0、out_pi = 1、check = 0"}]},
+          {"case": "BFM_DIF_CHECK_DELETE", "body": [{"do": "in_pi = 1、out_pi = 0"}]},
+          {"default": true, "body": [{"return": "BFM_E_PARAM"}]}
+        ]},
+        {"do": "in_bs = in_pi ? 520 : 512、out_bs = out_pi ? 520 : 512"},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "set_err",
+      "summary": "誤りの情報(ブロックの番号・種類・あるべき値・実際の値)を `e` に入れる。",
+      "args": {"e": "入れる先(NULL なら何もしない)", "block": "ブロックの番号", "what": "`BFM_DIF_CHK_GUARD` / `APP` / `REF`", "expected": "あるべき値", "actual": "実際の値"},
+      "ret": "なし",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"if": "e == NULL ?", "then": [{"return": ""}]},
+        {"do": "e->block・what・expected・actual を入れる"}
+      ]
+    },
+    {
+      "func": "sw_block",
+      "summary": "SW: 1 ブロックを入る側の形 `in` から出る側の形 `out` に変える。入る側に PI があれば、`check` の指定どおりに guard(CRC)・ref tag(`in_ref + i`)・app tag の順に検査する。出る側の PI は NIC の署名オフロードと同じ決め方で作る: guard は入る側にあれば写し、無ければ計算する。app tag・ref tag は、入る側に PI があり値が同じなら入る側のバイトを写し、違えば新しい値(ref tag は `out_ref + i`)を書く。",
+      "args": {"p": "入る側・出る側の形", "in": "入る側のブロック", "out": "出る側のブロックを書く先(`in` と同じでもよい)", "i": "先頭からのブロックの番号", "e": "誤りの情報を入れる先(NULL でもよい)"},
+      "ret": "`BFM_OK`。`BFM_E_DIF`: 検査で誤りを見つけた(`e` に入れる)。",
+      "pre": "特になし。",
+      "notes": "* 検査の順は guard → ref tag → app tag(Linux が SIG_ERR を読む順と同じ)。\n* guard を検査しないとき、入る側の guard は正しくなくてもそのまま写す(NIC と同じ)。",
+      "flow": [
+        {"do": "pi = in + 512、guard = 0、have_guard = 0"},
+        {"if": "in_pi && check ?", "then": [
+          {"if": "check & BFM_DIF_CHK_GUARD ?", "then": [
+            {"call": "guard = crc16(in, 512) を呼ぶ"},
+            {"do": "have_guard = 1"},
+            {"if": "pi の guard != guard ?", "then": [
+              {"call": "set_err(e, i, BFM_DIF_CHK_GUARD, guard, pi の guard) を呼ぶ"},
+              {"return": "BFM_E_DIF"}
+            ]}
+          ]},
+          {"if": "(check & BFM_DIF_CHK_REF) && pi の ref tag != in_ref + i ?", "then": [
+            {"call": "set_err(e, i, BFM_DIF_CHK_REF, in_ref + i, pi の ref tag) を呼ぶ"},
+            {"return": "BFM_E_DIF"}
+          ]},
+          {"if": "(check & BFM_DIF_CHK_APP) && pi の app tag != in_app ?", "then": [
+            {"call": "set_err(e, i, BFM_DIF_CHK_APP, in_app, pi の app tag) を呼ぶ"},
+            {"return": "BFM_E_DIF"}
+          ]}
+        ]},
+        {"if": "out != in ?", "then": [{"do": "out に in のデータ 512 バイトを写す"}]},
+        {"if": "out_pi ?", "then": [
+          {"do": "po = out + 512"},
+          {"if": "in_pi ?", "then": [
+            {"do": "po[0..1] = pi[0..1](guard を写す)"}
+          ], "else": [
+            {"call": "bfm_wr16be(&po[0], have_guard ? guard : crc16(in, 512)) を呼ぶ"}
+          ]},
+          {"if": "in_pi && out_app == in_app ?", "then": [{"do": "po[2..3] = pi[2..3]"}], "else": [{"do": "po[2..3] = out_app"}]},
+          {"if": "in_pi && out_ref == in_ref ?", "then": [{"do": "po[4..7] = pi[4..7]"}], "else": [{"do": "po[4..7] = out_ref + i"}]}
+        ]},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "stage_rdma",
+      "summary": "中継バッファ(先頭から `len` バイト)と相手の公開メモリ + `off` の間で、RDMA の read / write を 1 回出して終わるまで待つ。手元の鍵は `g_bfm.lkey`。",
+      "args": {"c": "接続", "is_read": "1 = read(相手 → 中継バッファ)、0 = write", "off": "相手の公開メモリの先頭からのオフセット", "len": "バイト数(中継バッファの大きさ以下)"},
+      "ret": "`BFM_OK`、または `bfm_ops_post()` / `bfm_ops_wait_all()` の戻り値。",
+      "pre": "範囲は呼び出し側が確かめておくこと。",
+      "notes": "特になし。",
+      "flow": [
+        {"call": "bfm_ops_build_rdma(c, w, is_read, off, g_bfm.lkey, 中継バッファのアドレス, len, 0) を呼ぶ"},
+        {"call": "rc = bfm_ops_post(c, w, 1) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"call": "bfm_ops_wait_all(c) を呼ぶ"},
+        {"return": "bfm_ops_wait_all() の戻り値"}
+      ]
+    },
+    {
+      "func": "sw_write",
+      "summary": "SW の write。中継バッファに入るブロック数(`stage_size / 520`)ずつ、`src` の各ブロックを `sw_block()` で出る側の形に変えて中継バッファへ並べ、`stage_rdma()` で相手へ書く。",
+      "args": {"c": "接続", "p": "入る側・出る側の形", "off": "相手の公開メモリの先頭からのオフセット", "src": "入る側の形のブロックの並び", "n": "ブロック数", "e": "誤りの情報を入れる先(NULL でもよい)"},
+      "ret": "`BFM_OK`。`BFM_E_DIF`: 検査の誤り(その回の分は送らない)。そのほか `stage_rdma()` の戻り値。",
+      "pre": "`prepare()` が済んでいること。",
+      "notes": "誤りが見つかる前の回の分は、もう相手に書いてある。",
+      "flow": [
+        {"do": "per = stage_size / 520、st = 中継バッファ、done = 0"},
+        {"while": "done < n ?", "body": [
+          {"do": "k = min(n - done, per)"},
+          {"do": "i = 0"},
+          {"while": "i < k ?", "body": [
+            {"call": "rc = sw_block(p, src + (done + i) * in_bs, st + i * out_bs, done + i, e) を呼ぶ"},
+            {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+            {"do": "i++"}
+          ]},
+          {"call": "rc = stage_rdma(c, 0, off + done * out_bs, k * out_bs) を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+          {"do": "done += k"}
+        ]},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "sw_read",
+      "summary": "SW の read。中継バッファに入るブロック数ずつ、相手から入る側の形のまま `stage_rdma()` で中継バッファへ読み、各ブロックを `sw_block()` で出る側の形に変えて `dst` に置く。",
+      "args": {"c": "接続", "p": "入る側・出る側の形", "off": "相手の公開メモリの先頭からのオフセット", "dst": "出る側の形のブロックを置く先", "n": "ブロック数", "e": "誤りの情報を入れる先(NULL でもよい)"},
+      "ret": "`BFM_OK`。`BFM_E_DIF`: 検査の誤り。そのほか `stage_rdma()` の戻り値。",
+      "pre": "`prepare()` が済んでいること。",
+      "notes": "誤りがあったときは、そのブロックの前までを `dst` に置いてある。",
+      "flow": [
+        {"do": "per = stage_size / 520、st = 中継バッファ、done = 0"},
+        {"while": "done < n ?", "body": [
+          {"do": "k = min(n - done, per)"},
+          {"call": "rc = stage_rdma(c, 1, off + done * in_bs, k * in_bs) を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+          {"do": "i = 0"},
+          {"while": "i < k ?", "body": [
+            {"call": "rc = sw_block(p, st + i * in_bs, dst + (done + i) * out_bs, done + i, e) を呼ぶ"},
+            {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+            {"do": "i++"}
+          ]},
+          {"do": "done += k"}
+        ]},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "bfm_dif_init",
+      "summary": "署名オフロードの資源を用意する。装置に署名オフロード(`g_bfm.sho`)があれば、接続の枠ごとに PSV 2 個(`mlx5_create_psv2()`)と署名つき MKey 1 個(`mlx5_create_sig_mkey()`)を作り、`BFM_DIF_HW` を使えるようにする。",
+      "args": {},
+      "ret": "常に `BFM_OK`(作れなくても `BFM_DIF_SW` だけで続ける)。",
+      "pre": "`mlx5_hca_init()` が済んでいること(PD を使う)。",
+      "notes": "* 作った資源は消さない(`bfm_shutdown()` の TEARDOWN_HCA で消える)。\n* `sigerr_count` を 1 で始める(Linux と同じく、最初の UMR で sigerr の印を立てる)。",
+      "flow": [
+        {"do": "s_sig を 0 で埋める。s_hw = 0"},
+        {"if": "!g_bfm.sho ?", "then": [
+          {"do": "BFM_DBG で「sho が無い」を表示"},
+          {"return": "BFM_OK"}
+        ]},
+        {"call": "key8 = bfm_port_time_ns() >> 12 を呼ぶ"},
+        {"do": "i = 0"},
+        {"while": "i < BFM_MAX_CONN ?", "body": [
+          {"call": "mlx5_create_psv2(&g_bfm, psv) を呼ぶ"},
+          {"if": "失敗した?", "then": [
+            {"do": "BFM_LOG で注意を表示"},
+            {"return": "BFM_OK"}
+          ]},
+          {"call": "mlx5_create_sig_mkey(&g_bfm, key8 + i, &s_sig[i].mkey) を呼ぶ"},
+          {"if": "失敗した?", "then": [
+            {"do": "BFM_LOG で注意を表示"},
+            {"return": "BFM_OK"}
+          ]},
+          {"do": "s_sig[i].psv_mem = psv[0]、psv_wire = psv[1]、sigerr_count = 1"},
+          {"do": "i++"}
+        ]},
+        {"do": "s_hw = 1"},
+        {"do": "BFM_DBG で接続 0 の MKey と PSV を表示"},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "bfm_dif_hw_supported",
+      "summary": "`BFM_DIF_HW` を使えるか(`s_hw`)を返す。",
+      "args": {},
+      "ret": "1: 使える。0: 使えない(装置に署名オフロードが無い、または資源を作れなかった、`bfm_init()` の前)。",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"return": "s_hw"}
+      ]
+    },
+    {
+      "func": "bsf_inl",
+      "summary": "BSF の inline の部分(16 バイト。Linux の `mlx5_fill_inl_bsf()`)を書く: 有効と REFRESH、app tag、最初の ref tag、guard = CRC、ブロックの繰り返し、ref tag をブロックごとに 1 増やす、app tag は全ビットを比べる。",
+      "args": {"p": "書く先(16 バイト)", "app": "app tag", "ref": "最初のブロックの ref tag"},
+      "ret": "なし",
+      "pre": "`p` は 0 で埋めてあること。",
+      "notes": "app tag の escape(0xffff を検査しない扱い)は付けない。",
+      "flow": [
+        {"do": "p[0..1] = 0xc000(有効 | REFRESH)、p[2..3] = app、p[4..7] = ref"},
+        {"do": "p[8] = 0x01(CRC)、p[9] = 0x80(繰り返し)、p[13] = 0x40(ref tag を増やす)、p[14..15] = 0xffff"}
+      ]
+    },
+    {
+      "func": "build_umr",
+      "summary": "署名つき MKey を張る UMR の WQE(4 WQEBB = 256 バイト)を組む。メモリ側 = 中継バッファ(write では入る側、read では出る側)、ワイヤ側 = 相手のメモリ。\n\n* [0..15] 制御(UMR、fence = `g_bfm.umr_fence`、imm = MKey)\n* [16..63] UMR の制御: flags = inline | 空きを確かめる、変換 4 octword、BSF 4 octword、mkey_mask(Linux の `sig_mkey_mask()`)\n* [64..127] MKey: KLM・LR / LW / UMR_EN、REMOTE_INVAL・sigerr の印・BSF あり・PD、長さ = メモリ側のバイト数\n* [128..191] 変換: メモリ側に PI が無ければ KLM 1 個、あれば 520 バイトおきの strided block(データ 512 と PI 8 の 2 項目)\n* [192..255] BSF: basic(検査するバイト、同じ形なら写すバイト、ブロックの大きさ 512、データのバイト数、PSV)・ext(0)・ワイヤ側とメモリ側の inline",
+      "args": {"c": "接続", "s": "その接続の署名の資源", "w": "WQE を組む作業域(256 バイト)", "p": "入る側・出る側の形", "is_read": "1 = read、0 = write", "k": "ブロック数", "first": "全体の中での最初のブロックの番号(ref tag に足す)"},
+      "ret": "なし",
+      "pre": "特になし。",
+      "notes": "* 写すバイト(copy_byte_mask)は Linux の `mlx5_set_bsf()` と同じく、両側に PI があるとき、guard は常に、app tag・ref tag は両側の値が同じときだけ。\n* ConnectX-4 Lx に署名オフロードが無いため、実機では確かめていない。",
+      "flow": [
+        {"do": "mem_pi・wire_pi・mem_app・wire_app・mem_ref・wire_ref を is_read で決める(ref は first を足す)。va = 中継バッファのアドレス"},
+        {"do": "w を 0 で埋める"},
+        {"call": "bfm_ops_ctrl(c, w, MLX5_OPCODE_UMR, 16, g_bfm.umr_fence, s->mkey) を呼ぶ"},
+        {"do": "UMR の制御: flags = 0xa0、xlt_octowords = 4、bsf_octowords = 4、mkey_mask = SIG_MKEY_MASK"},
+        {"do": "MKey: flags = 0x8e、qpn_mkey7_0 = MKey の下位 8 ビット | 0xffffff00、flags_pd = REMOTE_INVAL | sigerr の印 << 26 | BSF_EN | pdn、len = k × (mem_pi ? 520 : 512)、bsfs_octo_size = 4、xlt_oct_size = 4"},
+        {"if": "!mem_pi ?", "then": [
+          {"do": "KLM: bcount = k × 512、key = g_bfm.lkey、va"}
+        ], "else": [
+          {"do": "strided block: bcount_per_cycle = 520、op = 0x400、repeat_count = k、num_entries = 2"},
+          {"do": "データ: stride 520、bcount 512、key、va / PI: stride 520、bcount 8、key、va + 512"}
+        ]},
+        {"do": "BSF: f[0] = 0x80"},
+        {"if": "in_pi ?", "then": [{"do": "f[1] = check から作った検査するバイト(guard 0xc0・app 0x30・ref 0x0f)"}]},
+        {"if": "mem_pi && wire_pi ?", "then": [
+          {"do": "f[0] |= 0x10。f[2] = 0xc0 | (app が同じなら 0x30) | (ref が同じなら 0x0f)"}
+        ], "else": [
+          {"if": "wire_pi ?", "then": [{"do": "f[2] = 0x01(ワイヤ側のブロック = 512)"}]}
+        ]},
+        {"if": "mem_pi ?", "then": [{"do": "f[3] = 0x01(メモリ側のブロック = 512)"}]},
+        {"do": "f[4..7] = k × 512(raw_data_size)"},
+        {"if": "wire_pi ?", "then": [
+          {"do": "f[8..11] = s->psv_wire"},
+          {"call": "bsf_inl(&f[32], wire_app, wire_ref) を呼ぶ"}
+        ]},
+        {"if": "mem_pi ?", "then": [
+          {"do": "f[12..15] = s->psv_mem"},
+          {"call": "bsf_inl(&f[48], mem_app, mem_ref) を呼ぶ"}
+        ]}
+      ]
+    },
+    {
+      "func": "build_linv",
+      "summary": "署名つき MKey を空きに戻す UMR の WQE(2 WQEBB。Linux の LOCAL_INV)を組む: UMR の制御は inline と mkey_mask = FREE だけ、MKey の status = 空き。",
+      "args": {"c": "接続", "s": "その接続の署名の資源", "w": "WQE を組む作業域(128 バイト)"},
+      "ret": "なし",
+      "pre": "特になし。",
+      "notes": "前の RDMA は終わるまで待ってあるので、fence は付けない。",
+      "flow": [
+        {"do": "w の 128 バイトを 0 で埋める"},
+        {"call": "bfm_ops_ctrl(c, w, MLX5_OPCODE_UMR, 8, 0, s->mkey) を呼ぶ"},
+        {"do": "b[16] = 0x80(inline)、mkey_mask = FREE、b[64] = 0x40(status = 空き)"}
+      ]
+    },
+    {
+      "func": "build_psv",
+      "summary": "SET_PSV の WQE(1 WQEBB)を組む。PSV に最初のブロックの app tag と ref tag を入れる(PI の無い側は 0)。通知は求めず、fence = INITIATOR_SMALL、solicited を付ける(Linux の `handle_psv()` と同じ)。",
+      "args": {"c": "接続", "w": "WQE を組む作業域(64 バイト)", "psv": "PSV の番号", "pi": "その側に PI があるか", "app": "app tag", "ref": "最初のブロックの ref tag"},
+      "ret": "なし",
+      "pre": "特になし。",
+      "notes": "transient_sig の上位 16 ビット(guard の種)は 0。",
+      "flow": [
+        {"do": "w の 64 バイトを 0 で埋める"},
+        {"call": "bfm_ops_ctrl(c, w, MLX5_OPCODE_SET_PSV, 2, SOLICITED | FENCE_SMALL, 0) を呼ぶ"},
+        {"do": "b[16..19] = psv"},
+        {"if": "pi ?", "then": [{"do": "b[24..27] = app(transient_sig)、b[28..31] = ref"}]}
+      ]
+    },
+    {
+      "func": "hw_xfer",
+      "summary": "HW: 中継バッファの `k` ブロック(メモリ側の形)と、相手の公開メモリ + `off`(ワイヤ側の形)の間で、署名オフロードを通して 1 回運ぶ。(前に張っていれば MKey を空きに戻す UMR)→ 張る UMR → SET_PSV(メモリ側・ワイヤ側)→ RDMA(手元 = 署名つき MKey のアドレス 0、fence = INITIATOR_SMALL)を出して終わるまで待つ。その間に SIG_ERR の CQE が来ていれば、誤りの情報を `e` に入れる。",
+      "args": {"c": "接続", "p": "入る側・出る側の形", "is_read": "1 = read、0 = write", "off": "相手の公開メモリの先頭からのオフセット", "k": "ブロック数", "first": "全体の中での最初のブロックの番号", "e": "誤りの情報を入れる先(NULL でもよい)"},
+      "ret": "`BFM_OK`。`BFM_E_DIF`: 検査で誤り。そのほか `bfm_ops_post()` / `bfm_ops_wait_all()` の戻り値。",
+      "pre": "`bfm_dif_hw_supported()` が 1。write なら中継バッファにメモリ側の形のデータを置いてあること。",
+      "notes": "* 手元の長さは Linux の `rdma_rw_ctx_signature_init()` と同じく、データ + (両側に PI があれば PI)。\n* 誤りの位置(署名つき MKey の中のバイト)は 520 で割ってブロックにする(Linux の iSER と同じ)。\n* 誤りを見たら `sigerr_count` を 1 増やす(次の UMR で sigerr の印が反転する)。\n* 誤りの種類は guard → ref tag → app tag の順に syndrome を見る。\n* ConnectX-4 Lx に署名オフロードが無いため、実機では確かめていない。",
+      "flow": [
+        {"do": "s = &s_sig[c->index]。mem_pi・wire_pi を is_read で決める"},
+        {"do": "c->sig_err = 0"},
+        {"if": "s->used ?", "then": [
+          {"call": "build_linv(c, s, w) を呼ぶ"},
+          {"call": "rc = bfm_ops_post(c, w, 2) を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+          {"do": "s->used = 0"}
+        ]},
+        {"call": "build_umr(c, s, w, p, is_read, k, first) を呼ぶ"},
+        {"call": "rc = bfm_ops_post(c, w, 4) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"do": "s->used = 1"},
+        {"call": "build_psv(c, w, s->psv_mem, mem_pi, メモリ側の app, メモリ側の ref + first) を呼ぶ"},
+        {"call": "rc = bfm_ops_post(c, w, 1) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"call": "build_psv(c, w, s->psv_wire, wire_pi, ワイヤ側の app, ワイヤ側の ref + first) を呼ぶ"},
+        {"call": "rc = bfm_ops_post(c, w, 1) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"do": "len = k × 512 + (mem_pi && wire_pi ? k × 8 : 0)"},
+        {"call": "bfm_ops_build_rdma(c, w, is_read, off, s->mkey, 0, len, MLX5_FENCE_SMALL) を呼ぶ"},
+        {"call": "rc = bfm_ops_post(c, w, 1) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"call": "rc = bfm_ops_wait_all(c) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"if": "!c->sig_err ?", "then": [{"return": "BFM_OK"}]},
+        {"do": "s->sigerr_count++、c->sig_err = 0"},
+        {"do": "blk = first + sig_off / 520"},
+        {"if": "sig_synd の bit13(guard)?", "then": [
+          {"call": "set_err(e, blk, BFM_DIF_CHK_GUARD, あるべき guard, 実際の guard) を呼ぶ"}
+        ], "else": [
+          {"if": "sig_synd の bit11(ref tag)?", "then": [
+            {"call": "set_err(e, blk, BFM_DIF_CHK_REF, sig_exp_ref, sig_act_ref) を呼ぶ"}
+          ], "else": [
+            {"call": "set_err(e, blk, BFM_DIF_CHK_APP, あるべき app tag, 実際の app tag) を呼ぶ"}
+          ]}
+        ]},
+        {"return": "BFM_E_DIF"}
+      ]
+    },
+    {
+      "func": "hw_write",
+      "summary": "HW の write。中継バッファに入るブロック数(`stage_size / 520`)ずつ、`src` を中継バッファへ写し、`hw_xfer()` で相手へ書く。",
+      "args": {"c": "接続", "p": "入る側・出る側の形", "off": "相手の公開メモリの先頭からのオフセット", "src": "入る側の形のブロックの並び", "n": "ブロック数", "e": "誤りの情報を入れる先(NULL でもよい)"},
+      "ret": "`BFM_OK`、または `hw_xfer()` の戻り値。",
+      "pre": "`prepare()` が済み、`bfm_dif_hw_supported()` が 1 であること。",
+      "notes": "誤りのあった回の分も、相手に送ってしまっていることがある(誤りは送った後に分かる)。",
+      "flow": [
+        {"do": "per = stage_size / 520、done = 0"},
+        {"while": "done < n ?", "body": [
+          {"do": "k = min(n - done, per)"},
+          {"do": "src + done × in_bs から k × in_bs バイトを中継バッファへ写す"},
+          {"call": "rc = hw_xfer(c, p, 0, off + done × out_bs, k, done, e) を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+          {"do": "done += k"}
+        ]},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "hw_read",
+      "summary": "HW の read。中継バッファに入るブロック数ずつ、`hw_xfer()` で相手から中継バッファへ(出る側の形で)読み、`dst` へ写す。",
+      "args": {"c": "接続", "p": "入る側・出る側の形", "off": "相手の公開メモリの先頭からのオフセット", "dst": "出る側の形のブロックを置く先", "n": "ブロック数", "e": "誤りの情報を入れる先(NULL でもよい)"},
+      "ret": "`BFM_OK`、または `hw_xfer()` の戻り値。",
+      "pre": "`prepare()` が済み、`bfm_dif_hw_supported()` が 1 であること。",
+      "notes": "誤りのあった回の分は `dst` に写さない(前の回までは写してある)。",
+      "flow": [
+        {"do": "per = stage_size / 520、done = 0"},
+        {"while": "done < n ?", "body": [
+          {"do": "k = min(n - done, per)"},
+          {"call": "rc = hw_xfer(c, p, 1, off + done × in_bs, k, done, e) を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+          {"do": "中継バッファの k × out_bs バイトを dst + done × out_bs へ写す"},
+          {"do": "done += k"}
+        ]},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "prepare",
+      "summary": "`bfm_dif_write()` / `bfm_dif_read()` の引数を確かめ、操作を `make_plan()` で入る側・出る側の形に直す。相手の公開メモリに、ワイヤ側の形で `n` ブロックが収まるかも確かめる。",
+      "args": {"c": "接続", "off": "相手の公開メモリの先頭からのオフセット", "buf": "src か dst", "n": "ブロック数", "d": "操作", "is_read": "1 = read、0 = write", "p": "結果を入れる先"},
+      "ret": "`BFM_OK`。`BFM_E_PARAM`: 引数が不正(NULL・0 ブロック・知らない op / mode・中継バッファが 520 バイトより小さい・範囲外)。`BFM_E_NOTSUP`: `BFM_DIF_HW` だがオフロードを使えない。`BFM_E_STATE`: 接続が使えない。",
+      "pre": "特になし。",
+      "notes": "相手のメモリ側のブロックの大きさは、read なら入る側、write なら出る側。",
+      "flow": [
+        {"if": "buf == NULL || d == NULL || n == 0 ?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"call": "rc = make_plan(d, p) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"if": "d->mode が BFM_DIF_SW でも BFM_DIF_HW でもない?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"if": "d->mode == BFM_DIF_HW && !s_hw ?", "then": [{"return": "BFM_E_NOTSUP"}]},
+        {"if": "c != NULL && c->stage_size < 520 ?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"do": "remote_bs = is_read ? in_bs : out_bs"},
+        {"call": "bfm_ops_check_range(c, off, n × remote_bs) を呼ぶ"},
+        {"return": "bfm_ops_check_range() の戻り値"}
+      ]
+    },
+    {
+      "func": "bfm_dif_write",
+      "summary": "`src` の `nblocks` ブロック(入る側の形)を、T10-DIF の操作 `dif` で形を変えて、相手の公開メモリ + `off` へ書く。`dif->mode` で SW(`sw_write()`)か HW(`hw_write()`)を選ぶ。",
+      "args": {"c": "接続", "off": "相手の公開メモリの先頭からのオフセット", "src": "入る側の形のブロックの並び(CHECK・SWAP・DELETE は 520 バイトおき、INSERT は 512 バイトおき)", "nblocks": "ブロック数", "dif": "操作", "err": "誤りの情報を入れる先(NULL でもよい)"},
+      "ret": "`BFM_OK`。`BFM_E_DIF`: 検査の誤り。そのほか `prepare()`・`sw_write()`・`hw_write()` の戻り値。",
+      "pre": "`bfm_write()` と同じ。",
+      "notes": "相手のメモリに書く形は出る側(CHECK・SWAP・INSERT は 520 バイトおき、DELETE は 512 バイトおき)。",
+      "flow": [
+        {"call": "rc = prepare(c, off, src, nblocks, dif, 0, &p) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"call": "dif->mode == BFM_DIF_HW なら hw_write()、そうでなければ sw_write() を呼ぶ"},
+        {"return": "呼んだ関数の戻り値"}
+      ]
+    },
+    {
+      "func": "bfm_dif_read",
+      "summary": "相手の公開メモリ + `off` から `nblocks` ブロック(入る側の形)を読み、T10-DIF の操作 `dif` で形を変えて `dst` に置く。`dif->mode` で SW(`sw_read()`)か HW(`hw_read()`)を選ぶ。",
+      "args": {"c": "接続", "off": "相手の公開メモリの先頭からのオフセット", "dst": "出る側の形のブロックを置く先(CHECK・SWAP・INSERT は 520 バイトおき、DELETE は 512 バイトおき)", "nblocks": "ブロック数", "dif": "操作", "err": "誤りの情報を入れる先(NULL でもよい)"},
+      "ret": "`BFM_OK`。`BFM_E_DIF`: 検査の誤り。そのほか `prepare()`・`sw_read()`・`hw_read()` の戻り値。",
+      "pre": "`bfm_read()` と同じ。",
+      "notes": "相手のメモリの形は入る側(CHECK・SWAP・DELETE は 520 バイトおき、INSERT は 512 バイトおき)。",
+      "flow": [
+        {"call": "rc = prepare(c, off, dst, nblocks, dif, 1, &p) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"call": "dif->mode == BFM_DIF_HW なら hw_read()、そうでなければ sw_read() を呼ぶ"},
+        {"return": "呼んだ関数の戻り値"}
+      ]
+    }
+  ]
+}

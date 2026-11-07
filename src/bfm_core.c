@@ -59,7 +59,8 @@ int bfm_init(void)
         cleanup(1);
         return BFM_E_HW;
     }
-    if ((rc = mlx5_hca_init(&g_bfm)) != BFM_OK || (rc = bfm_cm_init()) != BFM_OK) {
+    if ((rc = mlx5_hca_init(&g_bfm)) != BFM_OK || (rc = bfm_dif_init()) != BFM_OK ||
+        (rc = bfm_cm_init()) != BFM_OK) {
         cleanup(1);
         return rc;
     }

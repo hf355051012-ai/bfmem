@@ -335,8 +335,8 @@
     },
     {
       "func": "run_client",
-      "summary": "掛け側の本体。相手へ接続し、手元に公開メモリのデータ領域の模型を持って、次の検査をして結果を表示する。\n\n* [1] いろいろな長さ・半端な位置の read と 64KiB まとめての read\n* [2] inline に収まる長さと収まらない長さの write と読み戻し\n* [3] `bfm_write_post()` を 5000 回と `bfm_flush()` の後の読み戻し\n* [4] FAA と CAS の元の値の並び、相手のメモリの語 1 がホスト順の 1000 であること\n* [4b] 4 バイトの FAA と CAS(語 2 の前半 +16 と後半 +20)の元の値の並び、0 への折り返し、相手のメモリのバイト順、隣の語 1 が変わらないこと\n* [5] データ領域全体の読み戻し\n* [6] 遅延(`lat()`)と `bfm_write_post()` の速さ、その後の読み戻し(ここまで NG が無いときだけ)\n* [7] 公開メモリの外の read を相手が断ること(oob のときだけ)\n\n最後に模型の hash を表示して接続を返す。",
-      "args": {"ip": "相手の IPv4 アドレス", "mac": "相手の MAC アドレス", "port": "接続の番号", "iters": "[6] の遅延の測定の回数", "oob": "0 以外なら [7] を行う"},
+      "summary": "掛け側の本体。相手へ接続し、手元に公開メモリのデータ領域の模型を持って、次の検査をして結果を表示する。\n\n* [1] いろいろな長さ・半端な位置の read と 64KiB まとめての read\n* [2] inline に収まる長さと収まらない長さの write と読み戻し\n* [3] `bfm_write_post()` を 5000 回と `bfm_flush()` の後の読み戻し\n* [4] FAA と CAS の元の値の並び、相手のメモリの語 1 がホスト順の 1000 であること\n* [4b] 4 バイトの FAA と CAS(語 2 の前半 +16 と後半 +20)の元の値の並び、0 への折り返し、相手のメモリのバイト順、隣の語 1 が変わらないこと\n* [5] データ領域全体の読み戻し\n* [6] 遅延(`lat()`)と `bfm_write_post()` の速さ、その後の読み戻し(ここまで NG が無いときだけ)\n* [8] T10-DIF の読み書き(`run_dif()`)\n* [7] 公開メモリの外の read を相手が断ること(oob のときだけ)\n\n最後に模型の hash を表示して接続を返す。",
+      "args": {"ip": "相手の IPv4 アドレス", "mac": "相手の MAC アドレス", "port": "接続の番号", "iters": "[6] の遅延の測定の回数([8] の DIF の遅延にも使う。5000 まで)", "oob": "0 以外なら [7] を行う"},
       "ret": "0: すべて OK。1: 接続できない、相手の公開メモリが小さい、または NG があった。",
       "pre": "`bfm_init()` が済んでいること。相手が server で、公開メモリを取り決めどおりに埋めていること。",
       "notes": "* [7] は接続の構造体の `rlen` を一時的に書き換えて手元の範囲検査をすり抜ける。相手が断ると接続はエラーになる。\n* [4] で相手の atomic 語 0・1 を、[4b] で語 2 を書き換える。[6] の測定はデータ領域の 64 か所と atomic 語 100〜163・200〜263(8 バイト)、300〜331・400〜431(4 バイトの語として)に触る。\n* 検査が NG でも次の検査へ進む([6] だけは飛ばす)。",
@@ -523,6 +523,7 @@
           {"call": "rc = bfm_read(c, 0, buf, DATA_BYTES) を呼ぶ"},
           {"call": "check(\"[6] ...\", rc == BFM_OK && buf と g_model が一致) を呼ぶ"}
         ]},
+        {"if": "!g_stop ?", "then": [{"call": "run_dif(c, iters) を呼ぶ"}]},
         {"call": "fnv1a(g_model, DATA_BYTES) を呼び、模型の hash を表示"},
         {"if": "[7] oob && !g_stop ?", "then": [
           {"do": "real = ci->rlen"},
@@ -534,6 +535,166 @@
         {"if": "g_ng ?", "then": [{"do": "結果「NG」と g_ng を表示"}], "else": [{"do": "結果「OK」と g_ng を表示"}]},
         {"call": "bfm_disconnect(c) を呼ぶ"},
         {"if": "g_ng ?", "then": [{"return": "1"}], "else": [{"return": "0"}]}
+      ]
+    },
+    {
+      "func": "crc16_bitwise",
+      "summary": "CRC16(T10-DIF、多項式 0x8BB7、初期値 0)をビットごとに計算する。ライブラリの表引き(`crc16()`)とは別の書き方で期待値を作るため。",
+      "args": {"p": "データ", "n": "バイト数"},
+      "ret": "CRC16 の値。",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"do": "crc = 0、i = 0"},
+        {"while": "i < n ?", "body": [
+          {"do": "crc ^= p[i] << 8"},
+          {"do": "8 回: crc = 最上位ビットが 1 なら (crc << 1) ^ 0x8bb7、でなければ crc << 1"},
+          {"do": "i++"}
+        ]},
+        {"return": "crc"}
+      ]
+    },
+    {
+      "func": "dif_make",
+      "summary": "`plain`(512 バイトおきの `DIF_N` ブロック)から、PI つき(520 バイトおき)の期待値を `out` に作る。guard は `crc16_bitwise()`、app tag は `app`、ref tag は `ref + ブロックの番号`(どれもビッグエンディアン)。",
+      "args": {"plain": "データ(512 バイトおき)", "out": "作る先(520 バイトおき)", "app": "app tag", "ref": "最初のブロックの ref tag"},
+      "ret": "なし",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"do": "i = 0"},
+        {"while": "i < DIF_N ?", "body": [
+          {"do": "b = out + i × 520 に plain のブロック i を写す"},
+          {"call": "g = crc16_bitwise(b, 512) を呼ぶ"},
+          {"do": "b[512..519] = g、app、ref + i(BE)"},
+          {"do": "i++"}
+        ]}
+      ]
+    },
+    {
+      "func": "dif_what",
+      "summary": "誤りの種類(`BFM_DIF_CHK_*`)を表示用の名前(guard / app / ref)にする。",
+      "args": {"w": "誤りの種類"},
+      "ret": "名前の文字列。知らない値は `\"?\"`。",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"return": "w に応じて \"guard\" / \"app\" / \"ref\" / \"?\""}
+      ]
+    },
+    {
+      "func": "dif_expect_err",
+      "summary": "DIF の操作が期待どおりの誤り(`BFM_E_DIF`、ブロック `block`、種類 `what`)を返したかを確かめて、`check()` で表示する。表示には実際の種類・ブロック・あるべき値・実際の値(誤りでなければ戻り値)を添える。",
+      "args": {"name": "検査の名前", "rc": "操作の戻り値", "e": "操作が返した誤りの情報", "block": "期待するブロック", "what": "期待する種類"},
+      "ret": "なし",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"if": "rc == BFM_E_DIF ?", "then": [
+          {"call": "dif_what(e->what) を呼び、名前・種類・ブロック・値を s に書く"}
+        ], "else": [
+          {"call": "bfm_strerror(rc) を呼び、名前と戻り値を s に書く"}
+        ]},
+        {"call": "check(s, rc == BFM_E_DIF && e->block == block && e->what == what) を呼ぶ"}
+      ]
+    },
+    {
+      "func": "dif_tests",
+      "summary": "[8] の検査を `mode`(SW か HW)で一通り行う。乱数のデータ `DIF_N` ブロックで、write INSERT(相手の R1 に PI つき)→ read CHECK → read CHECK_SWAP → read CHECK_DELETE、次のデータで write CHECK → write CHECK_SWAP → write CHECK_DELETE(相手の R2 に PI なし)→ read INSERT の 8 通りを、相手のメモリを `bfm_read()` で読んだものや手元の結果と、`dif_make()` で独立に作った期待値と比べる。その後、誤りの検出(write のブロック 200 の guard、期待する ref tag のずれ、相手のメモリのブロック 150 の app tag)と、誤りの後に app tag を検査しなければ読めることを確かめる。",
+      "args": {"c": "接続", "mode": "`BFM_DIF_SW` か `BFM_DIF_HW`"},
+      "ret": "なし",
+      "pre": "相手の公開メモリが `DIF_R2 + DIF_N × 520` バイト以上あること。",
+      "notes": "* 相手のメモリの R1(`DIF_OFF`)・R2(`DIF_R2`)を書き換える。データ領域・atomic 語には触らない。\n* 最後に R1 のブロック 150 の app tag を変えたままにする。",
+      "flow": [
+        {"do": "seed を mode で決め、g_dplain を乱数で埋める"},
+        {"do": "d を 0 で埋め、mode・check = ALL・app_tag・ref_tag・new_app_tag・new_ref_tag を入れる"},
+        {"do": "d.op = BFM_DIF_INSERT"},
+        {"call": "rc = bfm_dif_write(c, DIF_OFF, g_dplain, DIF_N, &d, &e) を呼ぶ"},
+        {"call": "dif_make(g_dplain, g_dexp, DIF_APP, DIF_REF) を呼ぶ"},
+        {"call": "bfm_read() で R1 を読み、check(\"write INSERT\", rc == BFM_OK && 読んだものが g_dexp と同じ) を呼ぶ"},
+        {"do": "g_dpi = g_dexp"},
+        {"do": "d.op = BFM_DIF_CHECK"},
+        {"call": "rc = bfm_dif_read(c, DIF_OFF, g_dout, DIF_N, &d, &e) を呼び、check(\"read CHECK\", g_dout が g_dpi と同じ) を呼ぶ"},
+        {"do": "d.op = BFM_DIF_CHECK_SWAP"},
+        {"call": "rc = bfm_dif_read() を呼び、dif_make(… DIF_APP2, DIF_REF2) と比べて check() を呼ぶ"},
+        {"do": "d.op = BFM_DIF_CHECK_DELETE"},
+        {"call": "rc = bfm_dif_read() を呼び、g_dplain と比べて check() を呼ぶ"},
+        {"do": "g_dplain を変え、dif_make() で g_dpi を作り直す。d.op = BFM_DIF_CHECK"},
+        {"call": "rc = bfm_dif_write(c, DIF_OFF, g_dpi, …) を呼び、bfm_read() で R1 を読んで g_dpi と比べて check() を呼ぶ"},
+        {"do": "d.op = BFM_DIF_CHECK_SWAP"},
+        {"call": "rc = bfm_dif_write() を呼び、dif_make(… DIF_APP2, DIF_REF2) と R1 を比べて check() を呼ぶ"},
+        {"do": "d.op = BFM_DIF_CHECK_DELETE"},
+        {"call": "rc = bfm_dif_write(c, DIF_R2, g_dpi, …) を呼び、bfm_read() で R2 を読んで g_dplain と比べて check() を呼ぶ"},
+        {"do": "d.op = BFM_DIF_INSERT"},
+        {"call": "rc = bfm_dif_read(c, DIF_R2, g_dout, …) を呼び、g_dpi と比べて check() を呼ぶ"},
+        {"do": "d.op = BFM_DIF_CHECK。g_dpi のブロック 200 のデータを 1 バイト変える"},
+        {"call": "rc = bfm_dif_write() を呼び、dif_expect_err(…, 200, BFM_DIF_CHK_GUARD) を呼ぶ"},
+        {"do": "g_dpi を戻す。d.ref_tag = DIF_REF + 1"},
+        {"call": "rc = bfm_dif_write() を呼び、dif_expect_err(…, 0, BFM_DIF_CHK_REF) を呼ぶ"},
+        {"do": "d.ref_tag = DIF_REF。g_draw = g_dpi のブロック 150 の app tag を変えたもの"},
+        {"call": "rc = bfm_write(c, DIF_OFF, g_draw, …) を呼ぶ"},
+        {"if": "rc == BFM_OK ?", "then": [{"call": "rc = bfm_dif_read(c, DIF_OFF, g_dout, DIF_N, &d, &e) を呼ぶ"}]},
+        {"call": "dif_expect_err(…, 150, BFM_DIF_CHK_APP) を呼ぶ"},
+        {"do": "d.check = GUARD | REF"},
+        {"call": "rc = bfm_dif_read() を呼び、check(\"app tag を検査しない\", g_dout が g_draw と同じ) を呼ぶ"},
+        {"do": "d.check = ALL"}
+      ]
+    },
+    {
+      "func": "dif_lat",
+      "summary": "DIF の操作 `op` を 8 ブロック(4KiB)ずつ 1 回ごとに完了を待つ形で `n` 回流し(先に 100 回を暖機)、遅延の中央値と p99 を表示する。相手のメモリは R1(520 バイトおき)を使う。",
+      "args": {"c": "接続", "mode": "`BFM_DIF_SW` か `BFM_DIF_HW`", "op": "操作(`BFM_DIF_INSERT` / `CHECK` / `CHECK_DELETE` など)", "is_read": "1 = read、0 = write", "n": "測る回数"},
+      "ret": "なし",
+      "pre": "R1 の先頭 8 ブロックに、`DIF_APP` / `DIF_REF` の正しい PI があること(read を測るとき)。",
+      "notes": "* write INSERT は `g_dplain`、そのほかの write は `dif_make()` で作り直した `g_dpi` を送る。\n* 失敗したら `g_ng` を 1 増やして表示せずに戻る。",
+      "flow": [
+        {"do": "d を 0 で埋め、op・mode・check = ALL・app_tag・ref_tag を入れる。remote = DIF_OFF"},
+        {"if": "n > g_lat の要素数 ?", "then": [{"do": "n = g_lat の要素数"}]},
+        {"call": "dif_make(g_dplain, g_dpi, DIF_APP, DIF_REF) を呼ぶ"},
+        {"do": "i = 0"},
+        {"while": "i < n + 100 ?", "body": [
+          {"call": "t0 = now_ns() を呼ぶ"},
+          {"call": "rc = is_read なら bfm_dif_read()、でなければ bfm_dif_write() を呼ぶ(8 ブロック)"},
+          {"if": "rc != BFM_OK ?", "then": [
+            {"call": "bfm_strerror(rc) を呼び、失敗を表示"},
+            {"do": "g_ng++"},
+            {"return": ""}
+          ]},
+          {"if": "i >= 100 ?", "then": [{"call": "g_lat[i - 100] = now_ns() - t0 を呼ぶ"}]},
+          {"do": "i++"}
+        ]},
+        {"do": "qsort(g_lat, n, 4, cmp_u32) で並べ替える"},
+        {"do": "中央値と p99 を表示"}
+      ]
+    },
+    {
+      "func": "run_dif",
+      "summary": "[8] T10-DIF の検査をまとめて行う。SW で `dif_tests()` を行い、オフロードを使えれば HW でも行う。使えなければ、`BFM_DIF_HW` が `BFM_E_NOTSUP` を返すことを確かめる。NG が無ければ、DIF の遅延(write INSERT・write CHECK・read CHECK・read CHECK_DELETE、4KiB)を SW と(使えれば)HW で測る。",
+      "args": {"c": "接続", "iters": "遅延の測定の回数(5000 まで)"},
+      "ret": "なし",
+      "pre": "c が使える接続であること。",
+      "notes": "相手の公開メモリが小さければ飛ばす。",
+      "flow": [
+        {"call": "bfm_remote_size(c) を呼ぶ"},
+        {"if": "bfm_remote_size(c) < DIF_R2 + DIF_N × 520 ?", "then": [
+          {"do": "飛ばすことを表示"},
+          {"return": ""}
+        ]},
+        {"call": "bfm_dif_hw_supported() を呼び、ブロック数とオフロードの有無を表示"},
+        {"call": "dif_tests(c, BFM_DIF_SW) を呼ぶ"},
+        {"if": "bfm_dif_hw_supported() ?", "then": [
+          {"call": "dif_tests(c, BFM_DIF_HW) を呼ぶ"}
+        ], "else": [
+          {"do": "d を 0 で埋め、d.mode = BFM_DIF_HW"},
+          {"call": "check(\"BFM_DIF_HW は BFM_E_NOTSUP\", bfm_dif_write(c, DIF_OFF, g_dplain, 1, &d, NULL) == BFM_E_NOTSUP) を呼ぶ"}
+        ]},
+        {"if": "g_stop || g_ng ?", "then": [{"return": ""}]},
+        {"do": "n = min(iters, 5000)、mode = BFM_DIF_SW"},
+        {"while": "mode <= BFM_DIF_HW ?", "body": [
+          {"if": "mode == BFM_DIF_HW && !bfm_dif_hw_supported() ?", "then": [{"break": true}]},
+          {"call": "dif_lat() を write INSERT・write CHECK・read CHECK・read CHECK_DELETE で呼ぶ"},
+          {"do": "mode++"}
+        ]}
       ]
     },
     {
@@ -725,7 +886,7 @@
             ]}
           ], "else": [
             {"if": "mode が \"info\" ?", "then": [
-              {"do": "g_bfm の名前・BlueFlame・atomic・QP の能力・FW ページの数を表示"}
+              {"call": "bfm_dif_hw_supported() を呼び、g_bfm の名前・BlueFlame・atomic・QP の能力・FW ページの数・sho・T10-DIF のオフロードの有無を表示"}
             ], "else": [
               {"call": "usage() を呼ぶ"},
               {"do": "ret = 2"}

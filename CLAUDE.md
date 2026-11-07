@@ -73,6 +73,9 @@ Precision は PF0(`0000:b3:00.0`)だけでよい。終わったら mlx5_core に
   Linux の ib_cm は REP を送るときに近隣表で MAC を引き、bfmem は ARP に答えないので STALE のまま REP が出ない。
 - **CA GUID を MAC だけから作ると、立ち上げ直した後に REJ reason 10(stale connection)で断られ続けた。**
   FW は QPN を同じ順に配り直すので、(GUID, QPN) が前の試みの残りと重なる。`bfm_init()` ごとに乱数を混ぜている。
+- **ConnectX-4 Lx には署名オフロード(能力の `sho`)が無い。** T10-DIF の `BFM_DIF_HW`(UMR・BSF・PSV)は実機で試せていない。
+  作りは Linux の mlx5_ib の署名 MR(`wr.c` の `set_sig_umr_wr()` など)と `rdma_rw_ctx_signature_init()` に合わせてある。
+  ConnectX-5 以降で試すときは、手元の長さ(データ + 両側に PI があれば PI)と、SIG_ERR の位置を 520 で割ることを最初に疑う。
 - **4 バイトの atomic(拡張 atomic)の元の値は、CQE でも中継バッファでもビッグエンディアン**(8 バイトの中継バッファは
   ホスト順なのに)。相手のメモリはどちらもホスト順。`-S` で試さないと気付かない。
 - **CQE に入って返る atomic の元の値はビッグエンディアン**(HCA のホスト順の設定は、メモリへ書かせる値にしか効かない)。

@@ -5,7 +5,7 @@
  *   [1] st  [2] pm_state<<3  [5..7] pd  [8] mtu<<5 | log_msg_max
  *   [9] log_rq_size<<3  [10] log_sq_size<<3  [11] ts_format<<6 | rlky(0x10)
  *   [13..15] uar_page  [21..23] remote_qpn  [24..67] primary_address_path
- *   [113] log_sra_max<<5 | retry_count  [114] rnr_retry<<5  [121..123] next_send_psn
+ *   [113] log_sra_max<<5 | retry_count  [114] rnr_retry<<5 | fre(0x08)  [121..123] next_send_psn
  *   [125..127] cqn_snd  [145] log_rra_max<<5 | atomic_mode  [146] rre|rwe|rae
  *   [148] min_rnr_nak  [149..151] next_rcv_psn  [157..159] cqn_rcv  [160..167] dbr_addr
  *   [168..171] q_key  [172] rq_type  [198] cs_req
@@ -81,6 +81,7 @@ int mlx5_qp_create(bfm_dev_t *d, bfm_qp_t *qp, uint8_t st, uint8_t cs_req)
     qpc[10] = (uint8_t)(qp->sq_log << 3);
     qpc[11] = (uint8_t)(d->qp_ts_format << 6);
     bfm_wr24be(&qpc[13], qp->uarn);
+    if (st == MLX5_QP_ST_RC) qpc[114] = 0x08u;               /* fre: UMR を出せる(T10-DIF のオフロードで使う)*/
     bfm_wr24be(&qpc[125], qp->cqn);
     bfm_wr24be(&qpc[157], qp->cqn);
     bfm_wr64be(&qpc[160], bfm_dma_addr(qp->dbr));

@@ -46,9 +46,9 @@
     },
     {
       "func": "bfm_init",
-      "summary": "ライブラリを立ち上げる。設定の検査 → 移植層の初期化(DMA 領域と公開メモリを使えるようにする)→ DMA 領域の切り出しの初期化 → PCIe の設定 → BAR0 を張る → HCA の立ち上げ(`mlx5_hca_init()`)→ 接続管理の準備(GSI と接続の枠。`bfm_cm_init()`)の順に行い、使った DMA 領域などを表示する。",
+      "summary": "ライブラリを立ち上げる。設定の検査 → 移植層の初期化(DMA 領域と公開メモリを使えるようにする)→ DMA 領域の切り出しの初期化 → PCIe の設定 → BAR0 を張る → HCA の立ち上げ(`mlx5_hca_init()`)→ T10-DIF のオフロードの資源(`bfm_dif_init()`)→ 接続管理の準備(GSI と接続の枠。`bfm_cm_init()`)の順に行い、使った DMA 領域などを表示する。",
       "args": {},
-      "ret": "`BFM_OK`: 立ち上がった(既に立ち上がっていたときも)。`BFM_E_PARAM`: 設定が不正。`BFM_E_HW`: 移植層・PCIe・BAR0 の失敗。そのほか `mlx5_hca_init()` / `bfm_cm_init()` の戻り値(`BFM_E_HW` / `BFM_E_NOMEM` / `BFM_E_TIMEOUT` など)。",
+      "ret": "`BFM_OK`: 立ち上がった(既に立ち上がっていたときも)。`BFM_E_PARAM`: 設定が不正。`BFM_E_HW`: 移植層・PCIe・BAR0 の失敗。そのほか `mlx5_hca_init()` / `bfm_dif_init()` / `bfm_cm_init()` の戻り値(`BFM_E_HW` / `BFM_E_NOMEM` / `BFM_E_TIMEOUT` など)。",
       "pre": "`include/bfm_config.h` の変数を設定し終えていること。1 つのタスクから呼ぶこと。",
       "notes": "* 2 回目以降の呼び出しは何もせず `BFM_OK` を返す。\n* 途中で失敗したら `cleanup(1)` で取ったものを返してから戻る(移植層の初期化そのものの失敗は除く)。\n* `g_bfm` と `g_bfm_conn` を 0 で初期化する。",
       "flow": [
@@ -74,6 +74,11 @@
           {"return": "BFM_E_HW"}
         ]},
         {"call": "rc = mlx5_hca_init(&g_bfm) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [
+          {"call": "cleanup(1) を呼ぶ"},
+          {"return": "rc"}
+        ]},
+        {"call": "rc = bfm_dif_init() を呼ぶ"},
         {"if": "rc != BFM_OK ?", "then": [
           {"call": "cleanup(1) を呼ぶ"},
           {"return": "rc"}
