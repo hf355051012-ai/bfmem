@@ -37,7 +37,7 @@ $(BUILD)/libbfmem.a: $(LIB_OBJS)
 	$(AR) rcs $@ $^
 
 $(BUILD)/bfmem_test: $(BUILD)/test/bfm_test.o $(BUILD)/libbfmem.a
-	$(CC) $(ALL_CFLAGS) -o $@ $^
+	$(CC) $(ALL_CFLAGS) -pthread -o $@ $^
 
 vxcheck:
 	@for f in $(LIB_SRCS) $(X86_SRCS) port/vxworks/port_vxworks.c; do \

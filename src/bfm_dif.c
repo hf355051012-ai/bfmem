@@ -52,10 +52,25 @@ static void crc_table_init(void)
     }
 }
 
+/* 表を一度だけ作る(複数のコアから同時に呼ばれてもよいように、作り終えたことを旗で知らせる)。 */
+static uint32_t s_crc_ready;
+static bfm_lock_t s_crc_lock;
+
+static void crc_ready(void)
+{
+    if (__atomic_load_n(&s_crc_ready, __ATOMIC_ACQUIRE)) return;
+    bfm_lock(&s_crc_lock);
+    if (!s_crc_ready) {
+        crc_table_init();
+        __atomic_store_n(&s_crc_ready, 1u, __ATOMIC_RELEASE);
+    }
+    bfm_unlock(&s_crc_lock);
+}
+
 static uint16_t crc16(const uint8_t *p, uint32_t len)
 {
     uint32_t crc = 0;
-    if (s_crc_tab[0][1] == 0) crc_table_init();
+    crc_ready();
     for (; len >= 8u; len -= 8u, p += 8) {
         crc = (uint32_t)s_crc_tab[7][p[0] ^ (crc >> 8)] ^ s_crc_tab[6][p[1] ^ (crc & 0xffu)] ^
               s_crc_tab[5][p[2]] ^ s_crc_tab[4][p[3]] ^ s_crc_tab[3][p[4]] ^ s_crc_tab[2][p[5]] ^
@@ -350,7 +365,7 @@ struct piece {
     uint32_t end_pc;                 /* この分の最後の WQE の次の位置(sq_done がここまで来たら済み)*/
 };
 
-struct job {
+struct __attribute__((aligned(64))) job {   /* 接続(= コア)ごと。隣とキャッシュラインを分ける */
     uint8_t  state, is_read, hw;
     struct plan p;
     uint64_t off;
@@ -363,7 +378,7 @@ struct job {
     bfm_dif_err_t err;
     struct piece pc[BFM_DIF_SLOTS];
 };
-static struct job s_job[BFM_MAX_CONN];
+static struct job s_job[BFM_MAX_CONN] __attribute__((aligned(64)));
 
 static inline uint8_t *slot_buf(const struct bfm_conn *c, uint32_t si)
 {
@@ -478,12 +493,13 @@ int bfm_dif_init(void)
     memset(s_sig, 0, sizeof(s_sig));
     memset(s_job, 0, sizeof(s_job));
     s_hw = 0;
+    crc_ready();                           /* 表は立ち上げのときに作っておく */
     if (!g_bfm.sho) {
         BFM_DBG("bfm: 署名のオフロード(sho)が無い。T10-DIF は BFM_DIF_SW だけ\n");
         return BFM_OK;
     }
     const uint8_t key8 = (uint8_t)(bfm_port_time_ns() >> 12);
-    for (unsigned i = 0; i < BFM_MAX_CONN; i++) {
+    for (unsigned i = 0; i < g_bfm.nconn; i++) {
         for (unsigned si = 0; si < BFM_DIF_SLOTS; si++) {
             struct sig_res *s = &s_sig[i][si];
             uint32_t psv[2];

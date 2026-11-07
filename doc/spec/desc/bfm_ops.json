@@ -263,11 +263,11 @@
       "summary": "EQ のイベントで QP のエラーを知ったときに、その QP を使っている接続を探し、使えている(`BFM_CS_UP`)ものを表示して `BFM_CS_ERROR` にする。",
       "args": {"qpn": "エラーになった QP の番号", "why": "表示する理由"},
       "ret": "なし",
-      "pre": "特になし。",
+      "pre": "`g_bfm_ctl_lock` を持っていること(`bfm_poll()` の中の `mlx5_eq_poll()` から呼ばれる)。",
       "notes": "`mlx5_eq_poll()` が呼ぶ。`BFM_CS_UP` でない接続と QP を作っていない接続は変えない。",
       "flow": [
         {"do": "i = 0"},
-        {"while": "i < BFM_MAX_CONN ?", "body": [
+        {"while": "i < g_bfm.nconn ?", "body": [
           {"do": "c = &g_bfm_conn[i]"},
           {"if": "c->state == BFM_CS_UP かつ qp.has_qp かつ qp.qpn == qpn ?", "then": [
             {"do": "BFM_LOG で接続の番号と理由を表示"},

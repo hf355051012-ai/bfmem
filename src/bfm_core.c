@@ -5,6 +5,8 @@
 
 static int s_inited;
 
+bfm_lock_t g_bfm_ctl_lock;
+
 static int check_config(void)
 {
     const uint64_t m = BFM_PAGE - 1u;
@@ -24,6 +26,7 @@ static int check_config(void)
     if (g_bfm_stage_size < BFM_PAGE) g_bfm_stage_size = BFM_PAGE;
     if (g_bfm_dif_buf_size < 2u * BFM_PAGE) g_bfm_dif_buf_size = 2u * BFM_PAGE;
     if (g_bfm_signal_every == 0) g_bfm_signal_every = 1;
+    if (g_bfm_max_conn == 0 || g_bfm_max_conn > BFM_MAX_CONN) g_bfm_max_conn = BFM_MAX_CONN;
     return BFM_OK;
 }
 
@@ -45,6 +48,8 @@ int bfm_init(void)
     if (rc != BFM_OK) return rc;
     memset(&g_bfm, 0, sizeof(g_bfm));
     memset(g_bfm_conn, 0, sizeof(g_bfm_conn));
+    g_bfm.nconn = g_bfm_max_conn;
+    bfm_unlock(&g_bfm_ctl_lock);
     if (bfm_port_init() != 0) {
         BFM_LOG("bfm: ポート層の初期化に失敗\n");
         return BFM_E_HW;
@@ -67,7 +72,7 @@ int bfm_init(void)
     }
     BFM_LOG("bfm: 準備完了(DMA 領域 %llu KiB 使用 / %llu KiB、接続の枠 %u、inline %u バイトまで、"
             "BlueFlame の窓 %u バイト)\n", (unsigned long long)(bfm_mem_used() >> 10),
-            (unsigned long long)(g_bfm_dma_size >> 10), (unsigned)BFM_MAX_CONN, bfm_inline_max(),
+            (unsigned long long)(g_bfm_dma_size >> 10), g_bfm.nconn, bfm_inline_max(),
             g_bfm.bf_buf_size);
     s_inited = 1;
     return BFM_OK;
@@ -85,5 +90,8 @@ void bfm_shutdown(void)
 int bfm_poll(void)
 {
     if (!s_inited) return 0;
-    return mlx5_eq_poll(&g_bfm) + bfm_cm_poll();
+    bfm_lock(&g_bfm_ctl_lock);                 /* FW のコマンド(ページ要求への答え)と GSI を 1 つずつに */
+    const int n = mlx5_eq_poll(&g_bfm) + bfm_cm_poll();
+    bfm_unlock(&g_bfm_ctl_lock);
+    return n;
 }

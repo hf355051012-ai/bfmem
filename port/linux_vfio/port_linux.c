@@ -48,7 +48,7 @@ static void *s_dma_va, *s_mr_va;
 
 /* UC の窓を作っている mmap の一覧(BAR0 内のオフセット)。PAT の登録は mmap 単位で、
  * その mmap のページが全部外れるまで残るので、どの mmap に入っているかを覚えておく。 */
-#define SEG_MAX 32
+#define SEG_MAX ((int)(2u * BFM_MAX_CONN + 8u))   /* WC に張る UAR(接続の枠ごとに 1 つ)1 つで区間が最大 2 つ増える */
 static struct { uint64_t off, len; } s_seg[SEG_MAX];
 static int s_nseg;
 

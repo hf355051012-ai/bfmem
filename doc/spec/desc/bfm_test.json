@@ -140,38 +140,44 @@
     },
     {
       "func": "run_server",
-      "summary": "受け側の本体。公開メモリを埋めて接続を待ち、接続の間は `bfm_poll()` を 1ms ごとに呼び続ける。切断されたら hash を表示して接続を返し、また埋めて待つ。`g_stop` が立つまで繰り返す。`g_dump` が立てば hash を表示する。",
+      "summary": "受け側の本体。公開メモリを埋め、接続を同時にいくつでも(接続の枠の数まで)受ける。`bfm_accept()` を短く区切って呼び(接続が無ければ 200ms、あれば 1ms)、受けた接続を表に足し、`bfm_poll()` を呼び、使えなくなった接続を `bfm_disconnect()` で返す。全部の接続が切れたら hash を表示し、埋め直して待つ。`g_stop` が立つまで繰り返す。`g_dump` が立てば hash を表示する。",
       "args": {"port": "待つ接続の番号"},
       "ret": "0: `g_stop` で終わった。1: 公開メモリが `AREA_BYTES` より小さい。",
       "pre": "`bfm_init()` が済んでいること。",
-      "notes": "* 接続の待ちは 500ms ごとに区切り、その間に `g_stop` / `g_dump` を見る。\n* 接続の間に `g_stop` が立つと、hash を表示して接続を返してから終わる。",
+      "notes": "* 枠が一杯のときは `bfm_accept()` を呼ばず、1ms 眠る。\n* 終わるときは、残っている接続を全部返す。\n* hash を出すのは、接続が 1 本以上あって全部切れたときだけ(1 本の client の試験と同じ動き)。",
       "flow": [
         {"if": "g_bfm_mr_size < AREA_BYTES ?", "then": [
           {"do": "「公開メモリが小さすぎる」を表示"},
           {"return": "1"}
         ]},
+        {"do": "n = 0"},
+        {"call": "fill_area() を呼ぶ"},
+        {"do": "待つことを表示"},
         {"while": "!g_stop ?", "body": [
-          {"call": "fill_area() を呼ぶ"},
-          {"do": "待つことを表示、c = NULL"},
-          {"while": "!g_stop && c == NULL ?", "body": [
-            {"call": "c = bfm_accept(port, 500) を呼ぶ"},
-            {"if": "g_dump ?", "then": [
-              {"do": "g_dump = 0"},
-              {"call": "dump_area(\"要求\") を呼ぶ"}
+          {"if": "n < g_bfm.nconn ?", "then": [{"call": "c = bfm_accept(port, n ? 1 : 200) を呼ぶ"}], "else": [{"do": "c = NULL"}]},
+          {"if": "c != NULL ?", "then": [{"do": "conns[n++] = c"}]},
+          {"call": "bfm_poll() を呼ぶ"},
+          {"if": "g_dump ?", "then": [
+            {"do": "g_dump = 0"},
+            {"call": "dump_area(\"要求\") を呼ぶ"}
+          ]},
+          {"do": "k = 0、closed = 0"},
+          {"while": "i < n ?(i は 0 から)", "body": [
+            {"call": "bfm_is_up(conns[i]) を呼ぶ"},
+            {"if": "使える?", "then": [{"do": "conns[k++] = conns[i]"}], "else": [
+              {"call": "bfm_disconnect(conns[i]) を呼ぶ"},
+              {"do": "closed = 1"}
             ]}
           ]},
-          {"if": "c == NULL ?", "then": [{"break": true}]},
-          {"while": "!g_stop && bfm_is_up(c) ?", "body": [
-            {"call": "bfm_poll() を呼ぶ"},
-            {"if": "g_dump ?", "then": [
-              {"do": "g_dump = 0"},
-              {"call": "dump_area(\"要求\") を呼ぶ"}
-            ]},
-            {"do": "usleep(1000)"}
+          {"do": "n = k"},
+          {"if": "closed && n == 0 ?", "then": [
+            {"call": "dump_area(\"切断\") を呼ぶ"},
+            {"call": "fill_area() を呼ぶ"},
+            {"do": "待つことを表示"}
           ]},
-          {"call": "dump_area(\"切断\") を呼ぶ"},
-          {"call": "bfm_disconnect(c) を呼ぶ"}
+          {"if": "n == g_bfm.nconn ?", "then": [{"do": "usleep(1000)"}]}
         ]},
+        {"while": "i < n ?(i は 0 から)", "body": [{"call": "bfm_disconnect(conns[i]) を呼ぶ"}]},
         {"return": "0"}
       ]
     },
@@ -763,6 +769,189 @@
       ]
     },
     {
+      "func": "mt_fail",
+      "summary": "スレッドの NG を数え、最初の NG だけ理由(`what` と `rc` の説明)を `a->why` に残す。",
+      "args": {"a": "スレッドの情報", "what": "何が失敗したか", "rc": "戻り値(無ければ 0)"},
+      "ret": "なし",
+      "pre": "特になし。",
+      "notes": "スレッドごとの領域にしか書かないので、ほかのスレッドと同時に呼んでよい。",
+      "flow": [
+        {"if": "a->ng++ == 0 ?", "then": [{"call": "bfm_strerror(rc) を呼び、a->why に what と rc を書く"}]}
+      ]
+    },
+    {
+      "func": "mt_poller",
+      "summary": "mt の間ずっと `bfm_poll()` を 200µs ごとに呼び続ける(鍵を取る側を、データ経路と同時に動かす)。`g_mt_poll_stop` が立つと終わる。",
+      "args": {"p": "使わない"},
+      "ret": "NULL",
+      "pre": "`bfm_init()` が済んでいること。",
+      "notes": "スレッドの開始点(`pthread_create()` から呼ばれる)。",
+      "entry_note": "スレッドの開始点(pthread_create() から呼ばれる)",
+      "flow": [
+        {"while": "!g_mt_poll_stop ?", "body": [
+          {"call": "bfm_poll() を呼ぶ"},
+          {"do": "usleep(200)"}
+        ]},
+        {"return": "NULL"}
+      ]
+    },
+    {
+      "func": "mt_check",
+      "summary": "[1][2] スレッドの区画(`MT_OFF` + 番号 × `MT_SPAN`)で、4KiB の write と read での読み戻しを 64 回、8 バイトの write と read での読み戻しを 1000 回行い、違えば NG にする。",
+      "args": {"a": "スレッドの情報(接続を含む)"},
+      "ret": "なし(結果は `a->ng`)",
+      "pre": "`a->c` が使える接続であること。",
+      "notes": "4KiB は inline に収まらないので、接続の中継バッファから送る(スレッドごとに別の中継バッファ)。最初の NG で止める。",
+      "flow": [
+        {"do": "k = 0"},
+        {"while": "k < 64 && !a->ng ?", "body": [
+          {"do": "wbuf をスレッドの番号と k から作る"},
+          {"call": "rc = bfm_write(c, base, wbuf, 4096) を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [
+            {"call": "mt_fail(a, \"[1] write 4KiB\", rc) を呼ぶ"},
+            {"break": true}
+          ]},
+          {"do": "rbuf を 0 で埋める"},
+          {"call": "rc = bfm_read(c, base, rbuf, 4096) を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [
+            {"call": "mt_fail(a, \"[1] read 4KiB\", rc) を呼ぶ"},
+            {"break": true}
+          ]},
+          {"if": "wbuf と rbuf が違う?", "then": [{"call": "mt_fail(a, \"[1] 4KiB を読み戻すと違う\", 0) を呼ぶ"}]},
+          {"do": "k++"}
+        ]},
+        {"do": "k = 0"},
+        {"while": "k < 1000 && !a->ng ?", "body": [
+          {"do": "v = 番号 << 32 | k、off = base + 4096 + (k & 63) × 8、r = 0"},
+          {"call": "rc = bfm_write(c, off, &v, 8) を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [
+            {"call": "mt_fail(a, \"[2] write 8B\", rc) を呼ぶ"},
+            {"break": true}
+          ]},
+          {"call": "rc = bfm_read(c, off, &r, 8) を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [
+            {"call": "mt_fail(a, \"[2] read 8B\", rc) を呼ぶ"},
+            {"break": true}
+          ]},
+          {"if": "r != v ?", "then": [{"call": "mt_fail(a, \"[2] 8 バイトを読み戻すと違う\", 0) を呼ぶ"}]},
+          {"do": "k++"}
+        ]}
+      ]
+    },
+    {
+      "func": "mt_dif",
+      "summary": "[4] スレッドの区画 + 8KiB に、`MT_DIF_N` ブロックを T10-DIF(SW)で書いて読み戻す。write INSERT を `bfm_dif_write_start()` で起動して `bfm_dif_poll()` を終わるまで回し、read CHECK_DELETE を `bfm_dif_read_start()` で起動して `bfm_dif_wait()` で待つ。元のデータに戻らなければ NG。",
+      "args": {"a": "スレッドの情報(接続を含む)"},
+      "ret": "なし(結果は `a->ng`)",
+      "pre": "`a->c` が使える接続であること。",
+      "notes": "app tag・ref tag はスレッドごとに変える。DIF の転送は接続ごとに 1 本なので、スレッドどうしは互いを待たない。",
+      "flow": [
+        {"do": "d を 0 で埋め、mode = SW・check = ALL・app_tag・ref_tag をスレッドの番号から決め、plain を作る"},
+        {"do": "d.op = BFM_DIF_INSERT"},
+        {"call": "rc = bfm_dif_write_start(c, base, plain, MT_DIF_N, &d) を呼ぶ"},
+        {"if": "rc == BFM_OK ?", "then": [
+          {"dowhile": "rc == BFM_DIF_INPROGRESS ?", "body": [{"call": "rc = bfm_dif_poll(c, &e) を呼ぶ"}]}
+        ]},
+        {"if": "rc != BFM_OK ?", "then": [
+          {"call": "mt_fail(a, \"[4] DIF write INSERT\", rc) を呼ぶ"},
+          {"return": ""}
+        ]},
+        {"do": "d.op = BFM_DIF_CHECK_DELETE、out を 0 で埋める"},
+        {"call": "rc = bfm_dif_read_start(c, base, out, MT_DIF_N, &d) を呼ぶ"},
+        {"if": "rc == BFM_OK ?", "then": [{"call": "rc = bfm_dif_wait(c, &e) を呼ぶ"}]},
+        {"if": "rc != BFM_OK ?", "then": [
+          {"call": "mt_fail(a, \"[4] DIF read CHECK_DELETE\", rc) を呼ぶ"},
+          {"return": ""}
+        ]},
+        {"if": "plain と out が違う?", "then": [{"call": "mt_fail(a, \"[4] DIF で元のデータに戻らない\", 0) を呼ぶ"}]}
+      ]
+    },
+    {
+      "func": "mt_worker",
+      "summary": "mt のスレッド 1 本。CPU に固定し、全スレッドがそろってから同時に `bfm_connect()` で自分の接続を作る。スレッド 0 が共有の語を 0 にした後、[1][2](`mt_check()`)、[3] 共有の語への FAA を `g_mt_n` 回、[4](`mt_dif()`)を行う。スレッド 0 が共有の語を読んだ後、全スレッドで同時に 8 バイトの write / read / FAA(自分の語)を `g_mt_n` 回ずつ打って時間を測り、最後に全スレッドで同時に切断する。",
+      "args": {"p": "スレッドの情報(`struct mt_arg`)"},
+      "ret": "NULL",
+      "pre": "`g_mt_bar` がスレッドの数で初期化してあること。",
+      "notes": "* 区切りごとに `pthread_barrier_wait()` で全スレッドをそろえる。失敗したスレッドも区切りには必ず来る(ほかのスレッドが止まらないように)。\n* CPU はスレッドの番号 % CPU の数に固定する(CPU より多ければ重ねる)。",
+      "entry_note": "スレッドの開始点(pthread_create() から呼ばれる)",
+      "flow": [
+        {"call": "sysconf(_SC_NPROCESSORS_ONLN) を呼び、pthread_setaffinity_np() で CPU(番号 % CPU の数)に固定する"},
+        {"call": "pthread_barrier_wait(&g_mt_bar) を呼ぶ"},
+        {"call": "a->c = bfm_connect(ip, mac, port, 20000) を呼ぶ"},
+        {"if": "a->c == NULL ?", "then": [{"call": "mt_fail(a, \"接続できない\", 0) を呼ぶ"}]},
+        {"call": "pthread_barrier_wait(&g_mt_bar) を呼ぶ"},
+        {"if": "番号 == 0 かつ a->c ?", "then": [
+          {"call": "rc = bfm_write(c, MT_CNT_OFF, 0 の 8 バイト) を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [{"call": "mt_fail(a, \"[3] 共有の語を 0 にする\", rc) を呼ぶ"}]}
+        ]},
+        {"call": "pthread_barrier_wait(&g_mt_bar) を呼ぶ"},
+        {"if": "a->c && !a->ng ?", "then": [{"call": "mt_check(a) を呼ぶ"}]},
+        {"do": "k = 0"},
+        {"while": "k < g_mt_n && a->c && !a->ng ?", "body": [
+          {"call": "rc = bfm_faa(c, MT_CNT_OFF, 1, &old) を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [{"call": "mt_fail(a, \"[3] FAA\", rc) を呼ぶ"}]},
+          {"do": "k++"}
+        ]},
+        {"if": "a->c && !a->ng ?", "then": [{"call": "mt_dif(a) を呼ぶ"}]},
+        {"call": "pthread_barrier_wait(&g_mt_bar) を呼ぶ"},
+        {"if": "番号 == 0 かつ a->c ?", "then": [
+          {"call": "rc = bfm_read(c, MT_CNT_OFF, &g_mt_counter, 8) を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [{"call": "mt_fail(a, \"[3] 共有の語を読む\", rc) を呼ぶ"}]}
+        ]},
+        {"do": "own = 自分の区画 + 4608、ph = 0"},
+        {"while": "ph < 3 ?", "body": [
+          {"call": "pthread_barrier_wait(&g_mt_bar) を呼ぶ"},
+          {"call": "t0 = now_ns() を呼ぶ"},
+          {"do": "k = 0"},
+          {"while": "k < g_mt_n && a->c && !a->ng ?", "body": [
+            {"call": "ph が 0 なら bfm_write(c, own, &v, 8)、1 なら bfm_read(c, own, &v, 8)、2 なら bfm_faa(c, own + 8, 1, &old) を呼ぶ"},
+            {"if": "rc != BFM_OK ?", "then": [{"call": "mt_fail(a, 区間の名前, rc) を呼ぶ"}]},
+            {"do": "k++"}
+          ]},
+          {"call": "a->ns[ph] = now_ns() - t0 を呼ぶ"},
+          {"do": "ph++"}
+        ]},
+        {"call": "pthread_barrier_wait(&g_mt_bar) を呼ぶ"},
+        {"if": "a->c ?", "then": [
+          {"call": "bfm_disconnect(a->c) を呼ぶ"},
+          {"if": "bfm_disconnect() != BFM_OK ?", "then": [{"call": "mt_fail(a, \"切断\", 0) を呼ぶ"}]}
+        ]},
+        {"return": "NULL"}
+      ]
+    },
+    {
+      "func": "run_mt",
+      "summary": "mt の本体。`bfm_poll()` を回すスレッド(`mt_poller()`)と `nthreads` 本の `mt_worker()` を作って終わるのを待ち、全スレッドが接続できたか、[1][2][4] で NG のスレッドが無いか、[3] 共有の語への FAA の合計が `n` × `nthreads` かを確かめる。NG が無ければ、write / read / FAA の合計の速さ(全スレッドの回数 ÷ 最も遅いスレッドの時間)・1 本あたりの速さ・1 回の時間を表示する。",
+      "args": {"ip": "相手の IPv4", "mac": "相手の MAC", "port": "接続の番号", "nthreads": "スレッドの数(1〜`g_bfm.nconn`)", "n": "1 本あたりの回数"},
+      "ret": "0: NG が無い。1: NG がある。2: スレッドの数が範囲の外。",
+      "pre": "`bfm_init()` が済んでいること。相手の server が `nthreads` 本の接続を受けられること。",
+      "notes": "相手の公開メモリの `MT_OFF`(4MiB)から 64 × 64KiB と、その後ろの共有の語を使う。",
+      "flow": [
+        {"if": "nthreads == 0 || nthreads > g_bfm.nconn ?", "then": [{"return": "2"}]},
+        {"do": "g_mt_n = n、g_mt_threads = nthreads、g_mt_poll_stop = 0"},
+        {"call": "sysconf(_SC_NPROCESSORS_ONLN) を呼び、スレッドと CPU の数を表示"},
+        {"call": "pthread_barrier_init(&g_mt_bar, NULL, nthreads) を呼ぶ"},
+        {"call": "pthread_create(&poller, NULL, mt_poller, NULL) を呼ぶ"},
+        {"while": "t < nthreads ?(t は 0 から)", "body": [
+          {"do": "args[t] を 0 で埋め、番号・ip・mac・port を入れる"},
+          {"call": "pthread_create(&args[t].th, NULL, mt_worker, &args[t]) を呼ぶ"}
+        ]},
+        {"while": "t < nthreads ?(t は 0 から)", "body": [{"call": "pthread_join(args[t].th, NULL) を呼ぶ"}]},
+        {"do": "g_mt_poll_stop = 1"},
+        {"call": "pthread_join(poller, NULL) を呼ぶ"},
+        {"call": "pthread_barrier_destroy(&g_mt_bar) を呼ぶ"},
+        {"do": "接続できたスレッドの数 up と NG のスレッドの数 ng を数え、NG の理由を表示する"},
+        {"call": "check(全スレッドが接続した, up == nthreads) を呼ぶ"},
+        {"call": "check([1][2][4], ng == 0) を呼ぶ"},
+        {"call": "check([3] FAA の合計, g_mt_counter == n × nthreads) を呼ぶ"},
+        {"if": "ng == 0 ?", "then": [
+          {"do": "write / read / FAA ごとに、最も遅いスレッドの時間と時間の和から、合計の速さ・1 本あたりの速さ・1 回の時間を表示する"}
+        ]},
+        {"do": "結果を表示"},
+        {"return": "g_ng ? 1 : 0"}
+      ]
+    },
+    {
       "func": "rdtsc",
       "summary": "`rdtsc` 命令で CPU のタイムスタンプカウンタを読む。",
       "args": {},
@@ -882,15 +1071,15 @@
     },
     {
       "func": "main",
-      "summary": "オプションを読んで設定の変数を決め、シグナルの受け口を登録し、ライブラリを立ち上げて、引数の動き(server / client / bench / info)を行い、ライブラリを止める。\n\n* `-d BDF`: `g_bfm_linux_pci_bdf`\n* `-i IP`: `g_bfm_local_ip`\n* `-p ポート`: 接続の番号(既定は `g_bfm_cm_port`)\n* `-m 経路MTU`: `g_bfm_path_mtu`\n* `-M ポートのMTU`: `g_bfm_port_mtu`\n* `-n 回数`: client の遅延の測定の回数(既定 20000)、bench の回数(既定 100000)\n* `-B` / `-S` / `-C`: `g_bfm_bf_enable` / `g_bfm_scatter_cqe` / `g_bfm_cpu_awake` を 0 にする\n* `-x`: client の検査 [7] を行う\n* `-v`: `g_bfm_verbose` を 1 にする",
+      "summary": "オプションを読んで設定の変数を決め、シグナルの受け口を登録し、ライブラリを立ち上げて、引数の動き(server / client / bench / mt / info)を行い、ライブラリを止める。\n\n* `-d BDF`: `g_bfm_linux_pci_bdf`\n* `-i IP`: `g_bfm_local_ip`\n* `-p ポート`: 接続の番号(既定は `g_bfm_cm_port`)\n* `-m 経路MTU`: `g_bfm_path_mtu`\n* `-M ポートのMTU`: `g_bfm_port_mtu`\n* `-n 回数`: client の遅延の測定の回数(既定 20000)、bench・mt の回数(既定 100000)\n* `-B` / `-S` / `-C`: `g_bfm_bf_enable` / `g_bfm_scatter_cqe` / `g_bfm_cpu_awake` を 0 にする\n* `-t 本数`: mt のスレッドの数(既定 4)\n* `-x`: client の検査 [7] を行う\n* `-v`: `g_bfm_verbose` を 1 にする",
       "args": {"argc": "引数の数", "argv": "引数"},
-      "ret": "0: 成功。1: 立ち上げの失敗、または server / client / bench が失敗を返した。2: 引数が正しくない。",
+      "ret": "0: 成功。1: 立ち上げの失敗、または server / client / bench / mt が失敗を返した。2: 引数が正しくない。",
       "pre": "特になし。",
-      "notes": "* `bfm_init()` の前に `g_server` を決める(server のときだけ SIGQUIT で hash を出し、それ以外では SIGQUIT も止める合図になる。`on_sig()`)。\n* bench のときは `bfm_init()` の前に `g_bfm_stage_size` を `BENCH_QD_MAX * BENCH_SIZE_MAX`(4MiB)にする。\n* client / bench で相手の IP と MAC が足りないときは、info の判定へ進み、使い方を表示して 2 を返す。\n* `-h` と知らないオプションは使い方を表示して 2 を返す。",
+      "notes": "* `bfm_init()` の前に `g_server` を決める(server のときだけ SIGQUIT で hash を出し、それ以外では SIGQUIT も止める合図になる。`on_sig()`)。\n* bench のときは `bfm_init()` の前に `g_bfm_stage_size` を `BENCH_QD_MAX * BENCH_SIZE_MAX`(4MiB)にし、中継バッファが大きいので接続の枠を 1 つにする(`g_bfm_max_conn = 1`)。\n* client / bench / mt で相手の IP と MAC が足りないときは、info の判定へ進み、使い方を表示して 2 を返す。\n* `-h` と知らないオプションは使い方を表示して 2 を返す。",
       "entry_note": "プログラムの開始点(OS から呼ばれる)",
       "flow": [
-        {"do": "port = 0、iters = 0、oob = 0"},
-        {"while": "(opt = getopt(argc, argv, \"d:i:p:m:M:n:BSCxvh\")) != -1 ?", "body": [
+        {"do": "port = 0、iters = 0、threads = 4、oob = 0"},
+        {"while": "(opt = getopt(argc, argv, \"d:i:p:m:M:n:t:BSCxvh\")) != -1 ?", "body": [
           {"switch": "opt", "cases": [
             {"case": "'d'", "body": [{"do": "g_bfm_linux_pci_bdf = optarg"}]},
             {"case": "'i'", "body": [
@@ -904,6 +1093,7 @@
             {"case": "'m'", "body": [{"do": "g_bfm_path_mtu = atoi(optarg)"}]},
             {"case": "'M'", "body": [{"do": "g_bfm_port_mtu = atoi(optarg)"}]},
             {"case": "'n'", "body": [{"do": "iters = atoi(optarg)"}]},
+            {"case": "'t'", "body": [{"do": "threads = atoi(optarg)"}]},
             {"case": "'B'", "body": [{"do": "g_bfm_bf_enable = 0"}]},
             {"case": "'S'", "body": [{"do": "g_bfm_scatter_cqe = 0"}]},
             {"case": "'C'", "body": [{"do": "g_bfm_cpu_awake = 0"}]},
@@ -922,16 +1112,17 @@
         {"do": "mode = argv[optind]"},
         {"if": "port == 0 ?", "then": [{"do": "port = g_bfm_cm_port"}]},
         {"do": "signal() で SIGINT・SIGTERM・SIGQUIT の受け口を on_sig にする"},
-        {"do": "bench = (mode が \"bench\")"},
+        {"do": "bench = (mode が \"bench\")、mt = (mode が \"mt\")"},
         {"do": "g_server = (mode が \"server\")"},
-        {"if": "bench ?", "then": [{"do": "g_bfm_stage_size = BENCH_QD_MAX * BENCH_SIZE_MAX"}]},
+        {"if": "bench ?", "then": [
+          {"do": "g_bfm_stage_size = BENCH_QD_MAX * BENCH_SIZE_MAX"},
+          {"do": "g_bfm_max_conn = 1"}
+        ]},
         {"call": "bfm_init() を呼ぶ"},
         {"if": "bfm_init() != BFM_OK ?", "then": [{"return": "1"}]},
         {"do": "ret = 0"},
-        {"if": "mode が \"server\" ?", "then": [
-          {"call": "ret = run_server(port) を呼ぶ"}
-        ], "else": [
-          {"if": "(mode が \"client\" または bench) && optind + 2 < argc ?", "then": [
+        {"if": "mode が \"server\" ?", "then": [{"call": "ret = run_server(port) を呼ぶ"}], "else": [
+          {"if": "(mode が \"client\" または bench または mt) && optind + 2 < argc ?", "then": [
             {"call": "parse_ip(argv[optind + 1], &ip) を呼ぶ"},
             {"if": "parse_ip() != 0 ?", "then": [
               {"call": "usage() を呼ぶ"},
@@ -942,10 +1133,8 @@
                 {"call": "usage() を呼ぶ"},
                 {"do": "ret = 2"}
               ], "else": [
-                {"if": "bench ?", "then": [
-                  {"call": "ret = run_bench(ip, mac, port, iters ? iters : 100000) を呼ぶ"}
-                ], "else": [
-                  {"call": "ret = run_client(ip, mac, port, iters ? iters : 20000, oob) を呼ぶ"}
+                {"if": "bench ?", "then": [{"call": "ret = run_bench(ip, mac, port, iters ? iters : 100000) を呼ぶ"}], "else": [
+                  {"if": "mt ?", "then": [{"call": "ret = run_mt(ip, mac, port, threads, iters ? iters : 100000) を呼ぶ"}], "else": [{"call": "ret = run_client(ip, mac, port, iters ? iters : 20000, oob) を呼ぶ"}]}
                 ]}
               ]}
             ]}

@@ -240,7 +240,7 @@ void bfm_ops_detach(struct bfm_conn *c)
 /* EQ でその QP のエラーを知ったとき。 */
 void bfm_conn_mark_error(uint32_t qpn, const char *why)
 {
-    for (unsigned i = 0; i < BFM_MAX_CONN; i++) {
+    for (unsigned i = 0; i < g_bfm.nconn; i++) {
         struct bfm_conn *c = &g_bfm_conn[i];
         if (c->state == BFM_CS_UP && c->qp.has_qp && c->qp.qpn == qpn) {
             BFM_LOG("bfm: 接続 %u: %s。接続は使えなくなった\n", i, why);

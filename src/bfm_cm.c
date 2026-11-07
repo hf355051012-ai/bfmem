@@ -21,7 +21,10 @@
  *   [36..39] 公開メモリの rkey  [40..47] 公開メモリの先頭  [48..55] 公開メモリの大きさ
  *
  * 受け取ったメッセージは gsi_pump() がその場で処理する(REP はその接続の枠へ写し、BYE は
- * 接続を閉じた扱いにし、REQ は bfm_accept() のために 1 つだけ取っておく)。 */
+ * 接続を閉じた扱いにし、REQ は bfm_accept() のために接続の枠の数まで取っておく)。
+ *
+ * 複数のコアから呼べるように、GSI・接続の枠の取り外し・FW のコマンドは g_bfm_ctl_lock の中で行う。
+ * REP や REQ を待つ間は、1 回まわるごとに鍵を手放す(ほかのコアの接続・切断・bfm_poll() を止めない)。 */
 #include "bfm_internal.h"
 
 #include <string.h>
@@ -47,12 +50,14 @@ static uint32_t s_tx_next;
 static uint32_t s_tx_outstanding;
 static int s_gsi_ready;
 
-/* bfm_accept() を待っている REQ(1 つだけ。掛け側が送り直すので、上書きしてよい)。 */
+/* bfm_accept() を待っている REQ(接続の枠の数まで。同じ掛け側からの送り直しは 1 つにまとめる。
+ * 一杯なら最も古いものを上書きする。掛け側が送り直すので、落としてもよい)。 */
+#define REQ_Q BFM_MAX_CONN
 static struct {
     int      used;
     uint64_t t;
     uint8_t  msg[MSG_SIZE];
-} s_req;
+} s_req[REQ_Q];
 
 static int gsi_pump(void);
 
@@ -188,6 +193,52 @@ static int gsi_send(const uint8_t *msg, const struct bfm_conn *c)
     return BFM_OK;
 }
 
+/* REQ を取っておく。同じ掛け側(接続の id と IPv4 が同じ)の送り直しなら置き換え、
+ * そうでなければ空き(無ければ最も古いもの)に入れる。 */
+static void req_put(const uint8_t *m)
+{
+    const uint32_t src = bfm_rd32be(m + 8), ip = bfm_rd32be(m + 32);
+    unsigned k = 0;
+    int found = 0;
+    for (unsigned i = 0; i < REQ_Q; i++) {
+        if (s_req[i].used && bfm_rd32be(s_req[i].msg + 8) == src && bfm_rd32be(s_req[i].msg + 32) == ip) {
+            k = i;
+            found = 1;
+            break;
+        }
+    }
+    for (unsigned i = 0; i < REQ_Q && !found; i++) {
+        if (!s_req[i].used) {
+            k = i;
+            found = 1;
+        } else if (s_req[i].t < s_req[k].t) {
+            k = i;
+        }
+    }
+    memcpy(s_req[k].msg, m, MSG_SIZE);
+    s_req[k].t = bfm_port_time_ns();
+    s_req[k].used = 1;
+}
+
+/* 待ち受けの番号 port 宛ての REQ のうち、最も古いものを取り出して msg に写す。
+ * 古すぎる REQ(掛け側があきらめた)は捨てる。戻り値: 1 = 取り出した、0 = 無い。 */
+static int req_take(uint16_t port, uint8_t *msg)
+{
+    int k = -1;
+    for (unsigned i = 0; i < REQ_Q; i++) {
+        if (!s_req[i].used) continue;
+        if (ms_since(s_req[i].t) >= REQ_STALE_MS) {
+            s_req[i].used = 0;
+            continue;
+        }
+        if (bfm_rd16be(s_req[i].msg + 6) == port && (k < 0 || s_req[i].t < s_req[k].t)) k = (int)i;
+    }
+    if (k < 0) return 0;
+    memcpy(msg, s_req[k].msg, MSG_SIZE);
+    s_req[k].used = 0;
+    return 1;
+}
+
 /* 受け取ったメッセージ 1 つを処理する。 */
 static void handle_msg(const uint8_t *m)
 {
@@ -195,7 +246,7 @@ static void handle_msg(const uint8_t *m)
     const uint32_t src = bfm_rd32be(m + 8), dst = bfm_rd32be(m + 12);
     if (type == MSG_REQ) {
         /* 確立済みの接続への送り直し(REP が落ちた)なら、REP を送り直す */
-        for (unsigned i = 0; i < BFM_MAX_CONN; i++) {
+        for (unsigned i = 0; i < g_bfm.nconn; i++) {
             struct bfm_conn *c = &g_bfm_conn[i];
             if (c->state == BFM_CS_UP && c->peer_id == src && c->peer_ip == bfm_rd32be(m + 32)) {
                 uint8_t rep[MSG_SIZE];
@@ -204,12 +255,10 @@ static void handle_msg(const uint8_t *m)
                 return;
             }
         }
-        memcpy(s_req.msg, m, MSG_SIZE);
-        s_req.t = bfm_port_time_ns();
-        s_req.used = 1;
+        req_put(m);
         return;
     }
-    for (unsigned i = 0; i < BFM_MAX_CONN; i++) {
+    for (unsigned i = 0; i < g_bfm.nconn; i++) {
         struct bfm_conn *c = &g_bfm_conn[i];
         if (c->local_id != dst) continue;
         if (type == MSG_REP && c->state == BFM_CS_SETUP && !c->got_rep) {
@@ -273,11 +322,11 @@ static int gsi_pump(void)
 static struct bfm_conn *conn_open(uint16_t port)
 {
     struct bfm_conn *c = NULL;
-    for (unsigned i = 0; i < BFM_MAX_CONN && c == NULL; i++) {
+    for (unsigned i = 0; i < g_bfm.nconn && c == NULL; i++) {
         if (g_bfm_conn[i].state == BFM_CS_FREE) c = &g_bfm_conn[i];
     }
     if (c == NULL) {
-        BFM_LOG("bfm: 接続の枠が足りない(BFM_MAX_CONN = %u)\n", (unsigned)BFM_MAX_CONN);
+        BFM_LOG("bfm: 接続の枠が足りない(g_bfm_max_conn = %u)\n", g_bfm.nconn);
         return NULL;
     }
     c->state = BFM_CS_SETUP;
@@ -352,7 +401,7 @@ int bfm_cm_init(void)
     if ((rc = mlx5_qp_ud_to_rts(&g_bfm, &s_gsi)) != BFM_OK) return rc;
     for (unsigned i = 0; i < BFM_GSI_PREPOST; i++) gsi_post_recv();
 
-    for (unsigned i = 0; i < BFM_MAX_CONN; i++) {
+    for (unsigned i = 0; i < g_bfm.nconn; i++) {
         struct bfm_conn *c = &g_bfm_conn[i];
         memset(c, 0, sizeof(*c));
         c->index = (int)i;
@@ -387,7 +436,7 @@ int bfm_cm_init(void)
     return BFM_OK;
 fail:
     /* 張った WC の窓を返す(HCA は呼び出し側の cleanup() が止める) */
-    for (unsigned i = 0; i < BFM_MAX_CONN; i++) {
+    for (unsigned i = 0; i < g_bfm.nconn; i++) {
         struct bfm_conn *c = &g_bfm_conn[i];
         if (c->bf) bfm_port_bar0_wc_release((uint64_t)c->qp.uarn * BFM_PAGE, BFM_PAGE);
         c->bf = NULL;
@@ -397,13 +446,21 @@ fail:
 
 void bfm_cm_fini(void)
 {
-    for (unsigned i = 0; i < BFM_MAX_CONN; i++) {
+    for (unsigned i = 0; i < g_bfm.nconn; i++) {
         struct bfm_conn *c = &g_bfm_conn[i];
         if (c->state != BFM_CS_FREE) (void)bfm_disconnect(c);
         if (c->bf) bfm_port_bar0_wc_release((uint64_t)c->qp.uarn * BFM_PAGE, BFM_PAGE);
         c->bf = NULL;
     }
     s_gsi_ready = 0;
+}
+
+/* 鍵を手放して少し回り、取り直す(REP や REQ を待つ間、ほかのコアに鍵を渡す)。 */
+static void ctl_yield(void)
+{
+    bfm_unlock(&g_bfm_ctl_lock);
+    for (unsigned i = 0; i < 64u; i++) bfm_cpu_relax();
+    bfm_lock(&g_bfm_ctl_lock);
 }
 
 bfm_conn_t *bfm_connect(uint32_t peer_ip, const uint8_t peer_mac[6], uint16_t port, uint32_t timeout_ms)
@@ -417,8 +474,12 @@ bfm_conn_t *bfm_connect(uint32_t peer_ip, const uint8_t peer_mac[6], uint16_t po
     }
     if (port == 0) port = g_bfm_cm_port;
     if (timeout_ms == 0) timeout_ms = REQ_TIMEOUT_MS;
+    bfm_lock(&g_bfm_ctl_lock);
     struct bfm_conn *c = conn_open(port);
-    if (c == NULL) return NULL;
+    if (c == NULL) {
+        bfm_unlock(&g_bfm_ctl_lock);
+        return NULL;
+    }
     c->peer_ip = peer_ip;
     memcpy(c->peer_mac, peer_mac, 6);
     mlx5_gid_from_ipv4(peer_ip, c->peer_gid);
@@ -437,11 +498,14 @@ bfm_conn_t *bfm_connect(uint32_t peer_ip, const uint8_t peer_mac[6], uint16_t po
             t_sent = bfm_port_time_ns();
         }
         (void)gsi_pump();
+        if (!c->got_rep) ctl_yield();
     }
     if (conn_up(c, "掛け側") != BFM_OK) goto fail;
+    bfm_unlock(&g_bfm_ctl_lock);
     return c;
 fail:
     conn_release(c);
+    bfm_unlock(&g_bfm_ctl_lock);
     return NULL;
 }
 
@@ -449,33 +513,46 @@ bfm_conn_t *bfm_accept(uint16_t port, uint32_t timeout_ms)
 {
     if (!s_gsi_ready) return NULL;
     if (port == 0) port = g_bfm_cm_port;
+    uint8_t msg[MSG_SIZE];
     const uint64_t t0 = bfm_port_time_ns();
+    bfm_lock(&g_bfm_ctl_lock);
     for (;;) {
         (void)gsi_pump();
-        if (s_req.used) {
-            s_req.used = 0;
-            if (bfm_rd16be(s_req.msg + 6) == port && ms_since(s_req.t) < REQ_STALE_MS) break;
+        if (req_take(port, msg)) break;
+        if (timeout_ms && ms_since(t0) > timeout_ms) {
+            bfm_unlock(&g_bfm_ctl_lock);
+            return NULL;
         }
-        if (timeout_ms && ms_since(t0) > timeout_ms) return NULL;
+        ctl_yield();
     }
     struct bfm_conn *c = conn_open(port);
-    if (c == NULL) return NULL;
-    take_peer(c, s_req.msg);
-    if (s_req.msg[5] >= 1u && s_req.msg[5] < c->path_mtu) c->path_mtu = s_req.msg[5];
+    if (c == NULL) {
+        bfm_unlock(&g_bfm_ctl_lock);
+        return NULL;
+    }
+    take_peer(c, msg);
+    if (msg[5] >= 1u && msg[5] < c->path_mtu) c->path_mtu = msg[5];
     if (conn_up(c, "受け側") != BFM_OK) goto fail;
     uint8_t rep[MSG_SIZE];
     build_msg(rep, MSG_REP, c);
     if (gsi_send(rep, c) != BFM_OK) goto fail;
+    bfm_unlock(&g_bfm_ctl_lock);
     return c;
 fail:
     conn_release(c);
+    bfm_unlock(&g_bfm_ctl_lock);
     return NULL;
 }
 
 /* 相手へ BYE を送り(返事は待たない。出ていくまでは待つ)、QP などを返す。 */
 int bfm_disconnect(bfm_conn_t *c)
 {
-    if (c == NULL || c->state == BFM_CS_FREE) return BFM_E_PARAM;
+    if (c == NULL) return BFM_E_PARAM;
+    bfm_lock(&g_bfm_ctl_lock);
+    if (c->state == BFM_CS_FREE) {
+        bfm_unlock(&g_bfm_ctl_lock);
+        return BFM_E_PARAM;
+    }
     if (c->state == BFM_CS_UP || c->state == BFM_CS_ERROR) {
         uint8_t bye[MSG_SIZE];
         build_msg(bye, MSG_BYE, c);
@@ -487,11 +564,13 @@ int bfm_disconnect(bfm_conn_t *c)
         }
     }
     conn_release(c);
+    bfm_unlock(&g_bfm_ctl_lock);
     BFM_DBG("bfm: 切断した\n");
     return BFM_OK;
 }
 
-/* GSI に来たものを処理する(相手からの BYE、REP が落ちたときの REQ の送り直し)。 */
+/* GSI に来たものを処理する(相手からの BYE、REP が落ちたときの REQ の送り直し)。
+ * bfm_poll() が g_bfm_ctl_lock の中で呼ぶ。 */
 int bfm_cm_poll(void)
 {
     if (!s_gsi_ready) return 0;

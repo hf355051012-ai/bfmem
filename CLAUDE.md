@@ -29,6 +29,8 @@ ConnectX(mlx5)の BlueFlame で、ノード間のメモリへ write / read / ato
   CPU は x86-64 だけ(リトルエンディアン・DMA はキャッシュと一貫・TSO。他の CPU の分岐やキャッシュ操作は持たない)、
   **相手は常に bfmem**(接続は bfmem だけの REQ / REP / BYE。IB CM・Linux の rdma_cm とは繋がらない)、
   VxWorks の設定空間は ECAM だけ、atomic は常にホスト順(できない装置は `bfm_init()` が断る)。
+- **データ経路(write / read / atomic / T10-DIF)に、接続をまたいで書き換えるものを持ち込まない**(複数のコアが
+  別々の接続で同時に転送する)。接続をまたぐ状態(GSI・接続の枠・FW のコマンド・EQ)は `g_bfm_ctl_lock` の中で触る。
 - コードのコメントは日本語。
 
 ## ビルド
@@ -87,6 +89,9 @@ Precision は PF0(`0000:b3:00.0`)だけでよい。終わったら mlx5_core に
   (Precision と OptiPlex)、機械の差を bfmem の遅さと読みかけた。比べるのは同じ機械の上で交互に流した値。
 - **相手からの read / atomic は受け側の CPU の C-state で約 300ns 変わる**(write は変わらない)。受け側が待ちで
   眠ると、NIC のメモリ読み出しが待たされる。測るときは `g_bfm_cpu_awake` の状態(`-C`)を書き添える。
+- **試験で server を立ち上げ直すときは、前の bfmem_test が消えるまで待つ。** 止めるのに約 2 秒かかり、その間に次を
+  立ち上げると VFIO のグループが空いておらず「ポート層の初期化に失敗」する(相手は REP を待って「接続できない」になる)。
+  `pkill` の後に `while pgrep -x bfmem_test; do sleep 0.2; done` を入れる。
 - **r.sh で相手に常駐させるプロセスは `setsid nohup … < /dev/null &` でも ssh が返らないことがある。**
   呼び出しを `timeout` で包み、残ったプロセスは `pgrep -ax` で確かめる。`timeout` で切った ssh の先のプロセスは
   生き残る(段階 4 の前に止めたつもりの `bfm_peer -c` が残り、後から接続してきた)。

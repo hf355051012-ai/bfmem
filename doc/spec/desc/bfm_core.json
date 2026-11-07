@@ -1,14 +1,14 @@
 {
   "file": "src/bfm_core.c",
-  "summary": "ライブラリの入口。設定の検査、移植層・PCIe・HCA・接続管理の順の立ち上げ(`bfm_init()`)、その逆順の停止(`bfm_shutdown()`)、非同期の処理(`bfm_poll()`)を持つ。立ち上げ済みかどうかを静的変数 `s_inited` で持つ。",
+  "summary": "ライブラリの入口。設定の検査、移植層・PCIe・HCA・接続管理の順の立ち上げ(`bfm_init()`)、その逆順の停止(`bfm_shutdown()`)、非同期の処理(`bfm_poll()`)を持つ。立ち上げ済みかどうかを静的変数 `s_inited` で持つ。 接続管理・FW のコマンド・EQ の処理を 1 つずつにする鍵 `g_bfm_ctl_lock` もここに置く。",
   "functions": [
     {
       "func": "check_config",
-      "summary": "立ち上げの前に設定の変数を検査する。\n\n* DMA 領域と公開メモリの先頭・大きさが 4KiB の境界・倍数で、大きさが 0 でないこと\n* DMA 領域と公開メモリが重ならないこと\n* `g_bfm_local_ip` が 0 でないこと\n\nあわせて `g_bfm_stage_size` を 4KiB 以上に、`g_bfm_dif_buf_size` を 8KiB(2 面 × 4KiB)以上に、`g_bfm_signal_every` を 1 以上に直す。",
+      "summary": "立ち上げの前に設定の変数を検査する。\n\n* DMA 領域と公開メモリの先頭・大きさが 4KiB の境界・倍数で、大きさが 0 でないこと\n* DMA 領域と公開メモリが重ならないこと\n* `g_bfm_local_ip` が 0 でないこと\n\nあわせて `g_bfm_stage_size` を 4KiB 以上に、`g_bfm_dif_buf_size` を 8KiB(2 面 × 4KiB)以上に、`g_bfm_signal_every` を 1 以上に、`g_bfm_max_conn` を 1〜`BFM_MAX_CONN` に直す(0 か上限より大きければ `BFM_MAX_CONN`)。",
       "args": {},
       "ret": "`BFM_OK`: 使える設定。`BFM_E_PARAM`: 使えない設定(理由を表示する)。",
       "pre": "特になし。",
-      "notes": "`g_bfm_stage_size`・`g_bfm_dif_buf_size`・`g_bfm_signal_every` は、範囲外ならこの関数が書き換える(呼び出し側が入れた値が変わる)。",
+      "notes": "`g_bfm_stage_size`・`g_bfm_dif_buf_size`・`g_bfm_signal_every`・`g_bfm_max_conn` は、範囲外ならこの関数が書き換える(呼び出し側が入れた値が変わる)。",
       "flow": [
         {"if": "DMA 領域・公開メモリの先頭と大きさが 4KiB の境界・倍数でない、または大きさが 0 ?", "then": [
           {"do": "BFM_LOG で理由を表示"},
@@ -25,6 +25,7 @@
         {"if": "g_bfm_stage_size < 4KiB ?", "then": [{"do": "g_bfm_stage_size = 4KiB"}]},
         {"if": "g_bfm_dif_buf_size < 2 × 4KiB ?", "then": [{"do": "g_bfm_dif_buf_size = 2 × 4KiB"}]},
         {"if": "g_bfm_signal_every == 0 ?", "then": [{"do": "g_bfm_signal_every = 1"}]},
+        {"if": "g_bfm_max_conn == 0 || g_bfm_max_conn > BFM_MAX_CONN ?", "then": [{"do": "g_bfm_max_conn = BFM_MAX_CONN"}]},
         {"return": "BFM_OK"}
       ]
     },
@@ -50,13 +51,14 @@
       "summary": "ライブラリを立ち上げる。設定の検査 → 移植層の初期化(DMA 領域と公開メモリを使えるようにする)→ DMA 領域の切り出しの初期化 → PCIe の設定 → BAR0 を張る → HCA の立ち上げ(`mlx5_hca_init()`)→ T10-DIF のオフロードの資源(`bfm_dif_init()`)→ 接続管理の準備(GSI と接続の枠。`bfm_cm_init()`)の順に行い、使った DMA 領域などを表示する。",
       "args": {},
       "ret": "`BFM_OK`: 立ち上がった(既に立ち上がっていたときも)。`BFM_E_PARAM`: 設定が不正。`BFM_E_HW`: 移植層・PCIe・BAR0 の失敗。そのほか `mlx5_hca_init()` / `bfm_dif_init()` / `bfm_cm_init()` の戻り値(`BFM_E_HW` / `BFM_E_NOMEM` / `BFM_E_TIMEOUT` など)。",
-      "pre": "`include/bfm_config.h` の変数を設定し終えていること。1 つのタスクから呼ぶこと。",
-      "notes": "* 2 回目以降の呼び出しは何もせず `BFM_OK` を返す。\n* 途中で失敗したら `cleanup(1)` で取ったものを返してから戻る(移植層の初期化そのものの失敗は除く)。\n* `g_bfm` と `g_bfm_conn` を 0 で初期化する。",
+      "pre": "`include/bfm_config.h` の変数を設定し終えていること。",
+      "notes": "* 2 回目以降の呼び出しは何もせず `BFM_OK` を返す。\n* 途中で失敗したら `cleanup(1)` で取ったものを返してから戻る(移植層の初期化そのものの失敗は除く)。\n* `g_bfm` と `g_bfm_conn` を 0 で初期化し、用意する接続の枠の数 `g_bfm.nconn` を `g_bfm_max_conn` にし、`g_bfm_ctl_lock` を空ける。\n* ほかのコアが bfmem を使っていないときに、1 つのコアから呼ぶこと。",
       "flow": [
         {"if": "s_inited ?", "then": [{"return": "BFM_OK"}]},
         {"call": "rc = check_config() を呼ぶ"},
         {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-        {"do": "g_bfm と g_bfm_conn を 0 で埋める"},
+        {"do": "g_bfm と g_bfm_conn を 0 で埋める。g_bfm.nconn = g_bfm_max_conn"},
+        {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
         {"call": "bfm_port_init() を呼ぶ"},
         {"if": "bfm_port_init() != 0 ?", "then": [
           {"do": "BFM_LOG で失敗を表示"},
@@ -89,7 +91,7 @@
           {"call": "cleanup(1) を呼ぶ"},
           {"return": "rc"}
         ]},
-        {"call": "bfm_mem_used() / bfm_inline_max() で使った量などを BFM_LOG で表示"},
+        {"call": "bfm_mem_used() / bfm_inline_max() で使った量・接続の枠の数などを BFM_LOG で表示"},
         {"do": "s_inited = 1"},
         {"return": "BFM_OK"}
       ]
@@ -111,16 +113,17 @@
     },
     {
       "func": "bfm_poll",
-      "summary": "非同期の処理を 1 回行う。EQ のイベント(FW のページ要求・リンクの変化・QP のエラー)を読み(`mlx5_eq_poll()`)、GSI に来た接続のメッセージ(相手からの BYE・REQ の送り直し)を処理する(`bfm_cm_poll()`)。",
+      "summary": "非同期の処理を 1 回行う。EQ のイベント(FW のページ要求・リンクの変化・QP のエラー)を読み(`mlx5_eq_poll()`)、GSI に来た接続のメッセージ(相手からの BYE・REQ の送り直し)を処理する(`bfm_cm_poll()`)。 どちらも `g_bfm_ctl_lock` の中で行う(ページ要求への答えは FW のコマンドなので、ほかのコアの接続・切断と重ねない)。",
       "args": {},
       "ret": "処理したイベントとメッセージの数の合計。立ち上がっていなければ 0。",
-      "pre": "`bfm_init()` と同じタスクから呼ぶこと(データ経路の関数とも同時に呼ばないこと)。",
+      "pre": "`bfm_init()` の後であること。どのコアから呼んでもよい(データ経路の関数と同時でもよい)。",
       "notes": "データ経路の関数はこれを呼ばない。相手からの切断や FW のページ要求に答えるため、アプリケーションがときどき呼ぶこと。",
       "flow": [
         {"if": "!s_inited ?", "then": [{"return": "0"}]},
-        {"call": "mlx5_eq_poll(&g_bfm) を呼ぶ"},
-        {"call": "bfm_cm_poll() を呼ぶ"},
-        {"return": "2 つの戻り値の和"}
+        {"call": "bfm_lock(&g_bfm_ctl_lock) を呼ぶ"},
+        {"call": "n = mlx5_eq_poll(&g_bfm) + bfm_cm_poll() を呼ぶ"},
+        {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
+        {"return": "n"}
       ]
     }
   ]

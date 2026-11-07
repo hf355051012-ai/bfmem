@@ -15,6 +15,37 @@
 #define BFM_PAGE 4096u
 
 /* ---------------------------------------------------------------------
+ * 鍵(複数のコアから接続・切断・bfm_poll() を呼べるように)
+ *
+ * x86-64 の xchg で取り、取れなければ pause しながら回って待つ(OS の機能は使わない)。
+ * 回って待つので、同じ CPU の上で鍵を持ったタスクより優先度の高いタスクが鍵を待つと進まない。
+ * データ経路(write / read / atomic / T10-DIF)は鍵を使わない(接続ごとの資源だけを触る)。
+ * ------------------------------------------------------------------- */
+typedef struct {
+    volatile uint32_t v;
+} bfm_lock_t;
+
+static inline void bfm_cpu_relax(void)
+{
+    __asm__ volatile("pause" ::: "memory");
+}
+
+static inline void bfm_lock(bfm_lock_t *l)
+{
+    while (__atomic_exchange_n(&l->v, 1u, __ATOMIC_ACQUIRE) != 0u) {
+        while (__atomic_load_n(&l->v, __ATOMIC_RELAXED) != 0u) bfm_cpu_relax();
+    }
+}
+
+static inline void bfm_unlock(bfm_lock_t *l)
+{
+    __atomic_store_n(&l->v, 0u, __ATOMIC_RELEASE);
+}
+
+/* 接続管理(GSI・接続の枠の取り外し)・FW のコマンド・EQ の処理を 1 つずつにする鍵(bfm_core.c)。 */
+extern bfm_lock_t g_bfm_ctl_lock;
+
+/* ---------------------------------------------------------------------
  * リングの大きさ(log2)
  * ------------------------------------------------------------------- */
 #define BFM_EQ_LOG       7u     /* 128 EQE x 64B = 8KiB */
@@ -26,7 +57,7 @@
 #define BFM_GSI_SQ_LOG   6u     /* 64 WQEBB。UD の SEND は 1 個 2 WQEBB */
 #define BFM_GSI_RQ_LOG   8u     /* 256 x 16B */
 #define BFM_GSI_RX_SLOT  128u   /* 受信 1 枠(GRH 40 + メッセージ 64 が入る)*/
-#define BFM_GSI_PREPOST  64u    /* GSI に投稿しておく受信の数 */
+#define BFM_GSI_PREPOST  128u   /* GSI に投稿しておく受信の数(64 本の接続が一度に REQ を送っても足りるように)*/
 #define BFM_GSI_TXBUFS   16u    /* 送るメッセージの置き場(順に使い回す)*/
 #define BFM_MBOX_BLOCKS  9u     /* メールボックスの鎖の長さ(16 + 9 x 512 = 4624 バイトまで)*/
 #define BFM_MBOX_STRIDE  1024u
@@ -180,6 +211,9 @@ typedef struct {
     uint8_t  gid[16];
     uint32_t ip;
     int      link_up;
+
+    /* 接続の枠 */
+    uint32_t nconn;                  /* 用意した接続の枠の数(g_bfm_max_conn を BFM_MAX_CONN までに直したもの)*/
 } bfm_dev_t;
 
 extern bfm_dev_t g_bfm;
@@ -215,7 +249,8 @@ struct bfm_sig_rec {
     uint64_t off;                    /* 誤りの位置(署名つき MKey の中のバイト)*/
 };
 
-struct bfm_conn {
+/* 接続 1 本。コアごとに別の接続を使うので、隣の接続とキャッシュラインを分ける。 */
+struct __attribute__((aligned(64))) bfm_conn {
     int state;
     int index;
     bfm_qp_t qp;

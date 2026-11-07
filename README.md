@@ -71,7 +71,32 @@ bfm_shutdown();
 - `off` は相手が公開した範囲(`g_bfm_mr_base` から `g_bfm_mr_size`)の先頭からのオフセット。
   範囲の外は手元で断り(`BFM_E_PARAM`)、相手の NIC も MKey の範囲で断る。
 - `src` / `dst` はどこにあってもよい(NIC が直接読み書きするのは中継バッファで、CPU が写す)。
-- **スレッド安全ではない。** 1 つの接続を複数のタスクから同時に使わないこと。
+- **複数のコアから同時に転送できる(64 コアまで)。** 下の「複数のコア」。
+
+### 複数のコア
+
+**コアごとに別の接続を作って使う。** 1 つの接続 = RC QP 1 本と、その CQ・UAR(BlueFlame の窓)・中継バッファ・
+T10-DIF 用の中継バッファで、データ経路(write / read / atomic / T10-DIF)はその接続の資源しか触らない。
+鍵も使わないので、別の接続どうしは互いを待たない。
+
+| 呼んでよいもの | 同時に呼べるか |
+|---|---|
+| データ経路(`bfm_write()`・`bfm_read()`・atomic・`bfm_dif_*()` など)| 別の接続なら、どのコアから同時に呼んでもよい。**1 つの接続を複数のコアから同時に使わないこと** |
+| `bfm_connect()` / `bfm_accept()` / `bfm_disconnect()` / `bfm_poll()` | どのコアから同時に呼んでもよい(中で鍵 `g_bfm_ctl_lock` を取る)。`bfm_disconnect(c)` は、`c` で転送しているコアと同時に呼ばない |
+| `bfm_init()` / `bfm_shutdown()` | ほかのコアが bfmem を使っていないときに、1 つのコアから |
+
+- 接続の枠は `BFM_MAX_CONN`(既定 64)個まで。実際に用意する数は `g_bfm_max_conn`(既定 64)で減らせる。
+  枠 1 つで DMA 領域を約 230KiB と UAR を 1 つ使う(64 個で約 14MiB)。
+- 鍵は接続管理(GSI の QP と、受けた REQ の待ち行列)・接続の枠の取り外し・FW のコマンド・EQ の処理を 1 つずつにする。
+  x86-64 の `xchg` で取り、取れなければ `pause` しながら回って待つ(OS の機能は使わない)。REP や REQ を待つ間は
+  1 回まわるごとに手放す。**回って待つので、同じ CPU の上で、鍵を持つタスクより優先度の高いタスクから
+  接続・切断・`bfm_poll()` を呼ばないこと**(タスクはコアに 1 つずつ置くか、優先度をそろえる)。
+- 受け側は、受けた REQ を接続の枠の数まで取っておく(同じ掛け側の送り直しは 1 つにまとめる)。64 本が同時に
+  掛かってきても、`bfm_accept()` を呼ぶたびに古い順に受けられる。
+- どの接続も相手の同じ公開メモリを触る。別の接続から同じ場所へ書いたときの順は決まらない
+  (atomic はどの接続から打っても不可分。試験 `mt` の [3] で確かめた)。
+- 接続は CPU に縛られない。どのコアがどの接続を使うかはアプリケーションが決める
+  (`struct bfm_conn` は 64 バイトの境界にそろえ、隣の接続とキャッシュラインを分けてある)。
 
 ## 設計
 
@@ -284,6 +309,7 @@ PI は guard(データの CRC16、多項式 0x8BB7)・app tag・ref tag(ブロ�
 | `g_bfm_fw_pages_max` | FW に渡すページの上限 |
 | `g_bfm_stage_size` | 接続ごとの中継バッファ |
 | `g_bfm_dif_buf_size` | 接続ごとの T10-DIF 用の中継バッファ(2 面に分けて交互に使う。既定 128KiB)|
+| `g_bfm_max_conn` | 用意する接続の枠の数(1〜`BFM_MAX_CONN`、既定 64。コアごとに 1 本使う)|
 | `g_bfm_local_ip` / `g_bfm_local_mac` | 自分の IPv4 / MAC(MAC が全部 0 なら NIC の固有の MAC)|
 | `g_bfm_peer_ip` / `g_bfm_peer_mac` | 既定の相手 |
 | `g_bfm_cm_port` | 接続の番号 |
@@ -294,7 +320,7 @@ PI は guard(データの CRC16、多項式 0x8BB7)・app tag・ref tag(ブロ�
 | `g_bfm_tsc_hz` | TSC の周波数(Hz)。0 なら CPUID / MSR から求める。求められない CPU では入れる |
 | `g_bfm_link_wait_ms` / `g_bfm_signal_every` / `g_bfm_verbose` | そのほか |
 
-`BFM_MAX_CONN`(接続の数)は配列の大きさになるのでコンパイル時の定数。
+`BFM_MAX_CONN`(接続の枠の数の上限。既定 64)は配列の大きさになるのでコンパイル時の定数。
 
 ### BSP 側で用意すること
 
@@ -337,7 +363,20 @@ sudo build/bfmem_test -d 0000:b3:00.0 -i 192.168.101.21 server
 # 掛け側の機械
 sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 client 192.168.101.21 <受け側の MAC>
 # 受け側が切断のときに出す hash と、client の「模型の hash」が同じことを見る
+# 複数のコア: 16 本のスレッドが別々の接続で同時に転送する(受け側の server はそのまま)
+sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -t 16 mt 192.168.101.21 <受け側の MAC>
 ```
+
+`mt` は、スレッドごとに別の接続を同時に張り、次を確かめてから、8 バイトの write / read / FAA を全スレッドで同時に
+`-n` 回(既定 100,000)ずつ打って合計の速さを出す。間ずっと別のスレッドが `bfm_poll()` を回し、最後に全スレッドが同時に切断する。
+スレッドは CPU に 1 つずつ固定する(CPU の数より多ければ重ねる)。
+
+| 検査 | 内容 |
+|---|---|
+| [1] | スレッドの区画(相手の公開メモリの 4MiB + 番号 × 64KiB)へ 4KiB を write して read で読み戻す(64 回)|
+| [2] | 8 バイトの write と read で読み戻す(1,000 回)|
+| [3] | 全スレッドが同じ語へ FAA を `-n` 回ずつ打ち、最後に `-n` × スレッド数になる(接続をまたいだ atomic)|
+| [4] | T10-DIF(SW)の write INSERT(`bfm_dif_poll()` で回す)と read CHECK_DELETE(`bfm_dif_wait()`)で元のデータに戻る |
 
 - **同じカードの 2 ポートの間では試せない。** 宛先の GID か MAC が自分のカードのものだと、
   FW が内部で処理しようとしてワイヤに出ない(vfio_nvme で確認。ConnectX-4 Lx)。別の機械と繋ぐこと。
@@ -382,5 +421,9 @@ sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 client 192.168.101.21 <�
   **オフロードあり(HW)は、ConnectX-4 Lx に署名オフロード(`sho`)が無いので試せていない。**
 - **相手からの read / atomic の遅延は、受け側の CPU の C-state で約 300ns 変わる。** `g_bfm_cpu_awake`(既定 1)で
   Linux では対策した(FAA 2,150 → 1,760〜1,930ns)。hugepage(IOMMU の変換を減らす)は効かなかった。
-- まだ: VxWorks、ConnectX-7、T10-DIF のオフロード(`BFM_DIF_HW`)。`write_post` は BlueFlame なしのほうが速い
+- **複数のコアから同時に転送できることを確かめた**(2026-11-07)。Precision(16 スレッド)から OptiPlex へ `mt` を
+  1・2・4・8・16・32・64 本、OptiPlex(4 スレッド)から Precision へ 1・4・64 本で流し、全部 OK(64 本が同時に接続・切断)。
+  8 バイトの write / read の合計は CPU の数までほぼ本数に比例して伸び、16 本で write 10.9 Mops・read 8.5 Mops
+  (1 本では 0.76 / 0.61 Mops)。FAA は 8 本以上で約 2.55 Mops で頭打ち(受け側の OptiPlex。原因は確かめていない)。
+- まだ: VxWorks、ConnectX-7、T10-DIF のオフロード(`BFM_DIF_HW`)。VxWorks の上で複数のコアから使うこと。`write_post` は BlueFlame なしのほうが速い
   (11.4 → 13.1 Mops)ので、続けて出すときの扱いは見直しの余地がある。

@@ -3,6 +3,7 @@
  *   bfmem_test [オプション] server                 受け側。公開メモリを決まった模様で埋めて待つ
  *   bfmem_test [オプション] client <IP> <MAC>      掛け側。相手の公開メモリへ一通りの操作をして確かめ、速さを測る
  *   bfmem_test [オプション] info                   立ち上げて能力を表示するだけ
+ *   bfmem_test [-t 本数] mt <IP> <MAC>             掛け側。複数のスレッド(コア)から別々の接続で同時に転送する
  *
  * 相手は別の機械で動かす同じプログラムの server(相手は常に bfmem)。
  *
@@ -16,6 +17,8 @@
 #include "bfm.h"
 #include "../src/bfm_internal.h"
 
+#include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -79,13 +82,16 @@ static int parse_mac(const char *s, uint8_t mac[6])
 static void usage(void)
 {
     printf("使い方: bfmem_test [-d BDF] [-i 自分のIP] [-p ポート] [-m 経路MTU 1-5] [-M ポートのMTU] [-n 回数] [-B] [-S] [-C] [-x] [-v]\n"
-           "                   server | client <相手のIP> <相手のMAC> | bench <相手のIP> <相手のMAC> | info\n"
+           "                   [-t スレッド数] server | client <相手のIP> <相手のMAC> | bench <相手のIP> <相手のMAC> |\n"
+           "                   mt <相手のIP> <相手のMAC> | info\n"
            "  bench: write / read を 4B〜256KiB、多重度 1・4・8・16 で -n 回(既定 100000)ずつ流し、\n"
            "         IOPS・MB/s・平均遅延を出す\n"
            "  -B  BlueFlame を使わない(8 バイトのドアベルだけ。比べるため)\n"
            "  -S  read / atomic の応答を CQE に書かせない(scatter to CQE を使わない)\n"
            "  -C  CPU を深い省電力状態に入れない設定(g_bfm_cpu_awake)を切る\n"
-           "  -x  最後に公開メモリの範囲の外を読み、相手の NIC が断ることを確かめる(接続はエラーになる)\n");
+           "  -x  最後に公開メモリの範囲の外を読み、相手の NIC が断ることを確かめる(接続はエラーになる)\n"
+           "  mt: -t 本(既定 4)のスレッドが同時に別々の接続を張り、write / read / atomic / T10-DIF を確かめ、\n"
+           "      8 バイトの write / read / FAA を -n 回(既定 100000)ずつ同時に打って合計の速さを出す\n");
 }
 
 /* ---------------------------------------------------------------------
@@ -118,23 +124,35 @@ static int run_server(uint16_t port)
         printf("server: 公開メモリが小さすぎる\n");
         return 1;
     }
+    /* 接続を同時にいくつでも(接続の枠の数まで)受ける。全部が切れたら hash を出して埋め直す。 */
+    static bfm_conn_t *conns[BFM_MAX_CONN];
+    unsigned n = 0;
+    fill_area();
+    printf("server: ポート %u で接続を待つ(Ctrl-C で終わる、Ctrl-\\ で hash)\n", port);
     while (!g_stop) {
-        fill_area();
-        printf("server: ポート %u で接続を待つ(Ctrl-C で終わる、Ctrl-\\ で hash)\n", port);
-        bfm_conn_t *c = NULL;
-        while (!g_stop && c == NULL) {
-            c = bfm_accept(port, 500u);
-            if (g_dump) { g_dump = 0; dump_area("要求"); }
+        bfm_conn_t *c = (n < g_bfm.nconn) ? bfm_accept(port, n ? 1u : 200u) : NULL;
+        if (c) conns[n++] = c;
+        (void)bfm_poll();
+        if (g_dump) { g_dump = 0; dump_area("要求"); }
+        unsigned k = 0;
+        int closed = 0;
+        for (unsigned i = 0; i < n; i++) {
+            if (bfm_is_up(conns[i])) {
+                conns[k++] = conns[i];
+            } else {
+                (void)bfm_disconnect(conns[i]);
+                closed = 1;
+            }
         }
-        if (c == NULL) break;
-        while (!g_stop && bfm_is_up(c)) {
-            (void)bfm_poll();
-            if (g_dump) { g_dump = 0; dump_area("要求"); }
-            usleep(1000);
+        n = k;
+        if (closed && n == 0) {
+            dump_area("切断");
+            fill_area();
+            printf("server: ポート %u で接続を待つ(Ctrl-C で終わる、Ctrl-\\ で hash)\n", port);
         }
-        dump_area("切断");
-        (void)bfm_disconnect(c);
+        if (n == g_bfm.nconn) usleep(1000);
     }
+    for (unsigned i = 0; i < n; i++) (void)bfm_disconnect(conns[i]);
     return 0;
 }
 
@@ -675,6 +693,219 @@ static void run_dif(bfm_conn_t *c, uint32_t iters)
 }
 
 /* ---------------------------------------------------------------------
+ * mt: 複数のコア(スレッド)から同時に転送する
+ *
+ * スレッドごとに別の接続を bfm_connect() で同時に作り、相手の公開メモリの
+ * MT_OFF + スレッドの番号 x MT_SPAN(スレッドごとに別の区画)で次を確かめる。
+ *   [1] 4KiB の write(中継バッファから)と read で読み戻す(64 回)
+ *   [2] 8 バイトの write と read で読み戻す
+ *   [3] 全スレッドが同じ語へ FAA を n 回ずつ打つ -> 最後に n x スレッド数になる(接続をまたいだ atomic)
+ *   [4] T10-DIF(SW)の write INSERT と read CHECK_DELETE で元のデータに戻る(起動と完了確認を分けた形)
+ * そのあと全スレッドで同時に、8 バイトの write / read / FAA(自分の語)を n 回ずつ打ち、合計の速さを出す。
+ * 間ずっと別のスレッドが bfm_poll() を回す(鍵を取る側も同時に動かす)。最後に全スレッドが同時に切断する。
+ * スレッドは CPU に 1 つずつ固定する(CPU の数より多ければ重ねる)。
+ * ------------------------------------------------------------------- */
+
+#define MT_OFF     (4u * 1024u * 1024u)
+#define MT_SPAN    (64u * 1024u)
+#define MT_CNT_OFF (MT_OFF + BFM_MAX_CONN * MT_SPAN)   /* 全スレッドで共有する FAA の語 */
+#define MT_DIF_N   16u
+
+struct mt_arg {
+    pthread_t th;
+    int idx;
+    uint32_t ip;
+    const uint8_t *mac;
+    uint16_t port;
+    bfm_conn_t *c;
+    int ng;
+    char why[200];
+    uint64_t ns[3];                      /* 速さの区間(write / read / FAA)にかかった時間 */
+};
+
+static pthread_barrier_t g_mt_bar;
+static char g_mt_msg[200];
+static volatile int g_mt_poll_stop;
+static uint32_t g_mt_n, g_mt_threads;
+static uint64_t g_mt_counter;            /* [3] の結果(スレッド 0 が読む)*/
+
+static void mt_fail(struct mt_arg *a, const char *what, int rc)
+{
+    if (a->ng++ == 0) snprintf(a->why, sizeof(a->why), "%s(rc=%d %s)", what, rc, bfm_strerror(rc));
+}
+
+static void *mt_poller(void *p)
+{
+    (void)p;
+    while (!g_mt_poll_stop) {
+        (void)bfm_poll();
+        usleep(200);
+    }
+    return NULL;
+}
+
+static void mt_check(struct mt_arg *a)
+{
+    bfm_conn_t *c = a->c;
+    const uint64_t base = MT_OFF + (uint64_t)a->idx * MT_SPAN;
+    static __thread uint8_t wbuf[4096], rbuf[4096];
+    int rc;
+
+    /* [1] 4KiB の write / read */
+    for (uint32_t k = 0; k < 64u && !a->ng; k++) {
+        for (uint32_t i = 0; i < sizeof(wbuf); i++) wbuf[i] = (uint8_t)(a->idx * 31u + k * 7u + i);
+        if ((rc = bfm_write(c, base, wbuf, sizeof(wbuf))) != BFM_OK) { mt_fail(a, "[1] write 4KiB", rc); break; }
+        memset(rbuf, 0, sizeof(rbuf));
+        if ((rc = bfm_read(c, base, rbuf, sizeof(rbuf))) != BFM_OK) { mt_fail(a, "[1] read 4KiB", rc); break; }
+        if (memcmp(wbuf, rbuf, sizeof(wbuf)) != 0) mt_fail(a, "[1] 4KiB を読み戻すと違う", 0);
+    }
+    /* [2] 8 バイトの write / read */
+    for (uint32_t k = 0; k < 1000u && !a->ng; k++) {
+        const uint64_t v = ((uint64_t)a->idx << 32) | k, off = base + 4096u + (k & 63u) * 8u;
+        uint64_t r = 0;
+        if ((rc = bfm_write(c, off, &v, 8)) != BFM_OK) { mt_fail(a, "[2] write 8B", rc); break; }
+        if ((rc = bfm_read(c, off, &r, 8)) != BFM_OK) { mt_fail(a, "[2] read 8B", rc); break; }
+        if (r != v) mt_fail(a, "[2] 8 バイトを読み戻すと違う", 0);
+    }
+}
+
+static void mt_dif(struct mt_arg *a)
+{
+    bfm_conn_t *c = a->c;
+    const uint64_t base = MT_OFF + (uint64_t)a->idx * MT_SPAN + 8192u;
+    static __thread uint8_t plain[MT_DIF_N * BFM_DIF_BLOCK], out[MT_DIF_N * BFM_DIF_BLOCK];
+    bfm_dif_t d;
+    bfm_dif_err_t e;
+    memset(&d, 0, sizeof(d));
+    d.mode = BFM_DIF_SW;
+    d.check = BFM_DIF_CHK_ALL;
+    d.app_tag = (uint16_t)(0x1000u + a->idx);
+    d.ref_tag = 0x500000u + (uint32_t)a->idx * 1000u;
+    for (uint32_t i = 0; i < sizeof(plain); i++) plain[i] = (uint8_t)(a->idx ^ (i * 13u));
+    d.op = BFM_DIF_INSERT;
+    int rc = bfm_dif_write_start(c, base, plain, MT_DIF_N, &d);
+    if (rc == BFM_OK) {
+        do {
+            rc = bfm_dif_poll(c, &e);
+        } while (rc == BFM_DIF_INPROGRESS);
+    }
+    if (rc != BFM_OK) { mt_fail(a, "[4] DIF write INSERT", rc); return; }
+    d.op = BFM_DIF_CHECK_DELETE;
+    memset(out, 0, sizeof(out));
+    rc = bfm_dif_read_start(c, base, out, MT_DIF_N, &d);
+    if (rc == BFM_OK) rc = bfm_dif_wait(c, &e);
+    if (rc != BFM_OK) { mt_fail(a, "[4] DIF read CHECK_DELETE", rc); return; }
+    if (memcmp(plain, out, sizeof(plain)) != 0) mt_fail(a, "[4] DIF で元のデータに戻らない", 0);
+}
+
+static void *mt_worker(void *p)
+{
+    struct mt_arg *a = (struct mt_arg *)p;
+    const long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    cpu_set_t cs;
+    CPU_ZERO(&cs);
+    CPU_SET((int)(a->idx % (ncpu > 0 ? ncpu : 1)), &cs);
+    (void)pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
+
+    pthread_barrier_wait(&g_mt_bar);                         /* 全スレッドで同時に接続する */
+    a->c = bfm_connect(a->ip, a->mac, a->port, 20000u);
+    if (a->c == NULL) mt_fail(a, "接続できない", 0);
+    pthread_barrier_wait(&g_mt_bar);
+    int rc;
+    if (a->idx == 0 && a->c) {                               /* 共有の語を 0 に */
+        const uint64_t z = 0;
+        if ((rc = bfm_write(a->c, MT_CNT_OFF, &z, 8)) != BFM_OK) mt_fail(a, "[3] 共有の語を 0 にする", rc);
+    }
+    pthread_barrier_wait(&g_mt_bar);
+    if (a->c && !a->ng) mt_check(a);
+    for (uint32_t k = 0; k < g_mt_n && a->c && !a->ng; k++) {   /* [3] 共有の語へ FAA */
+        uint64_t old;
+        if ((rc = bfm_faa(a->c, MT_CNT_OFF, 1, &old)) != BFM_OK) mt_fail(a, "[3] FAA", rc);
+    }
+    if (a->c && !a->ng) mt_dif(a);
+    pthread_barrier_wait(&g_mt_bar);
+    if (a->idx == 0 && a->c) {
+        if ((rc = bfm_read(a->c, MT_CNT_OFF, &g_mt_counter, 8)) != BFM_OK) mt_fail(a, "[3] 共有の語を読む", rc);
+    }
+
+    /* 速さ: write / read / FAA(自分の語)を全スレッドで同時に */
+    const uint64_t own = MT_OFF + (uint64_t)a->idx * MT_SPAN + 4096u + 512u;
+    for (int ph = 0; ph < 3; ph++) {
+        pthread_barrier_wait(&g_mt_bar);
+        const uint64_t t0 = now_ns();
+        for (uint32_t k = 0; k < g_mt_n && a->c && !a->ng; k++) {
+            uint64_t v = k, old;
+            rc = (ph == 0) ? bfm_write(a->c, own, &v, 8) : (ph == 1) ? bfm_read(a->c, own, &v, 8)
+                                                                      : bfm_faa(a->c, own + 8u, 1, &old);
+            if (rc != BFM_OK) mt_fail(a, ph == 0 ? "速さ write" : ph == 1 ? "速さ read" : "速さ FAA", rc);
+        }
+        a->ns[ph] = now_ns() - t0;
+    }
+    pthread_barrier_wait(&g_mt_bar);                         /* 全スレッドで同時に切断する */
+    if (a->c && bfm_disconnect(a->c) != BFM_OK) mt_fail(a, "切断", 0);
+    return NULL;
+}
+
+static int run_mt(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t nthreads, uint32_t n)
+{
+    static struct mt_arg args[BFM_MAX_CONN];
+    if (nthreads == 0 || nthreads > g_bfm.nconn) {
+        printf("mt: スレッドの数は 1〜%u(-t)\n", g_bfm.nconn);
+        return 2;
+    }
+    g_mt_n = n;
+    g_mt_threads = nthreads;
+    g_mt_poll_stop = 0;
+    printf("mt: スレッド %u 本(CPU %ld 個)、各 %u 回\n", nthreads, sysconf(_SC_NPROCESSORS_ONLN), n);
+    pthread_barrier_init(&g_mt_bar, NULL, nthreads);
+    pthread_t poller;
+    pthread_create(&poller, NULL, mt_poller, NULL);
+    for (uint32_t t = 0; t < nthreads; t++) {
+        memset(&args[t], 0, sizeof(args[t]));
+        args[t].idx = (int)t;
+        args[t].ip = ip;
+        args[t].mac = mac;
+        args[t].port = port;
+        pthread_create(&args[t].th, NULL, mt_worker, &args[t]);
+    }
+    for (uint32_t t = 0; t < nthreads; t++) pthread_join(args[t].th, NULL);
+    g_mt_poll_stop = 1;
+    pthread_join(poller, NULL);
+    pthread_barrier_destroy(&g_mt_bar);
+
+    uint32_t ng = 0, up = 0;
+    for (uint32_t t = 0; t < nthreads; t++) {
+        if (args[t].c) up++;
+        if (args[t].ng) {
+            ng++;
+            printf("mt: スレッド %u: NG %s\n", t, args[t].why);
+        }
+    }
+    snprintf(g_mt_msg, sizeof(g_mt_msg), "%u 本のスレッドが同時に接続した(%u 本)", nthreads, up);
+    check(g_mt_msg, up == nthreads);
+    snprintf(g_mt_msg, sizeof(g_mt_msg), "[1][2][4] スレッドごとの write / read / T10-DIF(NG のスレッド %u 本)", ng);
+    check(g_mt_msg, ng == 0);
+    snprintf(g_mt_msg, sizeof(g_mt_msg), "[3] 共有の語への FAA の合計 = %llu(あるべき %llu)",
+             (unsigned long long)g_mt_counter, (unsigned long long)n * nthreads);
+    check(g_mt_msg, g_mt_counter == (uint64_t)n * nthreads);
+    if (ng == 0) {
+        static const char *names[] = {"write 8B", "read 8B", "FAA"};
+        for (int ph = 0; ph < 3; ph++) {
+            uint64_t worst = 0, sum = 0;
+            for (uint32_t t = 0; t < nthreads; t++) {
+                if (args[t].ns[ph] > worst) worst = args[t].ns[ph];
+                sum += args[t].ns[ph];
+            }
+            printf("mt: 速さ %-8s スレッド %2u 本: 合計 %.2f Mops(1 本あたり %.2f Mops、1 回 %.0f ns)\n", names[ph],
+                   nthreads, (double)n * nthreads / (double)worst * 1000.0,
+                   (double)n / ((double)sum / nthreads) * 1000.0, (double)sum / nthreads / n);
+        }
+    }
+    printf("mt: 結果 %s(NG %d 件)\n", g_ng ? "NG" : "OK", g_ng);
+    return g_ng ? 1 : 0;
+}
+
+/* ---------------------------------------------------------------------
  * bench: 多重度(同時に出しておく数)ごとのスループット・IOPS・遅延
  * ------------------------------------------------------------------- */
 
@@ -768,10 +999,10 @@ static int run_bench(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t 
 int main(int argc, char **argv)
 {
     uint16_t port = 0;
-    uint32_t iters = 0;
+    uint32_t iters = 0, threads = 4;
     int oob = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "d:i:p:m:M:n:BSCxvh")) != -1) {
+    while ((opt = getopt(argc, argv, "d:i:p:m:M:n:t:BSCxvh")) != -1) {
         switch (opt) {
         case 'd': g_bfm_linux_pci_bdf = optarg; break;
         case 'i': if (parse_ip(optarg, &g_bfm_local_ip) != 0) { usage(); return 2; } break;
@@ -779,6 +1010,7 @@ int main(int argc, char **argv)
         case 'm': g_bfm_path_mtu = (uint8_t)atoi(optarg); break;
         case 'M': g_bfm_port_mtu = (uint16_t)atoi(optarg); break;
         case 'n': iters = (uint32_t)atoi(optarg); break;
+        case 't': threads = (uint32_t)atoi(optarg); break;
         case 'B': g_bfm_bf_enable = 0; break;
         case 'S': g_bfm_scatter_cqe = 0; break;
         case 'C': g_bfm_cpu_awake = 0; break;
@@ -795,14 +1027,17 @@ int main(int argc, char **argv)
     signal(SIGTERM, on_sig);
     signal(SIGQUIT, on_sig);
 
-    const int bench = (strcmp(mode, "bench") == 0);
+    const int bench = (strcmp(mode, "bench") == 0), mt = (strcmp(mode, "mt") == 0);
     g_server = (strcmp(mode, "server") == 0);
-    if (bench) g_bfm_stage_size = BENCH_QD_MAX * BENCH_SIZE_MAX;   /* 多重度ぶんの着地点 / 送り元 */
+    if (bench) {
+        g_bfm_stage_size = BENCH_QD_MAX * BENCH_SIZE_MAX;   /* 多重度ぶんの着地点 / 送り元 */
+        g_bfm_max_conn = 1;                                 /* 中継バッファが大きいので枠は 1 つだけ */
+    }
     if (bfm_init() != BFM_OK) return 1;
     int ret = 0;
     if (strcmp(mode, "server") == 0) {
         ret = run_server(port);
-    } else if ((strcmp(mode, "client") == 0 || bench) && optind + 2 < argc) {
+    } else if ((strcmp(mode, "client") == 0 || bench || mt) && optind + 2 < argc) {
         uint32_t ip;
         uint8_t mac[6];
         if (parse_ip(argv[optind + 1], &ip) != 0 || parse_mac(argv[optind + 2], mac) != 0) {
@@ -810,6 +1045,8 @@ int main(int argc, char **argv)
             ret = 2;
         } else if (bench) {
             ret = run_bench(ip, mac, port, iters ? iters : 100000u);
+        } else if (mt) {
+            ret = run_mt(ip, mac, port, threads, iters ? iters : 100000u);
         } else {
             ret = run_client(ip, mac, port, iters ? iters : 20000u, oob);
         }
