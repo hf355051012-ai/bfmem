@@ -154,8 +154,10 @@ Linux でも `bfm_x86_init()` を呼ぶので、`-v` を付けると同じ表示
 | DMA 領域 | `g_bfm_dma_base` / `g_bfm_dma_size` | コマンドキュー・メールボックス・**FW に渡すページ**・EQ / CQ / QP のリング・接続ごとの中継バッファ。`bfm_init()` のときに静的に切り出す(返さない)|
 | 公開メモリ | `g_bfm_mr_base` / `g_bfm_mr_size` | 相手が直接触る範囲。この範囲だけを許した MKey(PA モード)を作る |
 
-既定の大きさは DMA 領域 96MiB(そのうち FW のページが `g_bfm_fw_pages_max` = 16,384 ページ = 64MiB)。
-足りなければ `bfm_init()` が必要な量を表示して失敗する。
+既定の大きさは DMA 領域 96MiB(そのうち FW のページが `g_bfm_fw_pages_max` = 16,384 ページ = 64MiB)、
+公開メモリ 1GiB。DMA 領域が足りなければ `bfm_init()` が必要な量を表示して失敗する。
+公開メモリの大きさは 64bit で扱い、PA モードの MKey 1 つで覆うので、大きくしても NIC の資源は増えない
+(VxWorks では、その範囲が OS に使われない RAM であること。Linux では起動のたびに確保して VFIO に登録する)。
 
 ### BlueFlame
 
@@ -305,7 +307,7 @@ PI は guard(データの CRC16、多項式 0x8BB7)・app tag・ref tag(ブロ�
 | `g_bfm_pcie_flr` | 立ち上げの前に FLR をかける(VxWorks は 1)|
 | `g_bfm_pcie_mrrs` | Max Read Request Size(0 なら触らない)|
 | `g_bfm_dma_base` / `_size` | DMA 領域 |
-| `g_bfm_mr_base` / `_size` | 公開メモリ |
+| `g_bfm_mr_base` / `_size` | 公開メモリ(既定 1GiB)|
 | `g_bfm_fw_pages_max` | FW に渡すページの上限 |
 | `g_bfm_stage_size` | 接続ごとの中継バッファ |
 | `g_bfm_dif_buf_size` | 接続ごとの T10-DIF 用の中継バッファ(2 面に分けて交互に使う。既定 128KiB)|
@@ -393,6 +395,7 @@ sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -t 16 mt 192.168.101.21 
 | [4] | FAA +1 x 1,000(元の値の並び)、+2^32、CAS 0→1,000、外れる比較値。相手のメモリの語がホスト順であること |
 | [4b] | 4 バイトの FAA +1 x 1,000、0 への折り返し、CAS 0→1,000、外れる比較値。相手のメモリのバイト順、隣の語が変わらないこと |
 | [5] | データ領域を読み戻して模型と比べる |
+| [5b] | 相手の公開メモリの最後の 64KiB と 8 バイトを write して読み戻す。はみ出す操作は手元で断る(`BFM_E_PARAM`)|
 | [6] | 遅延(write / read 8・64 バイト、FAA、CAS、FAA32、CAS32)と write_post の速さ。測った後にもう一度読み戻して比べる |
 | 最後 | 模型の hash を出す(相手が切断のときに出す hash と同じであること)|
 | [8] | T10-DIF: 4 つの操作を write / read の両方(8 通り)で、相手のメモリ・手元の結果と独立に作った期待値を比べる。誤りの検出(guard・ref tag・app tag)。起動と完了確認を分けた使い方(途中の 2 本目の起動が `BFM_E_BUSY`、途中で普通の write / read、`bfm_dif_poll()` で完了、3 つ目の分の誤りを `bfm_dif_wait()` で受け取る)。SW は常に、HW は使えるときだけ。使えなければ `BFM_E_NOTSUP` を確かめる。DIF の遅延とスループット |

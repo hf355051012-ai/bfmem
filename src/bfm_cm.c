@@ -40,24 +40,24 @@
 #define REQ_STALE_MS      2000u       /* これより古い REQ は掛け側があきらめたとみなして捨てる */
 #define TX_DRAIN_MS       100u        /* BYE が出ていくのを待つ上限 */
 
-struct bfm_conn g_bfm_conn[BFM_MAX_CONN];
+struct bfm_conn g_bfm_conn[BFM_MAX_CONN];   /* 接続の枠(使うのは先頭の g_bfm.nconn 個)*/
 
-static bfm_qp_t s_gsi;
+static bfm_qp_t s_gsi;                      /* 接続管理(REQ / REP / BYE)を運ぶ GSI の QP(QP1)*/
 static volatile uint8_t *s_gsi_db;          /* GSI の UAR + 0x800(UC)*/
 static volatile uint8_t *s_rx_ring;         /* 受信の枠(2^BFM_GSI_RQ_LOG 個)*/
 static volatile uint8_t *s_tx_buf;          /* 送るメッセージの置き場(BFM_GSI_TXBUFS 個)*/
-static uint32_t s_tx_next;
-static uint32_t s_tx_outstanding;
-static int s_gsi_ready;
+static uint32_t s_tx_next;                  /* 次に使う送信の置き場の通し番号(BFM_GSI_TXBUFS で割った余りが位置)*/
+static uint32_t s_tx_outstanding;           /* 出して、まだ完了していない送信の数 */
+static int s_gsi_ready;                     /* GSI の QP と置き場がそろい、接続管理を使える */
 
 /* bfm_accept() を待っている REQ(接続の枠の数まで。同じ掛け側からの送り直しは 1 つにまとめる。
  * 一杯なら最も古いものを上書きする。掛け側が送り直すので、落としてもよい)。 */
 #define REQ_Q BFM_MAX_CONN
 static struct {
-    int      used;
-    uint64_t t;
-    uint8_t  msg[MSG_SIZE];
-} s_req[REQ_Q];
+    int      used;                          /* 中身がある */
+    uint64_t t;                             /* 受けた時刻(ns。古さを見る)*/
+    uint8_t  msg[MSG_SIZE];                 /* 受けた REQ のメッセージそのもの */
+} s_req[REQ_Q];                             /* 受けて、まだ bfm_accept() に渡していない REQ */
 
 static int gsi_pump(void);
 

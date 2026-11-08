@@ -3,9 +3,9 @@
 
 #include <string.h>
 
-static int s_inited;
+static int s_inited;                        /* bfm_init() が済み、bfm_shutdown() をまだ呼んでいない */
 
-bfm_lock_t g_bfm_ctl_lock;
+bfm_lock_t g_bfm_ctl_lock;                  /* 接続をまたぐ状態(GSI・接続の枠・FW のコマンド・EQ)を守る鍵 */
 
 static int check_config(void)
 {

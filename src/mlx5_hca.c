@@ -97,8 +97,8 @@ static int set_host_endianness(bfm_dev_t *d)
     return access_reg(d, MLX5_REG_HOST_ENDIANNESS, 0, data, "ACCESS_REG(HOST_ENDIANNESS)");
 }
 
-static uint8_t s_cap_out[16 + MLX5_HCA_CAP_BYTES];
-static uint8_t s_cap_in[16 + MLX5_HCA_CAP_BYTES];
+static uint8_t s_cap_out[16 + MLX5_HCA_CAP_BYTES];  /* QUERY_HCA_CAP の応答(16 バイトの頭 + 能力)*/
+static uint8_t s_cap_in[16 + MLX5_HCA_CAP_BYTES];   /* SET_HCA_CAP の入力(s_cap_out の能力を直して写す)*/
 
 static int query_cap(bfm_dev_t *d, uint16_t type, const char *what)
 {

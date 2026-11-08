@@ -341,7 +341,7 @@
     },
     {
       "func": "run_client",
-      "summary": "掛け側の本体。相手へ接続し、手元に公開メモリのデータ領域の模型を持って、次の検査をして結果を表示する。\n\n* [1] いろいろな長さ・半端な位置の read と 64KiB まとめての read\n* [2] inline に収まる長さと収まらない長さの write と読み戻し\n* [3] `bfm_write_post()` を 5000 回と `bfm_flush()` の後の読み戻し\n* [4] FAA と CAS の元の値の並び、相手のメモリの語 1 がホスト順の 1000 であること\n* [4b] 4 バイトの FAA と CAS(語 2 の前半 +16 と後半 +20)の元の値の並び、0 への折り返し、相手のメモリのバイト順、隣の語 1 が変わらないこと\n* [5] データ領域全体の読み戻し\n* [6] 遅延(`lat()`)と `bfm_write_post()` の速さ、その後の読み戻し(ここまで NG が無いときだけ)\n* [8] T10-DIF の読み書き(`run_dif()`)\n* [7] 公開メモリの外の read を相手が断ること(oob のときだけ)\n\n最後に模型の hash を表示して接続を返す。",
+      "summary": "掛け側の本体。相手へ接続し、手元に公開メモリのデータ領域の模型を持って、次の検査をして結果を表示する。\n\n* [1] いろいろな長さ・半端な位置の read と 64KiB まとめての read\n* [2] inline に収まる長さと収まらない長さの write と読み戻し\n* [3] `bfm_write_post()` を 5000 回と `bfm_flush()` の後の読み戻し\n* [4] FAA と CAS の元の値の並び、相手のメモリの語 1 がホスト順の 1000 であること\n* [4b] 4 バイトの FAA と CAS(語 2 の前半 +16 と後半 +20)の元の値の並び、0 への折り返し、相手のメモリのバイト順、隣の語 1 が変わらないこと\n* [5] データ領域全体の読み戻し\n* [5b] 公開メモリの最後の 64KiB と 8 バイトの write と読み戻し、はみ出す操作を手元で断ること(`BFM_E_PARAM`)\n* [6] 遅延(`lat()`)と `bfm_write_post()` の速さ、その後の読み戻し(ここまで NG が無いときだけ)\n* [8] T10-DIF の読み書き(`run_dif()`)\n* [7] 公開メモリの外の read を相手が断ること(oob のときだけ)\n\n最後に模型の hash を表示して接続を返す。",
       "args": {"ip": "相手の IPv4 アドレス", "mac": "相手の MAC アドレス", "port": "接続の番号", "iters": "[6] の遅延の測定の回数([8] の DIF の遅延にも使う。5000 まで)", "oob": "0 以外なら [7] を行う"},
       "ret": "0: すべて OK。1: 接続できない、相手の公開メモリが小さい、または NG があった。",
       "pre": "`bfm_init()` が済んでいること。相手が server で、公開メモリを取り決めどおりに埋めていること。",
@@ -492,6 +492,28 @@
         {"call": "check(\"[4b] 隣の 8 バイトの語 1 が 1000 のまま\", bfm_read() == BFM_OK && v == 1000) を呼ぶ"},
         {"call": "[5] rc = bfm_read(c, 0, buf, DATA_BYTES) を呼ぶ"},
         {"call": "check(\"[5] ...\", rc == BFM_OK && buf と g_model が一致) を呼ぶ"},
+        {"call": "[5b] end = bfm_remote_size(c) を呼ぶ"},
+        {"do": "ok = (end >= AREA_BYTES + DATA_BYTES)、j = 0"},
+        {"while": "j < DATA_BYTES && ok ?", "body": [
+          {"do": "buf[j] = (uint8_t)(j * 7 + 3)"},
+          {"do": "j++"}
+        ]},
+        {"if": "ok ?", "then": [
+          {"call": "bfm_write(c, end - DATA_BYTES, buf, DATA_BYTES) と bfm_read(c, end - DATA_BYTES, big, DATA_BYTES) を呼ぶ(write が失敗したら read は呼ばない)"},
+          {"if": "どちらかが BFM_OK でない、または big と buf が違う?", "then": [
+            {"do": "ok = 0"}
+          ]}
+        ]},
+        {"do": "w = 0x0123456789abcdef、r = 0"},
+        {"if": "ok ?", "then": [
+          {"call": "bfm_write(c, end - 8, &w, 8) と bfm_read(c, end - 8, &r, 8) を呼ぶ(write が失敗したら read は呼ばない)"},
+          {"if": "どちらかが BFM_OK でない、または r != w ?", "then": [
+            {"do": "ok = 0"}
+          ]}
+        ]},
+        {"call": "check(\"[5b] 公開メモリの最後 ...\", ok) を呼ぶ"},
+        {"call": "bfm_read(c, end - 4, &r, 8) と bfm_write(c, end, &w, 1) を呼ぶ(read が BFM_E_PARAM でなければ write は呼ばない)"},
+        {"call": "check(\"[5b] はみ出す操作は手元で断る\", 両方が BFM_E_PARAM) を呼ぶ"},
         {"if": "[6] !g_stop && g_ng == 0 ?", "then": [
           {"do": "i = 0"},
           {"while": "i < 256(g_src の大きさ)?", "body": [

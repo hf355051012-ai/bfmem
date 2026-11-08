@@ -1,7 +1,7 @@
 /* mlx5 のコマンドキュー、FW へのページの受け渡し、EQ(非同期イベント)。
  *
- * コマンドキューは entry 0 だけを使い、1 つずつ同期で出す(冷たい経路なので排他は
- * 持たない。bfm.h の「スレッド安全ではない」の通り、1 つのタスクから呼ぶこと)。 */
+ * コマンドキューは entry 0 だけを使い、1 つずつ同期で出す。ここでは排他を持たないので、
+ * 複数のコアから使うときは呼び出し側が g_bfm_ctl_lock を取る(bfm_init() の間は 1 つのコアだけ)。 */
 #include "bfm_internal.h"
 
 #include <string.h>
@@ -29,7 +29,7 @@
 
 #define CMD_TIMEOUT_MS 10000u
 
-bfm_dev_t g_bfm;
+bfm_dev_t g_bfm;                            /* 装置の状態(使う ConnectX は 1 枚だけ)*/
 
 static volatile uint8_t *mbox_in(const bfm_dev_t *d, uint32_t i)
 {

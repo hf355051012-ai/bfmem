@@ -72,7 +72,10 @@ extern uint64_t g_bfm_dma_base;
 extern uint64_t g_bfm_dma_size;
 
 /* 相手に見せるメモリ(相手が RDMA の write / read / atomic で直接触る範囲)。
- * この範囲だけを許した MKey を作り、その rkey と先頭アドレスを接続のときに相手へ渡す。 */
+ * この範囲だけを許した MKey を作り、その rkey と先頭アドレスを接続のときに相手へ渡す。
+ * 既定は 1GiB。大きさは 64bit で扱う(MKey は PA モードなので、大きくしても NIC の資源は増えない)。
+ * VxWorks では、この範囲が OS に使われない RAM であること。Linux では起動のたびにこの大きさを
+ * 確保して VFIO に登録する(2MiB の hugepage が足りなければ 4KiB のページで張る)。 */
 extern uint64_t g_bfm_mr_base;
 extern uint64_t g_bfm_mr_size;
 

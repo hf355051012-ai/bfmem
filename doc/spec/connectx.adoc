@@ -1,0 +1,410 @@
+== ConnectX(mlx5)の仕様の要点
+
+bfmem が使う範囲の ConnectX の仕様をまとめる。値はソース(`src/bfm_internal.h`・`src/mlx5_*.c`・`src/bfm_ops.c`・`src/bfm_pci.c`)に
+書いてあるものと同じで、もとは Linux の mlx5 のヘッダ(`include/linux/mlx5/mlx5_ifc.h`・`device.h`・`qp.h`)と、
+Linux の mlx5_core / mlx5_ib の手順。実機で確かめたのは ConnectX-4 Lx だけ(FW 14.29 と 14.32)。
+ConnectX-4〜7 の違いへの備えは、この章の最後に書く。
+
+* ConnectX との受け渡しは、*数も構造もすべてビッグエンディアン*(初期化セグメント・コマンド・WQE・CQE・EQE・doorbell record)。
+  bfmem は `bfm_wr16be()` などのバイト順の関数で読み書きする。例外は atomic の元の値(<<cx-wqe,WQE と CQE>>)。
+* NIC に渡すアドレスは CPU のポインタの値そのもの(VxWorks は論理 = 物理、Linux は仮想 = IOVA に張る)。
+* 割り込みは使わない。EQ と CQ は arm せず、CPU が見に行く(ポーリング)。
+
+[[cx-block]]
+=== ブロック図
+
+.ConnectX とホストのブロック図
+image::hw_block.drawio.svg[ConnectX とホストのブロック図]
+
+ホストと ConnectX の間の受け渡しは、図の ① 〜 ⑤ の 5 つだけ。
+
+[cols="1,3,3",options="header"]
+|===
+|経路 |中身 |bfmem の場所
+|① 設定空間 |装置の確認・FLR・BAR0 の割り当て・Memory Space / Bus Master・MRRS |`bfm_pci_setup()`(VxWorks は ECAM を直接、Linux は VFIO の設定空間)
+|② 初期化セグメント |FW の版の確認、FW の初期化の完了待ち、コマンドキューの登録、コマンドのドアベル |`mlx5_hca_init()`・`mlx5_cmd_init()`・`mlx5_cmd()`
+|③ UAR ページ |WQE のドアベル・BlueFlame(WQE そのものを MMIO で書く)、EQ のドアベル |`post()`・`gsi_send()`・`mlx5_eq_update_ci()`
+|④ DMA(DMA 領域) |NIC がコマンド・メールボックス・WQE・送るデータを読み、CQE・EQE・読んだデータ・コマンドの応答を書く。FW に渡したページも NIC が自分の作業域(ICM)として使う |`bfm_mem_alloc()` で切り出した領域
+|⑤ DMA(公開メモリ) |相手の bfmem からの write / read / atomic を、NIC が CPU を通さずに処理する |MKey(rkey)で範囲を決めるだけ
+|===
+
+[[cx-if]]
+=== ドライバとのインターフェースの概要
+
+ConnectX は「FW が管理する資源(QP・CQ・EQ・MKey・PD・UAR)」と「ホストのメモリに置くリング」の組で動く。
+ドライバは次の順に関わる。
+
+. *FW を起こす*: 初期化セグメントでコマンドキューを教え、コマンドで HCA を有効にし、FW が求めるページ(ICM)を渡す(<<cx-boot>>)。
+. *資源を作る*: コマンド(`CREATE_EQ`・`CREATE_CQ`・`CREATE_QP`・`CREATE_MKEY` など)で作り、番号(qpn・cqn・eqn・MKey)を受け取る。
+  リング(WQ・CQ・EQ)の置き場所はホストのメモリで、コマンドの入力の最後にページ(4KiB)ごとの物理アドレスの表(PAS)を付けて渡す(<<cx-cmd>>)。
+. *データを出す*: WQE をリングに書いて doorbell record を進め、UAR のドアベル(または BlueFlame)を叩く。
+  完了は NIC が CQ のリングに CQE を書いて知らせる(<<cx-qp>>・<<cx-wqe>>)。
+. *イベントを受ける*: エラー・リンクの変化・FW のページ要求は EQ に EQE が来る(<<cx-eq>>)。
+. *止める*: `TEARDOWN_HCA` の後は FW にコマンドを出さず、Bus Master を落とす。
+
+[cols="2,2,3",options="header"]
+|===
+|もの |置き場所 |ドライバがすること
+|初期化セグメント |BAR0 の先頭 |FW の版を読む、コマンドキューの物理アドレスを書く、コマンドのドアベルを書く
+|コマンドキュー・メールボックス |ホストのメモリ(DMA 領域) |コマンドを組んで持ち主を FW にし、完了を待つ
+|FW に渡すページ(ICM) |ホストのメモリ(DMA 領域) |`MANAGE_PAGES` で物理アドレスを渡す(返してもらわない)
+|EQ のリング |ホストのメモリ |EQE の owner を見て読み、EQ のドアベルで消費の数を知らせる
+|WQ(SQ・RQ)のリング |ホストのメモリ |WQE を書く
+|CQ のリング |ホストのメモリ |CQE の owner を見て読む
+|doorbell record |ホストのメモリ(QP・CQ ごとに 64 バイト) |SQ / RQ に積んだ数・CQ から読んだ数を書く(NIC が DMA で読む)
+|UAR ページ |BAR0 の中(4KiB ずつ) |ドアベル・BlueFlame の窓に MMIO で書く
+|QP・CQ・EQ・MKey のコンテキスト |NIC の中(ICM) |コマンドで作り、状態を変える。直接は触らない
+|===
+
+[[cx-reg]]
+=== 設定するレジスタの一覧
+
+==== PCIe の設定空間
+
+`bfm_pci_setup()`(`src/bfm_pci.c`)が設定する。PCIe Capability の位置は Capabilities Pointer(0x34)からたどる。
+
+[cols="1,2,4",options="header"]
+|===
+|位置 |名前 |bfmem がすること
+|0x00 |Vendor ID / Device ID |0x15b3 で、ConnectX-4〜7 の PF の Device ID(0x1013〜0x1021)であることを確かめる
+|0x04 |Command(下位 16bit) |BAR0 を測る間は Memory Space(bit1)と Bus Master(bit2)を落とす。最後に Memory Space・Bus Master・INTx Disable(bit10)を立てる。止めるときは Bus Master を落とす。上位 16bit の Status は書いて 1 を消すビットなので 0 を書く
+|0x06 |Status(bit4 = Capabilities List) |PCIe Capability を探す前に確かめる
+|0x10 / 0x14 |BAR0(64bit のメモリ BAR) |64bit のメモリ BAR であることを確かめる。全部 1 を書いて大きさを測り、`g_bfm_bar0_addr` が 0 でなければ下位・上位に書く(種類のビット 3:0 は残す)
+|0x34 |Capabilities Pointer |PCIe Capability(ID 0x10)を探す
+|PCIe + 0x04 |Device Capabilities(bit28 = FLR) |FLR に対応しているか確かめる
+|PCIe + 0x08 |Device Control |bit15(Initiate FLR)で FLR をかける。bit14:12 に Max Read Request Size(128 x 2^n バイト)を書く(`g_bfm_pcie_mrrs` が 0 でなければ)
+|PCIe + 0x0a |Device Status(bit5 = Transactions Pending) |FLR の前に、保留中の DMA が終わるのを最大 100ms 待つ
+|PCIe + 0x12 |Link Status |速さ(bit3:0)と幅(bit9:4)を表示する
+|===
+
+FLR は Bus Master を落とし、Transactions Pending が消えるのを待ってから Initiate FLR を書き、100ms 待つ(PCIe の決まり)。
+その後、Vendor ID が読めるようになるまで最大 1 秒待つ。
+
+==== BAR0 の初期化セグメント(Initialization Segment)
+
+BAR0 の先頭。UC で張る。
+
+[cols="1,2,4",options="header"]
+|===
+|位置 |名前 |中身と bfmem がすること
+|0x000 |fw_rev |下位 16bit = major、上位 16bit = minor。全部 1 で読めたら装置が見えていない
+|0x004 |cmdif_rev / fw_rev_subminor |上位 16bit = コマンドの形式の版。*5 でなければ断る*。下位 16bit = subminor
+|0x010 |cmdq_phy_addr_high |コマンドキューの物理アドレスの上位 32bit を書く
+|0x014 |cmdq_phy_addr_low・log_cmdq_size・log_cmdq_stride |読むと下位 8bit が log_cmdq_size(bit7:4)と log_cmdq_stride(bit3:0)。*stride が 6(entry が 64 バイト)であることを確かめる*。コマンドキューの物理アドレスの下位 32bit(4KiB 境界なので下位 12bit は 0)を書く
+|0x018 |コマンドのドアベル |bit n を立てると entry n のコマンドを FW が処理する。bfmem は entry 0 だけを使うので 1 を書く
+|0x1fc |initializing(bit31) |1 の間は FW が初期化中。コマンドキューを書く前と後に、0 になるのを待つ(最大 120 秒)
+|===
+
+==== UAR ページ
+
+`ALLOC_UAR` で番号(uarn)をもらい、BAR0 + uarn x 4KiB の 4KiB を使う。bfmem は EQ に 1 つ、GSI に 1 つ、接続の枠ごとに 1 つ使う。
+
+[cols="1,2,4",options="header"]
+|===
+|位置 |名前 |中身と bfmem がすること
+|+0x048 |EQ のドアベル(arm しない) |`(eq_cc & 0xffffff) OR (eqn << 24)` を書き、EQE をどこまで読んだかを知らせる(16 個ごとと読み終わり)。割り込みは使わないので arm の位置(+0x040)は使わない
+|+0x800 |ドアベル / BlueFlame の窓 0 |UC で WQE の先頭 8 バイトを書くとドアベル。WC で WQE 全体(256 バイトまで)を書くと BlueFlame
+|+0x800 + bf_buf_size |BlueFlame の窓 1 |窓 0 と交互に使う(1 回書くごとに切り替える)。bf_buf_size = 2^log_bf_reg_size / 2(ConnectX-4 Lx は 256 バイト)
+|===
+
+BlueFlame の窓は write-combining(WC)で張った別名から書く(Linux は sysfs の resource0 のそのページを WC で張り直す。
+VxWorks は `g_bfm_bar0_wc_va`)。書いた後に `sfence` で WC のバッファを吐き出す。
+窓に書いたものが 1 回の PCIe の書き込みにまとまらなかったときは、NIC はそれを捨てて SQ のリングから WQE を読む(遅くなるだけで結果は同じ)。
+
+==== ホストのメモリの doorbell record
+
+NIC が DMA で読む、ホストのメモリの 64 バイト(QP・CQ ごと)。アドレスは `CREATE_QP` / `CREATE_CQ` の dbr_addr で渡す。
+
+[cols="2,1,4",options="header"]
+|===
+|もの |位置 |中身
+|QP |[0] |RQ に積んだ WQE の数(下位 16bit、BE)
+|QP |[1] |SQ に積んだ WQEBB の数(下位 16bit、BE)。ドアベルを叩く前に書く
+|CQ |[0] |CQ から読んだ CQE の数(consumer counter。下位 24bit、BE)。CQE を 1 個読むごとに書く
+|CQ |[1] |arm の印(bfmem は arm しないので 0 のまま)
+|===
+
+==== ACCESS_REG で読み書きするレジスタ
+
+コマンド `ACCESS_REG`(0x805)で、レジスタの番号と 16 バイトの中身を渡す(op_mod 0 = 書く、1 = 読む)。
+
+[cols="1,2,4",options="header"]
+|===
+|番号 |名前 |bfmem がすること
+|0x7004 |HOST_ENDIANNESS |中身 0 を書く(Linux の mlx5_core と同じ)。HCA の能力を読む前
+|0x5003 |PMTU |ポート 1 の MTU。[4..5] 上限、[8..9] admin_mtu(書く)、[12..13] oper_mtu(今の値)。値はフレーム長(IP の MTU + 22)。`g_bfm_port_mtu` が 0 でなければ書く
+|0x5006 |PAOS |ポート 1 の状態。admin_status = UP(byte 2 = 1)と ase(byte 4 bit7)を書いて上げ、oper_status(byte 3 の下位 4bit)が 1 になるのを待つ(`g_bfm_link_wait_ms`)
+|===
+
+==== HCA の能力(QUERY_HCA_CAP / SET_HCA_CAP)
+
+能力は 4,096 バイトまるごと読み書きする(新しい装置ほど構造が長いため)。op_mod = 種類 << 1 | 1(今の値)で読み、書くときは種類 << 1。
+
+[cols="1,2,4",options="header"]
+|===
+|種類 |読む欄(能力の先頭からのバイト) |bfmem の使い方
+|general(0) |page_request_disable([0] bit1)・log_max_ra_req_qp([41])・log_max_ra_res_qp([43])・port_type([54] bit1:0)・roce([67] bit2)・bf([76] bit7)・log_bf_reg_size([77] bit4:0)・umr_fence([65] bit5:4)・sho([66] bit0)・num_vhca_ports([194]) |port_type が 1(Ethernet)でなければ断る。BlueFlame の窓の大きさ・同時に出せる read / atomic の数・T10-DIF のオフロードの有無を決める。値は変えずにそのまま書き戻す
+|atomic(3) |atomic_req_8B_endianness_mode([8] bit7:6)と、それに対応しているか([8] bit1)・atomic_operations([18..19])・atomic_size_qp([22..23]) |endianness_mode を 1(ホスト順)にして書く。できない装置は断る。QP の atomic_mode を決める
+|roce(4) |qp_ts_format([3] bit1:0) |0 でなければ QP の ts_format を 1 にする(ConnectX-7 への備え)
+|===
+
+[[cx-boot]]
+=== ファームウェアの起動
+
+`bfm_init()` の流れ(`bfm_pci_setup()` → BAR0 を張る → `mlx5_hca_init()` → `bfm_dif_init()` → `bfm_cm_init()`)。
+両側に線のある箱は FW へのコマンド。手順は Linux の mlx5_core(`mlx5_function_enable()` / `mlx5_function_setup()`)と同じ順。
+
+.立ち上げの手順
+image::hw_boot.drawio.svg[立ち上げの手順]
+
+* *FW の初期化待ち*: initializing(0x1fc の bit31)が 0 になるまで待つ。コマンドキューを登録する前と後の 2 回。
+  ConnectX-7 は FW の起動に長くかかることがあるので、上限は 120 秒にしてある。
+* *ENABLE_HCA*(0x104): この PCI function の HCA を FW の中で有効にする。この後の手順はこれが通っている前提。止めるときの `TEARDOWN_HCA` と対になる。
+* *ISSI*: コマンドの形式の版。`QUERY_ISSI` の応答の byte 108〜111(bit n = 版 n に対応)で版 1 があれば `SET_ISSI` で 1 にする。
+  bfmem のコマンドは版 1 の形で書いてある(版 0 しか無い装置は対応表に無い)。
+* *FW に渡すページ*: 下の「FW に渡すページ」。boot と init の 2 回、`INIT_HCA` の後は EQ の要求に答える。
+* *HOST_ENDIANNESS* と *HCA の能力*: 上の表。能力は `INIT_HCA` の前に決める。
+* *INIT_HCA*(0x102): HCA を動かし始める。この後に資源(EQ・PD・MKey・CQ・QP)を作れる。
+* *ポートと RoCE*: PMTU・PAOS でポートを上げ、vport の roce_en を立て(立てないと `INIT2RTR` が断られる)、GID の表の 0 番に
+  自分の IPv4 から作った GID(::ffff:a.b.c.d)と MAC を入れる(RoCE v2、IPv4)。
+
+==== FW に渡すページ(ICM)
+
+FW は QP などのコンテキストを置く作業域を、ホストのメモリに求める(4KiB のページ単位)。
+
+[cols="2,4",options="header"]
+|===
+|コマンド・イベント |中身
+|`QUERY_PAGES`(0x107) |op_mod 1 = boot、2 = init。応答の [10..11] function_id、[12..15] 要るページの数
+|`MANAGE_PAGES`(0x108) GIVE |op_mod 1。[10..11] function_id、[12..15] ページの数、[16〜] 各ページの物理アドレス(8 バイトずつ)。bfmem は 1 回に 512 ページまで
+|`MANAGE_PAGES` CANT_GIVE |op_mod 0。渡せないと伝える(伝えないと FW は要求を出し直し続ける)
+|ページ要求のイベント(0x0b) |`INIT_HCA` の後に EQ に来る。data の [2..3] function_id、[4..7] ページの数(負なら返却の申し出)
+|===
+
+* ページは DMA 領域の FW 用の区画(`g_bfm_fw_pages_max` ページ。既定 16,384 = 64MiB)から先頭から順に渡し、返してもらわない。
+* *EQ でのページ要求は、1 回の読み取りの最後の要求にだけ答える*(FW は答えが来るまで同じ要求を出し直すので、全部に答えると与えすぎる)。
+* 返却の申し出(負の数)には答えず、預けたままにする。
+* 実測(ConnectX-4 Lx): FW 14.32 で計 3,951 ページ、FW 14.29 で計 7,841 ページ。ConnectX-7 はもっと多いはず。
+
+==== 止め方
+
+`mlx5_hca_teardown()`: `TEARDOWN_HCA`(0x103)を、まず graceful(入力の [10..11] profile = 0)で、断られたら force(profile = 1)で出す。
+force の応答の byte 15 の bit0 が 1 なら失敗とみなす。*この後は FW にコマンドを出さない*(`MANAGE_PAGES`・`DISABLE_HCA` が返らないことがある)。
+その後、呼び出し側が Bus Master を落とす。止めきれなかったときは、次の立ち上げの FLR で戻す。
+
+[[cx-cmd]]
+=== コマンドとメールボックス
+
+FW へのコマンドは、ホストのメモリに置いたコマンドキュー(4KiB、64 バイトの entry の並び)で渡す。bfmem は entry 0 だけを使い、
+1 つずつ同期で出す(複数のコアからは `g_bfm_ctl_lock` の中で呼ぶ)。
+
+.コマンドとメールボックス
+image::hw_mailbox.drawio.svg[コマンドとメールボックス]
+
+==== 出し方(`mlx5_cmd()`)
+
+. entry 0 を 0 で埋め、入力の先頭 16 バイト(オペコード [0..1]・op_mod [6..7] など)を entry の [16..31] に写す。
+. 入力が 16 バイトを超えるなら、残りを入力のメールボックスのブロックに 512 バイトずつ入れ、ブロックを next でつなぎ、ブロックの番号を書く。
+  最初のブロックのアドレスを entry の [8..15] に書く。
+. 出力も同じように、16 バイトを超える分のブロックを用意して [48..55] に書く。
+. 入力・出力の長さ([4..7]・[56..59])、type = 7(PCIe)を書き、最後に [63] の bit0(ownership)を 1(FW のもの)にする。
+. メモリの障壁(`mfence`)の後、初期化セグメントの 0x018 に 1(entry 0)を書く。
+. [63] の bit0 が 0 に戻るのを待つ(最大 10 秒)。
+. [63] の bit7:1(delivery status)が 0 でなければ、渡し方の誤り。
+. 出力の先頭 16 バイトを entry の [32..47] から、残りをメールボックスから写す。*出力の [0](status)が 0 でなければ失敗*で、[4..7] が syndrome。
+
+* メールボックスのブロックは 576 バイト(データ 512 + 後ろに next・ブロックの番号・token・signature)。bfmem は 1KiB おきに 9 個ずつ置くので、
+  1 つのコマンドは入力・出力とも 16 + 9 x 512 = 4,624 バイトまで。
+* token・signature は使わない(0 のまま)。
+* 作るコマンドの入力は、16 バイトの頭(オペコード・op_mod など)+ コンテキスト(EQC・CQC・QPC・MKC)+ [272〜] ページの表(PAS。ページごとに 8 バイトの物理アドレス)の形。
+  応答の [8..11] の下位 24bit に作った番号(qpn・cqn・MKey の上位 24bit など)が入る。
+
+==== bfmem が使うコマンド
+
+[cols="1,3,4",options="header"]
+|===
+|オペコード |名前 |使うところ
+|0x100 |QUERY_HCA_CAP |能力を読む(general・atomic・roce)
+|0x102 |INIT_HCA |立ち上げ
+|0x103 |TEARDOWN_HCA |止める(graceful・force)
+|0x104 |ENABLE_HCA |立ち上げ
+|0x107 |QUERY_PAGES |FW に渡すページの数を聞く(boot・init)
+|0x108 |MANAGE_PAGES |ページを渡す(GIVE)・渡せないと伝える(CANT_GIVE)
+|0x109 |SET_HCA_CAP |能力を書く(general は今の値のまま、atomic はバイト順をホスト順に)
+|0x10a / 0x10b |QUERY_ISSI / SET_ISSI |コマンドの形式の版を 1 にする
+|0x200 / 0x202 |CREATE_MKEY / DESTROY_MKEY |自分用(lkey)・公開用(rkey)・T10-DIF の署名つき MKey
+|0x301 |CREATE_EQ |EQ を 1 本作る
+|0x400 / 0x401 |CREATE_CQ / DESTROY_CQ |QP ごとに 1 本
+|0x500 / 0x501 |CREATE_QP / DESTROY_QP |GSI(QP1)と、接続ごとの RC
+|0x502 / 0x503 / 0x504 |RST2INIT_QP / INIT2RTR_QP / RTR2RTS_QP |QP の状態を進める
+|0x600 |CREATE_PSV |T10-DIF のオフロード(PSV を 2 つ)
+|0x754 / 0x755 |QUERY / MODIFY_NIC_VPORT_CONTEXT |MAC を読む(permanent_address)、roce_en を立てる
+|0x761 |SET_ROCE_ADDRESS |GID の表の 0 番に GID と MAC
+|0x800 |ALLOC_PD |保護ドメイン
+|0x802 |ALLOC_UAR |UAR ページ
+|0x805 |ACCESS_REG |HOST_ENDIANNESS・PMTU・PAOS
+|===
+
+[[cx-eq]]
+=== EQ(イベント)
+
+EQ は 1 本(64 バイトの EQE x 128 = 8KiB)。全部の CQ の通知先(c_eqn)で、非同期のイベントも来る。arm しないので割り込みは来ず、
+`bfm_poll()`(と立ち上げの途中)が `mlx5_eq_poll()` で読む。
+
+* EQE は [63] の bit0 が owner。読む位置の EQE の owner が「何周目か」(eq_cc の 2^7 の位)と合えば新しい。最初は全部の owner を 1 にしておく。
+* [1] = 種類、[3] = 細かい種類、[32〜] = データ。
+* 購読する種類(CREATE_EQ の event_bitmask)は Linux の非同期イベントの組と同じ + ページ要求(page_request_disable が 0 のとき)。
+
+[cols="1,2,4",options="header"]
+|===
+|種類 |名前 |bfmem がすること
+|0x0b |PAGE_REQUEST |FW にページを渡す(上の「FW に渡すページ」)
+|0x09 |PORT_CHANGE |細かい種類 4 = ACTIVE、1 = DOWN をリンクの状態にする
+|0x04 |CQ_ERROR |表示する
+|0x05 / 0x10 / 0x11 / 0x07 |WQ_CATAS_ERROR / WQ_INVAL_REQ / WQ_ACCESS_ERROR / PATH_MIG_FAILED |data の [25..27] の QP 番号の接続をエラーにする
+|そのほか |COMM_EST など |正常な動きでも出るので読み捨てる
+|===
+
+[[cx-qp]]
+=== キューペア(QP)の持ち方
+
+bfmem の QP は 2 種類。どちらも CQ を 1 本持ち、送受信で共有する。
+
+[cols="2,3,3",options="header"]
+|===
+| |GSI(QP1、UD) |RC(接続ごと)
+|数 |1 本(`bfm_cm_init()` で作る) |接続の枠ごと(`bfm_connect()` / `bfm_accept()` で作り、切断で壊す)
+|使い道 |接続の確立(bfmem だけの REQ / REP / BYE)を相手の QP1 へ送る |相手のメモリへの write / read / atomic、T10-DIF
+|SQ |64 WQEBB(UD の SEND は 1 個 2 WQEBB) |256 WQEBB(16KiB)
+|RQ |256 x 16B。受信の枠(128 バイト = GRH 40 + メッセージ)を 128 個投稿しておく |256 x 16B(使わない)
+|CQ |256 CQE |256 CQE
+|UAR |1 つ |接続の枠ごとに 1 つ(BlueFlame の窓を接続ごとに持つ)
+|===
+
+.QP の持ち方(RC の接続 1 本)
+image::hw_qp.drawio.svg[QP の持ち方]
+
+* *WQ の並び*: 1 つのバッファに RQ(16 バイト x 2^log_rq_size)、その直後に SQ(64 バイト x 2^log_sq_size)。
+  4KiB ごとの物理アドレスの表(PAS)を `CREATE_QP` の入力の [272〜] に付ける。
+* *番号 0 も有効な番号*(CQ など)なので、作ったかどうかは別に旗で持つ(`has_cq` など)。
+* *資源の数*: 接続の枠 1 つで DMA 領域を約 230KiB(WQ 20KiB・CQ 16KiB・doorbell record・中継バッファ 64KiB・T10-DIF の中継バッファ 128KiB)と UAR を 1 つ使う。
+
+==== QP コンテキスト(QPC)で書く欄
+
+位置は QPC の先頭からのバイト(`struct mlx5_ifc_qpc_bits` のビット位置 / 8)。コマンドの入力では QPC は [24〜] にある。
+
+[cols="1,2,4",options="header"]
+|===
+|位置 |欄 |bfmem の値
+|[1] |st |RC = 0x0、QP1(GSI)= 0x8
+|[2] |pm_state(bit4:3) |RTR2RTS で MIGRATED(3)
+|[5..7] |pd |`ALLOC_PD` の番号
+|[8] |mtu(bit7:5)・log_msg_max(bit4:0) |経路 MTU(3 = 1024 など)、20
+|[9] / [10] |log_rq_size / log_sq_size(bit7:3) |RC は 8 / 8、GSI は 8 / 6
+|[11] |ts_format(bit7:6)・rlky(bit4) |RoCE の能力に合わせる / RST2INIT で rlky
+|[13..15] |uar_page |その QP の UAR
+|[21..23] |remote_qpn |相手の QPN(INIT2RTR)
+|[24..67] |primary_address_path |[24+8] ack_timeout(bit7:3)、[24+9] 送り元の GID の番号(0)、[24+11] hop_limit(64)、[24+16..31] 相手の GID、[24+34..35] UDP の送信元ポート、[24+37] vhca_port_num(1)、[24+38..43] 相手の MAC
+|[113] |log_sra_max(bit7:5)・retry_count(bit2:0) |出せる read / atomic の数(自分の能力と相手が受け付ける数の小さいほう)、`g_bfm_retry_count`
+|[114] |rnr_retry(bit7:5)・fre(bit3) |7(無限)/ RC は fre(UMR を出せる。T10-DIF のオフロード)
+|[121..123] |next_send_psn |相手が名乗った PSN(RTR2RTS)
+|[125..127] / [157..159] |cqn_snd / cqn_rcv |同じ CQ
+|[145] |log_rra_max(bit7:5)・atomic_mode(bit3:0) |受け付ける read / atomic の数(最大 16)/ 能力から決めた atomic_mode
+|[146] |rre・rwe・rae(bit7・6・5) |相手からの read・write・atomic を許す(RTR2RTS)
+|[148] |min_rnr_nak |12
+|[149..151] |next_rcv_psn |自分が名乗った PSN(INIT2RTR)
+|[160..167] |dbr_addr |doorbell record のアドレス
+|[168..171] |q_key |GSI は 0x80010000
+|[198] |cs_req |0x11 = 32 バイトまでの read / atomic の応答を CQE に書かせる(scatter to CQE)
+|===
+
+==== 状態の遷移
+
+[cols="1,2,4",options="header"]
+|===
+|コマンド |RC |注意
+|RST2INIT_QP |pd・rlky・ポート番号 |*rre / rwe / rae を入れると ConnectX-4 の FW は BAD_PARAM で断る*。GSI は q_key も入れる
+|INIT2RTR_QP |経路 MTU・相手の QPN・next_rcv_psn・log_rra_max・アドレス(相手の GID・MAC・UDP の送信元ポート) |*log_rra_max はここで入れる*(RTR2RTS で書いても FW は保持しない)。optpar に rre・rae・rwe・pkey
+|RTR2RTS_QP |ack_timeout・retry_count・rnr_retry・next_send_psn・log_sra_max・権限(rre / rwe / rae)・atomic_mode・pm_state |atomic_mode を付けて断られたら、付けずにもう一度出す(相手からの atomic は受けない)
+|===
+
+* 掛け側・受け側とも、相手の QPN と PSN、公開メモリの先頭・大きさ・rkey は、GSI の REQ / REP で交換する(`src/bfm_cm.c` の章)。
+* UDP の送信元ポートは Linux の `rdma_calc_flow_label()` と同じ計算(`mlx5_udp_sport()`)。
+* *scatter to CQE(cs_req)の QP に通知なしの read を出すと LOCAL_QP_OP で QP が落ちる*。read / atomic は必ず通知を求める。
+
+[[cx-wqe]]
+=== WQE と CQE
+
+==== WQE
+
+WQE は 64 バイトの WQEBB の並び。最初の 16 バイトが制御のセグメントで、その後に種類ごとのセグメントが続く(16 バイト単位。数を ds に書く)。
+bfmem の WQE は 256 バイト(4 WQEBB = BlueFlame の窓 1 面)まで。
+
+[cols="2,1,4",options="header"]
+|===
+|セグメント |大きさ |中身(先頭からのバイト)
+|制御 |16 |[0..3] opmod(bit31:24)・WQE の位置(sq_pc の下位 16bit。bit23:8)・オペコード(bit7:0)、[4..7] qpn(bit31:8)・ds(bit5:0)、[11] fm_ce_se(bit3 = 完了通知を求める、bit7:5 = fence)、[12..15] imm
+|リモートアドレス |16 |[0..7] 相手のアドレス(相手の公開メモリの先頭 + off)、[8..11] rkey
+|データ |16 |[0..3] 長さ、[4..7] lkey、[8..15] 自分の側のアドレス(中継バッファ)
+|inline |4 + データ |[0..3] 0x80000000 OR 長さ、[4〜] データ(WQE に埋め込む。bfmem は 220 バイトまで)
+|atomic(8 バイト) |16 |[0..7] swap / add、[8..15] compare
+|atomic(4 バイト、拡張) |16 |CAS: swap・compare・swap_mask・compare_mask(各 4 バイト)。FAA: add・field_boundary(0)。制御の opmod = 0x08
+|UD の宛先(GSI) |48 |[0..3] q_key、[8..11] 0x80000000 OR 宛先の QPN(1)、[14..15] UDP の送信元ポート、[20..25] 相手の MAC、[27] hop_limit、[28..31] GRH あり・送り元の GID の番号、[32..47] 相手の GID
+|===
+
+[cols="1,3,3",options="header"]
+|===
+|オペコード |名前 |bfmem の WQE
+|0x08 |RDMA_WRITE |制御 + リモートアドレス + inline(220 バイトまで)かデータ
+|0x10 |RDMA_READ |制御 + リモートアドレス + データ(中継バッファへ)
+|0x11 / 0x12 |ATOMIC_CS / ATOMIC_FA |制御 + リモートアドレス + atomic + データ(元の値の受け取り先)
+|0x14 / 0x15 |ATOMIC_MASKED_CS / ATOMIC_MASKED_FA |4 バイトの CAS / FAA(opmod = 0x08)
+|0x0a |SEND |GSI の UD の送信
+|0x25 / 0x20 |UMR / SET_PSV |T10-DIF のオフロード(署名つき MKey を中継バッファに張る・PSV に最初の tag を入れる)
+|===
+
+.データ経路(1 個の WQE を出してから完了を拾うまで)
+image::hw_datapath.drawio.svg[データ経路]
+
+==== CQE
+
+CQE は 64 バイト。
+
+[cols="1,4",options="header"]
+|===
+|位置 |中身
+|[0..31] |scatter to CQE のとき、32 バイトまでの read のデータ・atomic の元の値
+|[16..43] |SIG_ERR のとき、guard / app tag のあるべき値と実際の値・ref tag の 2 つ・syndrome・MKey([36..39])・誤りの位置([40..47])
+|[54] / [55] |エラー完了のとき、vendor syndrome / syndrome
+|[60..61] |WQE の位置(wqe_counter)。どの WQE まで済んだかをこれで知る
+|[63] |op_own: オペコード(bit7:4)・形式(bit3:2。bit2 = 応答のデータが CQE に入っている)・owner(bit0)
+|===
+
+* 新しい CQE かどうかは owner(bit0)を「何周目か」(cq_cc の 2^log_cq_size の位)と比べ、さらにオペコードが 0xf(INVALID)でないことで見る。
+  CQ を作るとき、全部の CQE をオペコード 0xf・owner 0 にしておく。
+* オペコード: 0x0 = 送り側の完了、0x2 = 受信、0xc = SIG_ERR(T10-DIF の誤り。WQE の完了ではない)、0xd = 送り側のエラー完了、0xe = 受け側のエラー完了。
+* syndrome: 0x13 REMOTE_ACCESS(rkey・範囲・権限)、0x12 REMOTE_INVAL_REQ、0x15 TRANSPORT_RETRY_EXC(相手に届かない)など。
+  エラー完了の後、その QP の後の WQE は WR_FLUSH(0x05)で返り、QP は使えない。
+* *atomic の元の値のバイト順*: 8 バイトは、中継バッファへ書かれるときホスト順(HCA の能力でホスト順にしてある)、CQE に入るときはビッグエンディアン。
+  4 バイト(拡張 atomic)は、どちらでもビッグエンディアン。相手のメモリの値は、どちらもホスト順。
+
+==== MKey と PD
+
+* PD は 1 つ(`ALLOC_PD`)。MKey・QP・PSV はこれに属する。
+* MKey は PA モード(物理アドレスをそのまま使う。変換の表を持たない)で 2 つ作る:
+** lkey: 自分のメモリ全部(length64、ローカルの読み書き)。WQE のデータのセグメントに書く。
+** rkey: 公開メモリ(`g_bfm_mr_base` から `g_bfm_mr_size`。相手からの read / write / atomic とローカルの読み書きを許す)。
+   鍵の下位 8bit(mkey_7_0)は起動のたびに時刻から決める。
+* MKC([16〜] のコンテキスト): [2] = 権限(atomic・rw・rr・lw・lr)と access_mode、[4..6] qpn = 0xffffff(特定の QP に結びつけない)、
+  [7] = 鍵の下位 8bit、[12] bit7 = length64、[13..15] pd、[16..23] 先頭、[24..31] 長さ。
+
+[[cx-gen]]
+=== ConnectX-4〜7 の違いへの備え
+
+* 能力は 4,096 バイトまるごと読み書きする(新しい装置ほど構造が長い)。
+* BlueFlame の窓の大きさは log_bf_reg_size から求める(8〜12 の外なら 512 バイトとして扱う)。
+* QP の ts_format は RoCE の能力 qp_ts_format に合わせる(ConnectX-7 は時刻の形式を実時間だけにできるので、既定の 0 = free running だと CREATE_QP が断られうる)。
+* num_vhca_ports が 0 でなければ `SET_ROCE_ADDRESS` にポート番号を入れる。
+* FW のページの要求量は装置で大きく違うので、上限は `g_bfm_fw_pages_max`(足りなければ `bfm_init()` が要る数を表示する)。
+* FW の起動待ちの上限は 120 秒(ConnectX-7 は長くかかることがある)。
+* T10-DIF のオフロード(能力の sho)は ConnectX-4 Lx に無い。ConnectX-5 以降での動きは確かめていない。

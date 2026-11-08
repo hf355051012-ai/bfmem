@@ -12,7 +12,7 @@
 #define BFM_LOG(...) bfm_port_log(__VA_ARGS__)
 #define BFM_DBG(...) do { if (g_bfm_verbose) bfm_port_log(__VA_ARGS__); } while (0)
 
-#define BFM_PAGE 4096u
+#define BFM_PAGE 4096u   /* ConnectX が扱うページサイズ。ConnectX の仕様で規定 */
 
 /* ---------------------------------------------------------------------
  * 鍵(複数のコアから接続・切断・bfm_poll() を呼べるように)
@@ -22,7 +22,7 @@
  * データ経路(write / read / atomic / T10-DIF)は鍵を使わない(接続ごとの資源だけを触る)。
  * ------------------------------------------------------------------- */
 typedef struct {
-    volatile uint32_t v;
+    volatile uint32_t v;             /* 0 = 空き、1 = 誰かが持っている */
 } bfm_lock_t;
 
 static inline void bfm_cpu_relax(void)
@@ -172,45 +172,52 @@ extern bfm_lock_t g_bfm_ctl_lock;
  * ------------------------------------------------------------------- */
 typedef struct {
     /* PCIe */
-    uint16_t vendor, device;
-    const char *name;
-    uint64_t bar0_phys, bar0_size;
-    volatile uint8_t *bar0;          /* UC */
+    uint16_t vendor;                 /* PCI のベンダ ID(0x15b3 = Mellanox / NVIDIA)*/
+    uint16_t device;                 /* PCI のデバイス ID(対応する ConnectX の表で name を引く)*/
+    const char *name;                /* 装置の名前(表示用。例 "ConnectX-4 Lx")*/
+    uint64_t bar0_phys;              /* BAR0 の物理アドレス */
+    uint64_t bar0_size;              /* BAR0 の大きさ(バイト)*/
+    volatile uint8_t *bar0;          /* BAR0 を張った先(UC。初期化セグメント・UAR のドアベル)*/
 
     /* コマンド */
-    volatile uint8_t *cmdq;
-    volatile uint8_t *mbox_in, *mbox_out;
+    volatile uint8_t *cmdq;          /* FW へのコマンドキュー(DMA 領域の 1 ページ。入口 1 つだけ使う)*/
+    volatile uint8_t *mbox_in;       /* 入力のメールボックスの鎖(BFM_MBOX_BLOCKS 個 x BFM_MBOX_STRIDE)*/
+    volatile uint8_t *mbox_out;      /* 出力のメールボックスの鎖(同上)*/
     int hca_enabled;                 /* ENABLE_HCA が通り、まだ TEARDOWN していない */
 
     /* FW に渡すページ */
-    uint8_t *fw_pages;
-    uint32_t fw_pages_used;
+    uint8_t *fw_pages;               /* FW に渡すページの置き場(DMA 領域の g_bfm_fw_pages_max ページ)*/
+    uint32_t fw_pages_used;          /* そのうち FW に渡したページの数(先頭から順に渡す)*/
 
     /* 能力 */
-    uint8_t  log_max_ra_req_qp, log_max_ra_res_qp;
-    uint8_t  num_vhca_ports;
-    uint8_t  page_request_disable;
-    uint8_t  bf_cap;
+    uint8_t  log_max_ra_req_qp;      /* QP 1 本が同時に出せる read / atomic の数の log2(能力)*/
+    uint8_t  log_max_ra_res_qp;      /* QP 1 本が同時に受けられる read / atomic の数の log2(能力)*/
+    uint8_t  num_vhca_ports;         /* vHCA のポートの数(0 でなければ SET_ROCE_ADDRESS にポート番号を入れる)*/
+    uint8_t  page_request_disable;   /* FW がページの要求のイベントを出さない(1 なら EQ で受けない)*/
+    uint8_t  bf_cap;                 /* BlueFlame がある */
     uint32_t bf_buf_size;            /* BlueFlame の窓 1 面の大きさ(2 面を交互に使う)*/
     uint8_t  qp_ts_format;           /* QPC の ts_format に書く値 */
-    uint16_t atomic_ops, atomic_size_qp;
+    uint16_t atomic_ops;             /* 対応する atomic(bit0 CAS / bit1 FAA / bit2 拡張 CAS / bit3 拡張 FAA)*/
+    uint16_t atomic_size_qp;         /* 拡張 atomic で扱える大きさ(bit n = 2^n バイト)*/
     uint8_t  atomic_mode;            /* QPC の atomic_mode(0 = 相手からの atomic を受けない)*/
     uint8_t  sho;                    /* 署名(T10-DIF)のオフロードがある */
     uint8_t  umr_fence;              /* UMR の WQE に付ける fence(fm_ce_se の値)*/
 
     /* 資源 */
-    uint32_t eq_uarn, eqn, eq_cc;
-    uint64_t eq_mask;
-    volatile uint8_t *eq_buf;
-    uint32_t pdn;
+    uint32_t eq_uarn;                /* EQ のドアベルに使う UAR の番号 */
+    uint32_t eqn;                    /* EQ の番号 */
+    uint32_t eq_cc;                  /* EQ の消費の数(次に読む EQE の位置と、所有の印の向きを決める)*/
+    uint64_t eq_mask;                /* EQ で受けるイベントの種類(bit n = イベントの型 n)*/
+    volatile uint8_t *eq_buf;        /* EQ のリング(DMA 領域)*/
+    uint32_t pdn;                    /* 保護ドメインの番号(MKey・QP が属する)*/
     uint32_t lkey;                   /* 自分のメモリ全部(PA、ローカルの読み書き)*/
     uint32_t rkey;                   /* 公開メモリ(PA、[mr_base, mr_base + mr_size))*/
 
     /* ポート */
-    uint8_t  mac[6];
-    uint8_t  gid[16];
-    uint32_t ip;
-    int      link_up;
+    uint8_t  mac[6];                 /* 自分の MAC(g_bfm_local_mac。全部 0 なら装置から読む)*/
+    uint8_t  gid[16];                /* 自分の GID(ip から作る ::ffff:a.b.c.d)*/
+    uint32_t ip;                     /* 自分の IPv4 アドレス(g_bfm_local_ip。ホスト順)*/
+    int      link_up;                /* リンクが上がっている(ポートの状態のイベントで更新する)*/
 
     /* 接続の枠 */
     uint32_t nconn;                  /* 用意した接続の枠の数(g_bfm_max_conn を BFM_MAX_CONN までに直したもの)*/
@@ -220,15 +227,21 @@ extern bfm_dev_t g_bfm;
 
 /* QP 1 本ぶんの資源(RC と GSI で共通)。 */
 typedef struct {
-    uint32_t qpn, cqn, uarn;
-    uint32_t rq_log, sq_log, cq_log;
+    uint32_t qpn;                    /* QP の番号 */
+    uint32_t cqn;                    /* CQ の番号(送受信で 1 つを共用)*/
+    uint32_t uarn;                   /* ドアベルに使う UAR の番号 */
+    uint32_t rq_log;                 /* RQ の WQE の数の log2 */
+    uint32_t sq_log;                 /* SQ の WQEBB の数の log2 */
+    uint32_t cq_log;                 /* CQ の CQE の数の log2 */
     volatile uint8_t *wq;            /* RQ(16B x 2^rq_log)の直後に SQ(64B x 2^sq_log)*/
-    volatile uint8_t *sq;
+    volatile uint8_t *sq;            /* SQ の先頭(wq + RQ の大きさ)*/
     volatile uint32_t *dbr;          /* [0] = RQ のカウンタ、[1] = SQ のカウンタ(BE)*/
-    volatile uint8_t *cq;
+    volatile uint8_t *cq;            /* CQ のリング(64B x 2^cq_log)*/
     volatile uint32_t *cq_dbr;       /* [0] = consumer counter(BE)*/
-    uint32_t sq_pc, rq_pc, cq_cc;
-    uint32_t local_psn;
+    uint32_t sq_pc;                  /* SQ に積んだ WQEBB の数(次に書く位置)*/
+    uint32_t rq_pc;                  /* RQ に積んだ WQE の数(次に書く位置)*/
+    uint32_t cq_cc;                  /* CQ から読んだ CQE の数(次に読む位置と所有の印の向き)*/
+    uint32_t local_psn;              /* 自分が名乗る最初の PSN(作るときに時刻から決める)*/
     uint8_t  has_uar, has_cq, has_qp;   /* 番号 0 も有効な番号なので、作ったかは別に持つ */
 } bfm_qp_t;
 
@@ -244,16 +257,18 @@ enum { BFM_CS_FREE = 0, BFM_CS_SETUP, BFM_CS_UP, BFM_CS_ERROR, BFM_CS_CLOSED };
 struct bfm_sig_rec {
     uint32_t hits;                   /* 来た SIG_ERR の数(0 = 誤りなし)*/
     uint16_t synd;                   /* bit13 guard / bit12 app tag / bit11 ref tag */
-    uint32_t exp_ts, act_ts;         /* guard << 16 | app tag(あるべき値 / 実際の値)*/
-    uint32_t exp_ref, act_ref;
+    uint32_t exp_ts;                 /* guard << 16 | app tag(あるべき値)*/
+    uint32_t act_ts;                 /* guard << 16 | app tag(実際の値)*/
+    uint32_t exp_ref;                /* ref tag(あるべき値)*/
+    uint32_t act_ref;                /* ref tag(実際の値)*/
     uint64_t off;                    /* 誤りの位置(署名つき MKey の中のバイト)*/
 };
 
 /* 接続 1 本。コアごとに別の接続を使うので、隣の接続とキャッシュラインを分ける。 */
 struct __attribute__((aligned(64))) bfm_conn {
-    int state;
-    int index;
-    bfm_qp_t qp;
+    int state;                       /* 接続の状態(BFM_CS_FREE / SETUP / UP / ERROR / CLOSED)*/
+    int index;                       /* 枠の番号(g_bfm_conn の添字。表示に使う)*/
+    bfm_qp_t qp;                     /* この接続の RC の QP・CQ・UAR */
 
     /* データ経路(接続のときに求めておく)*/
     volatile uint8_t *db;            /* UC の UAR ページ + 0x800(8 バイトのドアベル)*/
@@ -265,9 +280,10 @@ struct __attribute__((aligned(64))) bfm_conn {
     uint8_t  wqe_bbs[1u << BFM_RC_SQ_LOG];  /* 位置ごとの WQE の大きさ(WQEBB の数)*/
     uint8_t  cs_req;                 /* scatter to CQE を有効にしたか */
     uint8_t  max_rd;                 /* 同時に出してよい read / atomic の数 */
-    uint8_t  last_synd, last_vsynd;
+    uint8_t  last_synd;              /* 最後のエラー完了の syndrome(0 = なし)*/
+    uint8_t  last_vsynd;             /* 最後のエラー完了の vendor syndrome */
     volatile uint8_t *stage;         /* 中継バッファ(DMA 領域)*/
-    uint32_t stage_size;
+    uint32_t stage_size;             /* 中継バッファのバイト数(g_bfm_stage_size を 4KiB に切り上げたもの)*/
     const volatile uint8_t *last_scat;  /* 直前の CQE が応答データを抱えていればその CQE */
 
     /* T10-DIF(bfm_dif.c)。DIF 用の中継バッファは 2 面(BFM_DIF_SLOTS)に分けて交互に使う。 */
@@ -277,13 +293,15 @@ struct __attribute__((aligned(64))) bfm_conn {
     struct bfm_sig_rec sig[BFM_DIF_SLOTS];   /* 面ごとの署名の誤り(poll_one() が入れ、bfm_dif.c が見て消す)*/
 
     /* 相手 */
-    uint32_t peer_ip;
-    uint8_t  peer_mac[6];
-    uint8_t  peer_gid[16];
-    uint32_t peer_qpn, peer_psn;
-    uint64_t raddr, rlen;
-    uint32_t rkey;
-    uint8_t  path_mtu;
+    uint32_t peer_ip;                /* 相手の IPv4(ホスト順)*/
+    uint8_t  peer_mac[6];            /* 相手の MAC(掛け側は呼び出し側が渡し、受け側は REQ から取る)*/
+    uint8_t  peer_gid[16];           /* 相手の GID(peer_ip から作る ::ffff:a.b.c.d)*/
+    uint32_t peer_qpn;               /* 相手の RC の QP の番号 */
+    uint32_t peer_psn;               /* 相手が名乗った最初の PSN */
+    uint64_t raddr;                  /* 相手の公開メモリの先頭(相手の g_bfm_mr_base)*/
+    uint64_t rlen;                   /* 相手の公開メモリの大きさ */
+    uint32_t rkey;                   /* 相手の公開メモリの rkey */
+    uint8_t  path_mtu;               /* 経路 MTU(IB の符号。自分と相手の小さいほう)*/
     uint8_t  peer_rr;                /* 相手が受け付ける同時 read / atomic の数 */
 
     /* 接続の確立(bfm_cm.c)*/

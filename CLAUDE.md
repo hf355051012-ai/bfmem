@@ -55,6 +55,9 @@ wsl.exe -d Ubuntu-22.04 -- bash -c "cd /mnt/c/Users/fukud/Documents/bfmem && pyt
   処理内容・引数の意味・戻り値・前提条件・注意事項・フローは `desc/*.json` に手で書く(書き方は `desc/README.md`)。
 - **フローの検査はできない**(書いた流れがソースと合っているかは、人が突き合わせる)。直したらその関数のフローも見直すこと。
 - switch の case の終わりの `break` はフローに書かない(書くと外側のループを抜ける意味になる)。
+- 「ConnectX(mlx5)の仕様の要点」の章は手書き: 本文は `doc/spec/connectx.adoc`、図は `doc/spec/hw_figs.py`(座標で書く。
+  gen.py が `images/hw_*.drawio.svg` に出す。`images/` は作るたびに消すので、手で描いた図を置かない)。
+  レジスタ・コマンド・QPC の欄・WQE / CQE の形を変えたら、この章も直す(検査はできない)。
 - ヘッダに `static inline` の関数を置いたら、そのヘッダを gen.py の `FILES` に入れて記述を書く
   (入れないと、呼ぶ側の使用関数で「外部」になる。今は `include/bfm_port.h` と `src/bfm_internal.h`)。
 - 関数ポインタ経由の呼び出しは解析で拾えないので、記述の `indirect` / `entry_note` で書く。

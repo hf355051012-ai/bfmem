@@ -53,8 +53,8 @@ static void crc_table_init(void)
 }
 
 /* 表を一度だけ作る(複数のコアから同時に呼ばれてもよいように、作り終えたことを旗で知らせる)。 */
-static uint32_t s_crc_ready;
-static bfm_lock_t s_crc_lock;
+static uint32_t s_crc_ready;                /* 表を作り終えた(acquire / release で読み書きする)*/
+static bfm_lock_t s_crc_lock;               /* 表を作るのを 1 つのコアだけにする鍵 */
 
 static void crc_ready(void)
 {
@@ -91,11 +91,15 @@ void bfm_dif_make_pi(const void *data, uint16_t app_tag, uint32_t ref_tag, uint8
  * 操作を「入る側・出る側」の形に直したもの
  * ------------------------------------------------------------------- */
 struct plan {
-    int in_pi, out_pi;               /* 入る側・出る側に PI があるか */
-    uint32_t in_bs, out_bs;          /* 1 ブロックのバイト数(520 か 512)*/
-    uint16_t in_app, out_app;
-    uint32_t in_ref, out_ref;        /* 最初のブロックの ref tag */
-    uint8_t  check;
+    int in_pi;                       /* 入る側に PI がある */
+    int out_pi;                      /* 出る側に PI がある */
+    uint32_t in_bs;                  /* 入る側の 1 ブロックのバイト数(520 か 512)*/
+    uint32_t out_bs;                 /* 出る側の 1 ブロックのバイト数(520 か 512)*/
+    uint16_t in_app;                 /* 入る側の app tag(検査に使う)*/
+    uint16_t out_app;                /* 出る側の app tag(作る PI に入れる)*/
+    uint32_t in_ref;                 /* 入る側の最初のブロックの ref tag(検査に使う。ブロックごとに 1 足す)*/
+    uint32_t out_ref;                /* 出る側の最初のブロックの ref tag(作る PI に入れる)*/
+    uint8_t  check;                  /* 入る側の PI で検査するもの(BFM_DIF_CHK_*。0 = 検査しない)*/
 };
 
 static int make_plan(const bfm_dif_t *d, struct plan *p)
@@ -175,13 +179,14 @@ static int sw_block(const struct plan *p, const uint8_t *in, uint8_t *out, uint3
  * HW: 署名オフロード
  * ------------------------------------------------------------------- */
 struct sig_res {
-    uint32_t mkey;
-    uint32_t psv_mem, psv_wire;
+    uint32_t mkey;                   /* 署名つき MKey(UMR で面のバッファに張る)*/
+    uint32_t psv_mem;                /* メモリ側(自分の面)の PI の検査・作成の状態を持つ PSV */
+    uint32_t psv_wire;               /* ワイヤ側(相手のメモリ)の PI の検査・作成の状態を持つ PSV */
     uint32_t sigerr_count;           /* 次の UMR に入れる sigerr の印 = この値の下位 1 ビット */
     uint8_t  used;                   /* 張ったまま(次に張る前に空きに戻す)*/
 };
 static struct sig_res s_sig[BFM_MAX_CONN][BFM_DIF_SLOTS];   /* 接続・面ごと */
-static int s_hw;
+static int s_hw;                            /* 署名のオフロード(BFM_DIF_HW)の資源を用意できた */
 
 /* mkey_mask(Linux の sig_mkey_mask()): LEN PAGE_SIZE START_ADDR EN_RINVAL EN_SIGERR BSF_EN KEY
  * LR LW RR RW SMALL_FENCE FREE */
@@ -366,19 +371,21 @@ struct piece {
 };
 
 struct __attribute__((aligned(64))) job {   /* 接続(= コア)ごと。隣とキャッシュラインを分ける */
-    uint8_t  state, is_read, hw;
-    struct plan p;
-    uint64_t off;
-    const uint8_t *src;
-    uint8_t *dst;
+    uint8_t  state;                  /* JOB_IDLE / JOB_RUN / JOB_DONE */
+    uint8_t  is_read;                /* 1 = read(相手から読む)、0 = write */
+    uint8_t  hw;                     /* 1 = 署名のオフロード(BFM_DIF_HW)で運ぶ */
+    struct plan p;                   /* 入る側・出る側の形 */
+    uint64_t off;                    /* 相手の公開メモリの中の位置(最初のブロック)*/
+    const uint8_t *src;              /* write の元(呼び出し側のバッファ)*/
+    uint8_t *dst;                    /* read の先(呼び出し側のバッファ)*/
     uint32_t n, per;                 /* 全体のブロック数、1 面に入るブロック数 */
     uint32_t next;                   /* 次に出すブロック */
     uint32_t issued, completed;      /* 出した分・仕上げた分の数(面 = 数 % BFM_DIF_SLOTS)*/
     int      rc;                     /* 最初の失敗(BFM_OK でなければ、もう出さない)*/
-    bfm_dif_err_t err;
-    struct piece pc[BFM_DIF_SLOTS];
+    bfm_dif_err_t err;               /* 見つけた誤りの中身(rc が BFM_E_DIF のとき)*/
+    struct piece pc[BFM_DIF_SLOTS];  /* 面ごとの、出してある分 */
 };
-static struct job s_job[BFM_MAX_CONN] __attribute__((aligned(64)));
+static struct job s_job[BFM_MAX_CONN] __attribute__((aligned(64)));   /* 接続ごとの DIF の転送の状態 */
 
 static inline uint8_t *slot_buf(const struct bfm_conn *c, uint32_t si)
 {

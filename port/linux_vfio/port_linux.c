@@ -36,21 +36,24 @@
 #define MAP_FIXED_NOREPLACE 0x100000
 #endif
 
-static int s_container = -1, s_group = -1, s_device = -1;
+static int s_container = -1;        /* VFIO のコンテナ(/dev/vfio/vfio)の fd */
+static int s_group = -1;            /* VFIO のグループ(/dev/vfio/<番号>)の fd */
+static int s_device = -1;           /* VFIO の装置の fd(設定空間と BAR0 の読み書き)*/
 static int s_dma_latency_fd = -1;   /* /dev/cpu_dma_latency(開いている間だけ効く)*/
 static int s_msr_fd = -1;           /* /dev/cpu/N/msr(modprobe msr が要る)*/
-static uint64_t s_cfg_off;
-static uint8_t *s_bar0;
-static uint64_t s_bar0_size;
-static int s_bar0_sysfs;
-static uint64_t s_bar0_vfio_off;
-static void *s_dma_va, *s_mr_va;
+static uint64_t s_cfg_off;          /* 装置の fd の中の設定空間の位置(VFIO の region の offset)*/
+static uint8_t *s_bar0;             /* BAR0 を張った先(UC)*/
+static uint64_t s_bar0_size;        /* BAR0 の大きさ(VFIO から聞いた値)*/
+static int s_bar0_sysfs;            /* 1 = BAR0 を sysfs の resource0 から張った(WC に張り替えられる)*/
+static uint64_t s_bar0_vfio_off;    /* 装置の fd の中の BAR0 の位置(sysfs で張れないときに使う)*/
+static void *s_dma_va;              /* DMA 領域を張った先(= g_bfm_dma_base)*/
+static void *s_mr_va;               /* 公開メモリを張った先(= g_bfm_mr_base)*/
 
 /* UC の窓を作っている mmap の一覧(BAR0 内のオフセット)。PAT の登録は mmap 単位で、
  * その mmap のページが全部外れるまで残るので、どの mmap に入っているかを覚えておく。 */
 #define SEG_MAX ((int)(2u * BFM_MAX_CONN + 8u))   /* WC に張る UAR(接続の枠ごとに 1 つ)1 つで区間が最大 2 つ増える */
-static struct { uint64_t off, len; } s_seg[SEG_MAX];
-static int s_nseg;
+static struct { uint64_t off, len; } s_seg[SEG_MAX];   /* UC の mmap の区間(off = BAR0 内の位置、len = 長さ)*/
+static int s_nseg;                                      /* s_seg の使っている数 */
 
 void bfm_port_log(const char *fmt, ...)
 {

@@ -27,7 +27,11 @@
 #define PCIE_DEVCTL_FLR 0x8000u
 #define PCIE_DEVSTA_TRPND 0x0020u
 
-static const struct { uint16_t id; const char *name; } s_ids[] = {
+/* 対応する ConnectX(PCI のデバイス ID と名前)。ベンダ ID は MLX5_VENDOR_ID。 */
+static const struct {
+    uint16_t id;                     /* PCI のデバイス ID */
+    const char *name;                /* 装置の名前(表示用)*/
+} s_ids[] = {
     { 0x1013u, "ConnectX-4" },
     { 0x1015u, "ConnectX-4 Lx" },
     { 0x1017u, "ConnectX-5" },

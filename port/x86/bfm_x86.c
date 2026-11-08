@@ -20,13 +20,19 @@
 #define BUS_HZ 100000000ull            /* 倍率の単位(Sandy Bridge 以降は 100MHz) */
 
 static bfm_x86_msr_reader s_rdmsr;     /* NULL = MSR を読まない */
-static uint64_t s_tsc_hz;
+static uint64_t s_tsc_hz;              /* TSC の周波数(Hz)。0 = 求められなかった */
 static uint64_t s_ns_mult;             /* ns = TSC * s_ns_mult >> 32 */
-static const char *s_tsc_src = "";
-static uint32_t s_max_leaf, s_max_ext, s_family, s_model;
-static uint32_t s_leaf1_ecx, s_leaf6_eax, s_leaf6_ecx;
-static int s_intel, s_invariant;
-static char s_brand[49];
+static const char *s_tsc_src = "";    /* TSC の周波数をどこから求めたか(表示用)*/
+static uint32_t s_max_leaf;            /* CPUID の基本の葉の最大番号 */
+static uint32_t s_max_ext;             /* CPUID の拡張の葉(0x8000xxxx)の最大番号 */
+static uint32_t s_family;              /* CPU のファミリ(拡張ファミリを足したもの)*/
+static uint32_t s_model;               /* CPU のモデル(拡張モデルを足したもの)*/
+static uint32_t s_leaf1_ecx;           /* CPUID 1 の ecx(bit7 = EIST)*/
+static uint32_t s_leaf6_eax;           /* CPUID 6 の eax(bit1 = ターボ)*/
+static uint32_t s_leaf6_ecx;           /* CPUID 6 の ecx(bit0 = APERF / MPERF)*/
+static int s_intel;                    /* Intel の CPU(MSR はこのときだけ読む)*/
+static int s_invariant;                /* TSC の速さが P-state・C-state で変わらない */
+static char s_brand[49];               /* CPU の名前(CPUID 0x80000002〜4。表示用)*/
 
 /* CPUID で CPU の種類と、使える機能を調べる。 */
 static void cpu_probe(void)

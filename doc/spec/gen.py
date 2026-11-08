@@ -27,6 +27,9 @@ import sys
 import uuid
 from xml.sax.saxutils import escape as xesc
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import hw_figs  # noqa: E402  ConnectX の章の図
+
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 SPEC = os.path.join(ROOT, "doc", "spec")
 IMG = os.path.join(SPEC, "images")
@@ -683,11 +686,11 @@ def dedup(pts):
     return res
 
 
-def layout_flow(fname, steps):
+def layout_flow(fname, steps, start_text=None):
     lay = Layout()
     L, R, H = lay.measure(steps)
     cx = max(L, 105) + 30
-    start = lay.new_node("start", "開始: %s()" % fname, cx, 20)
+    start = lay.new_node("start", start_text or "開始: %s()" % fname, cx, 20)
     outs, y = lay.place(steps, cx, start["y"] + start["h"] + VGAP,
                         [(start["id"], [(cx, start["y"] + start["h"])], "")])
     if outs:
@@ -803,12 +806,21 @@ STYLE = {
     "func": "rounded=1;whiteSpace=wrap;html=1;",
     "ext": "rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;fontColor=#555555;",
     "note": "rounded=0;whiteSpace=wrap;html=1;dashed=1;strokeColor=#999999;fontColor=#555555;",
+    # ConnectX の章の図(doc/spec/hw_figs.py)
+    "grp": "rounded=0;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#999999;verticalAlign=top;align=left;spacingLeft=6;fontStyle=1;",
+    "sw": "rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;",
+    "mem": "rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;",
+    "pub": "rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;",
+    "reg": "rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;",
+    "hw": "rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;",
 }
 FILL = {"start": "#dae8fc", "end": "#dae8fc", "return": "#dae8fc", "do": "#ffffff", "call": "#fff2cc",
         "if": "#f5f5f5", "loop": "#e1d5e7", "label": "#d5e8d4", "center": "#dae8fc", "func": "#ffffff",
-        "ext": "#f5f5f5", "note": "#ffffff"}
+        "ext": "#f5f5f5", "note": "#ffffff",
+        "grp": "#fafafa", "sw": "#dae8fc", "mem": "#d5e8d4", "pub": "#ffe6cc", "reg": "#fff2cc", "hw": "#f8cecc"}
 STROKE = {"start": "#6c8ebf", "end": "#6c8ebf", "return": "#6c8ebf", "call": "#d6b656", "loop": "#9673a6",
-          "label": "#82b366", "center": "#6c8ebf", "ext": "#999999", "note": "#999999"}
+          "label": "#82b366", "center": "#6c8ebf", "ext": "#999999", "note": "#999999",
+          "grp": "#999999", "sw": "#6c8ebf", "mem": "#82b366", "pub": "#d79b00", "reg": "#d6b656", "hw": "#b85450"}
 
 
 def svg_shape(nd):
@@ -833,28 +845,38 @@ def svg_shape(nd):
         s = ('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" %s/>' % (x, y, w, h, a) +
              '<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s"/>' % (x + d, y, x + d, y + h, stroke) +
              '<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s"/>' % (x + w - d, y, x + w - d, y + h, stroke))
-    elif k in ("center", "func", "ext"):
+    elif k in ("center", "func", "ext", "sw", "hw"):
         s = '<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="6" %s/>' % (x, y, w, h, a)
     else:
         s = '<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" %s/>' % (x, y, w, h, a)
     lines = nd["lines"]
     color = "#555555" if k in ("ext", "note") else "#000000"
     top = y + h / 2 - (len(lines) - 1) * LINE_H / 2
+    if k == "grp":
+        top = y + 12
+    left = k == "grp" or nd.get("align") == "left"
+    tx, anchor = (x + 8, "start") if left else (x + w / 2, "middle")
     t = []
     for i, ln in enumerate(lines):
-        weight = ' font-weight="bold"' if k == "center" and i == 0 else ""
+        weight = ' font-weight="bold"' if (k in ("center", "grp") and i == 0) or (nd.get("head") and i == 0) else ""
         size = FONT - 2 if (k in ("center", "func", "ext") and i > 0) else FONT
-        t.append('<text x="%.1f" y="%.1f" font-size="%d" text-anchor="middle" dominant-baseline="central" '
-                 'fill="%s"%s>%s</text>' % (x + w / 2, top + i * LINE_H, size, color, weight, xesc(ln)))
+        t.append('<text x="%.1f" y="%.1f" font-size="%d" text-anchor="%s" dominant-baseline="central" '
+                 'fill="%s"%s>%s</text>' % (tx, top + i * LINE_H, size, anchor, color, weight, xesc(ln)))
     return s + "".join(t)
 
 
 def svg_edge(e):
     pts = e["pts"]
     dash = ' stroke-dasharray="5 4"' if e.get("dashed") else ""
-    s = '<polyline points="%s" fill="none" stroke="#333333"%s marker-end="url(#a)"/>' % (
-        " ".join("%.1f,%.1f" % p for p in pts), dash)
-    if e.get("label"):
+    start = ' marker-start="url(#a)"' if e.get("both") else ""
+    s = '<polyline points="%s" fill="none" stroke="#333333"%s marker-end="url(#a)"%s/>' % (
+        " ".join("%.1f,%.1f" % p for p in pts), dash, start)
+    if e.get("label") and e.get("lpos"):
+        lx, ly = e["lpos"]
+        for i, ln in enumerate(str(e["label"]).split("\n")):
+            s += '<text x="%.1f" y="%.1f" font-size="%d" text-anchor="start" fill="#333333">%s</text>' % (
+                lx, ly + i * (LINE_H - 1), FONT - 1, xesc(ln))
+    elif e.get("label"):
         (x0, y0), (x1, y1) = pts[0], pts[1]
         if abs(x0 - x1) < 0.5:   # 下へ出る
             lx, ly, anc = x0 + 5, y0 + 11, "start"
@@ -871,6 +893,8 @@ def mx_xml(lay, name):
     for nd in lay.nodes:
         byid[nd["id"]] = nd
         style = STYLE[nd["kind"]] + ("dashed=1;" if nd.get("dashed") else "")
+        if nd.get("align") == "left":
+            style += "align=left;spacingLeft=8;"
         if nd["kind"] in ("center", "func", "ext"):
             val = html.escape(nd["lines"][0]) + "".join(
                 '<br><font style="font-size:10px">%s</font>' % html.escape(l) for l in nd["lines"][1:])
@@ -883,13 +907,15 @@ def mx_xml(lay, name):
         s, t = byid[e["src"]], byid[e["dst"]]
         (sx, sy), (ex, ey) = e["pts"][0], e["pts"][-1]
         style = ("edgeStyle=none;html=1;rounded=0;endArrow=block;endFill=1;exitX=%.4f;exitY=%.4f;exitDx=0;exitDy=0;"
-                 "exitPerimeter=0;entryX=%.4f;entryY=%.4f;entryDx=0;entryDy=0;entryPerimeter=0;%s" % (
+                 "exitPerimeter=0;entryX=%.4f;entryY=%.4f;entryDx=0;entryDy=0;entryPerimeter=0;%s%s" % (
                      (sx - s["x"]) / s["w"], (sy - s["y"]) / s["h"], (ex - t["x"]) / t["w"], (ey - t["y"]) / t["h"],
-                     "dashed=1;" if e.get("dashed") else ""))
+                     "dashed=1;" if e.get("dashed") else "",
+                     "startArrow=block;startFill=1;" if e.get("both") else ""))
         mids = "".join('<mxPoint x="%.1f" y="%.1f"/>' % p for p in e["pts"][1:-1])
         cells.append('<mxCell id="e%d" value="%s" style="%s" edge="1" parent="1" source="%s" target="%s">'
                      '<mxGeometry relative="1" as="geometry"><Array as="points">%s</Array></mxGeometry></mxCell>' % (
-                         i, html.escape(e.get("label", ""), quote=True), style, e["src"], e["dst"], mids))
+                         i, html.escape(e.get("label", "").replace("\n", "<br>"), quote=True), style, e["src"],
+                         e["dst"], mids))
     for i, (hx, txt) in enumerate(getattr(lay, "heads", [])):
         if txt:
             cells.append('<mxCell id="h%d" value="%s" style="text;html=1;align=center;fontStyle=1;" vertex="1" '
@@ -913,8 +939,9 @@ def write_drawio_svg(lay, path, name):
         if txt:
             body.append('<text x="%.1f" y="13" font-size="12" font-weight="bold" text-anchor="middle">%s</text>' % (
                 hx, xesc(txt)))
+    body += [svg_shape(nd) for nd in lay.nodes if nd["kind"] == "grp"]
     body += [svg_edge(e) for e in lay.edges]
-    body += [svg_shape(nd) for nd in lay.nodes]
+    body += [svg_shape(nd) for nd in lay.nodes if nd["kind"] != "grp"]
     svg = ('<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="%.0f" height="%.0f" viewBox="0 0 %.0f %.0f" '
            'font-family="Noto Sans CJK JP, Meiryo, sans-serif" content="%s">%s</svg>\n' % (
                W, H, W, H, html.escape(mx_xml(lay, name), quote=True), "".join(body)))
@@ -1210,6 +1237,7 @@ bfmem(ConnectX の BlueFlame でノード間のメモリへ write / read / atomi
 * 図はすべて draw.io の「編集できる SVG」(`images/*.drawio.svg`)。そのまま表示でき、draw.io で開くと編集できる。
 * この文書と図は `doc/spec/gen.py` で、ソースと `doc/spec/desc/*.json` から作る。ソースを直したら作り直すこと。
 """)
+    out.append("\n" + open(os.path.join(SPEC, "connectx.adoc"), encoding="utf-8").read())
     for rel, _ in FILES:
         if rel not in descs:
             continue
@@ -1273,8 +1301,9 @@ def main():
         print("\n".join(errs))
         print("NG: %d 件" % len(errs))
         sys.exit(1)
+    figs = hw_figs.build(sys.modules[__name__])   # ConnectX の章の図(作れるかも検査する)
     if "--check" in sys.argv:
-        print("OK: %d 関数" % len(allf))
+        print("OK: %d 関数、ConnectX の章の図 %d 枚" % (len(allf), len(figs)))
         return
     os.makedirs(IMG, exist_ok=True)
     for fn in os.listdir(IMG):
@@ -1290,8 +1319,10 @@ def main():
         ex_callers = [(c, "indirect") for c, _ in extra_callers.get(f["id"], [])]
         write_drawio_svg(layout_call(f, ex_callers, e.get("indirect", []), e.get("entry_note")),
                          os.path.join(IMG, "call_%s.drawio.svg" % sl), "%s 関係" % f["name"])
+    for name, (lay, title) in figs.items():
+        write_drawio_svg(lay, os.path.join(IMG, "hw_%s.drawio.svg" % name), title)
     write_adoc(allf, descs)
-    print("OK: %d 関数、図 %d 枚" % (len(allf), 2 * len(allf)))
+    print("OK: %d 関数、図 %d 枚(ConnectX の章 %d 枚)" % (len(allf), 2 * len(allf) + len(figs), len(figs)))
     write_html()
 
 

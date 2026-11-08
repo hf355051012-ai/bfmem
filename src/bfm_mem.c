@@ -6,7 +6,7 @@
 
 #include <string.h>
 
-static uint64_t s_next;
+static uint64_t s_next;                     /* DMA 領域の先頭から、切り出し済みのバイト数 */
 
 void bfm_mem_reset(void)
 {

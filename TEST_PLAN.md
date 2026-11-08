@@ -390,3 +390,14 @@ sudo build/bfmem_test -d 0000:b3:00.0 -i 192.168.101.21 -n 10000 bench 192.168.1
   次の server を立ち上げ、VFIO のグループが空いていなくて「ポート層の初期化に失敗」していた。前の server が消えるまで
   待つようにして解消した(ライブラリの問題ではない)。
 - 終わった後、両方とも mlx5_core に戻した(Precision の `ens1f0np0` には 192.168.101.21 を付け直した)。
+
+記録(2026-11-08、公開メモリの既定を 16MiB から 1GiB にした後): **合格。**
+- 両方とも公開メモリ 0x110000000 + 0x40000000(1GiB)で立ち上がった(MKey は PA モード 1 つ)。2MiB の hugepage が
+  どちらにも無いので、4KiB のページで張っている。DMA 領域の使用量は前と同じ(80,740KiB / 96MiB)。
+- client の試験に [5b] を足した: 相手の公開メモリの最後の 64KiB と 8 バイトを write して読み戻す、
+  はみ出す操作(最後の 4 バイトから 8 バイトの read、最後の次の 1 バイトの write)は手元で `BFM_E_PARAM`。
+- OptiPlex → Precision(`-x`): NG 0 件。[5b] OK、[7] 公開メモリのすぐ外(1GiB の位置)の read を相手の NIC が
+  REMOTE_ACCESS で断った(相手の MKey がちょうど 1GiB を覆う)。遅延は前と同じ(write 8B 中央値 1,338ns、read 8B 1,649ns)。
+- Precision → OptiPlex: NG 0 件、受け側の hash 一致(e92cdeb4e6b0c81d)。
+- Precision の BAR0 は Linux が 0x3800c0000000 に割り当てていた(4GiB より上の 64bit の BAR0 でも動く)。
+- 終わった後、両方とも mlx5_core に戻した(Precision の `ens1f0np0` には 192.168.101.21 を付け直した)。

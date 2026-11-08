@@ -31,9 +31,10 @@
 #define ATOM_WORDS   512u
 #define AREA_BYTES   (ATOM_OFF + ATOM_WORDS * 8u)
 
-static volatile sig_atomic_t g_stop, g_dump;
+static volatile sig_atomic_t g_stop; /* 止める合図(SIGINT / SIGTERM、server 以外では SIGQUIT も)*/
+static volatile sig_atomic_t g_dump; /* hash を出す合図(server で SIGQUIT)*/
 static int g_server;                 /* server のときだけ SIGQUIT で hash を出す */
-static uint8_t g_model[DATA_BYTES];
+static uint8_t g_model[DATA_BYTES];  /* 相手のデータ領域にあるはずの中身(client の模型)*/
 
 static void on_sig(int s)
 {
@@ -160,7 +161,7 @@ static int run_server(uint16_t port)
  * client
  * ------------------------------------------------------------------- */
 
-static int g_ng;
+static int g_ng;                     /* client の検査で NG になった数 */
 
 static void check(const char *what, int ok)
 {
@@ -174,10 +175,10 @@ static int cmp_u32(const void *a, const void *b)
     return (x > y) - (x < y);
 }
 
-static uint32_t g_lat[200000];
+static uint32_t g_lat[200000];       /* 遅延を測った値(ns。1 回ずつ。並べて中央値などを出す)*/
 
 typedef int (*op_fn)(bfm_conn_t *c, uint32_t i);
-static uint8_t g_src[256];
+static uint8_t g_src[256];           /* 遅延を測るときに write する元のデータ */
 static int op_write8(bfm_conn_t *c, uint32_t i) { return bfm_write(c, (i & 63u) * 64u, g_src, 8); }
 static int op_write64(bfm_conn_t *c, uint32_t i) { return bfm_write(c, (i & 63u) * 64u, g_src, 64); }
 static int op_read8(bfm_conn_t *c, uint32_t i) { uint8_t d[8]; return bfm_read(c, (i & 63u) * 64u, d, 8); }
@@ -322,6 +323,22 @@ static int run_client(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t
         rc = bfm_read(c, 0, buf, DATA_BYTES);
         check("[5] データ領域 64KiB を読み戻して模型と一致", rc == BFM_OK && memcmp(buf, g_model, DATA_BYTES) == 0);
     }
+    /* [5b] 公開メモリの最後(データ領域とは別の所)。最後の 64KiB と 8 バイトを write して読み戻す。
+     *     はみ出す操作は手元で断る(-x と合わせて、相手の MKey がちょうど公開メモリを覆うことを見る)。 */
+    {
+        const uint64_t end = bfm_remote_size(c);
+        static uint8_t big[DATA_BYTES];
+        int ok = end >= AREA_BYTES + DATA_BYTES;
+        for (uint32_t j = 0; j < DATA_BYTES && ok; j++) buf[j] = (uint8_t)(j * 7u + 3u);
+        if (ok && (bfm_write(c, end - DATA_BYTES, buf, DATA_BYTES) != BFM_OK ||
+                   bfm_read(c, end - DATA_BYTES, big, DATA_BYTES) != BFM_OK ||
+                   memcmp(big, buf, DATA_BYTES) != 0)) ok = 0;
+        uint64_t w = 0x0123456789abcdefull, r = 0;
+        if (ok && (bfm_write(c, end - 8u, &w, 8) != BFM_OK || bfm_read(c, end - 8u, &r, 8) != BFM_OK || r != w)) ok = 0;
+        check("[5b] 公開メモリの最後の 64KiB と 8 バイトを write して読み戻す", ok);
+        check("[5b] 公開メモリをはみ出す操作は手元で断る(BFM_E_PARAM)",
+              bfm_read(c, end - 4u, &r, 8) == BFM_E_PARAM && bfm_write(c, end, &w, 1) == BFM_E_PARAM);
+    }
     /* [6] 遅延(1 個ずつ待つ)と、完了を待たない write の速さ。 */
     if (!g_stop && g_ng == 0) {
         for (unsigned i = 0; i < sizeof(g_src); i++) g_src[i] = (uint8_t)(0x5a ^ i);
@@ -385,8 +402,11 @@ static int run_client(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t
 #define DIF_APP2  0xbeefu
 #define DIF_REF2  0x7000fff0u            /* 途中で 0x7001xxxx に繰り上がる */
 
-static uint8_t g_dplain[DIF_N * BFM_DIF_BLOCK], g_dpi[DIF_N * DIF_BS];
-static uint8_t g_dexp[DIF_N * DIF_BS], g_dout[DIF_N * DIF_BS], g_draw[DIF_N * DIF_BS];
+static uint8_t g_dplain[DIF_N * BFM_DIF_BLOCK];  /* PI の無い元のデータ(512 バイト x DIF_N)*/
+static uint8_t g_dpi[DIF_N * DIF_BS];            /* 相手のメモリにあるはずの PI 付きのデータ(520 バイト x DIF_N)*/
+static uint8_t g_dexp[DIF_N * DIF_BS];           /* 読んだ結果として期待する中身 */
+static uint8_t g_dout[DIF_N * DIF_BS];           /* bfm_dif_read() で読んだ先 */
+static uint8_t g_draw[DIF_N * DIF_BS];           /* 相手のメモリを bfm_read() でそのまま読んだ先 */
 
 /* CRC16 T10-DIF をビットごとに(ライブラリの表引きとは別の書き方で)計算する。 */
 static uint16_t crc16_bitwise(const uint8_t *p, uint32_t n)
@@ -712,21 +732,22 @@ static void run_dif(bfm_conn_t *c, uint32_t iters)
 #define MT_DIF_N   16u
 
 struct mt_arg {
-    pthread_t th;
-    int idx;
-    uint32_t ip;
-    const uint8_t *mac;
-    uint16_t port;
-    bfm_conn_t *c;
-    int ng;
-    char why[200];
+    pthread_t th;                        /* このスレッド */
+    int idx;                             /* スレッドの番号(区画の位置と CPU を決める)*/
+    uint32_t ip;                         /* 相手の IPv4 */
+    const uint8_t *mac;                  /* 相手の MAC */
+    uint16_t port;                       /* 接続の番号 */
+    bfm_conn_t *c;                       /* このスレッドの接続(NULL = 接続できなかった)*/
+    int ng;                              /* NG の数 */
+    char why[200];                       /* 最初の NG の内容 */
     uint64_t ns[3];                      /* 速さの区間(write / read / FAA)にかかった時間 */
 };
 
-static pthread_barrier_t g_mt_bar;
-static char g_mt_msg[200];
-static volatile int g_mt_poll_stop;
-static uint32_t g_mt_n, g_mt_threads;
+static pthread_barrier_t g_mt_bar;       /* 全スレッドで足並みをそろえる(同時に接続・測る・切断する)*/
+static char g_mt_msg[200];               /* 結果の行を組み立てる置き場 */
+static volatile int g_mt_poll_stop;      /* 1 = bfm_poll() を回すスレッドを止める */
+static uint32_t g_mt_n;                  /* 1 本のスレッドが速さの区間で打つ回数(-n)*/
+static uint32_t g_mt_threads;            /* スレッドの数(-t)*/
 static uint64_t g_mt_counter;            /* [3] の結果(スレッド 0 が読む)*/
 
 static void mt_fail(struct mt_arg *a, const char *what, int rc)
@@ -912,7 +933,7 @@ static int run_mt(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t nth
 #define BENCH_QD_MAX   16u
 #define BENCH_SIZE_MAX (256u * 1024u)
 
-static double g_tsc_per_ns;
+static double g_tsc_per_ns;              /* 1ns あたりの TSC の数(bench の時間を TSC で測る)*/
 
 static uint64_t rdtsc(void)
 {
