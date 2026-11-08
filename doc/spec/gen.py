@@ -813,14 +813,19 @@ STYLE = {
     "pub": "rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;",
     "reg": "rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;",
     "hw": "rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;",
+    # ラダーチャート: life = 縦の線(登場するものの時間軸)、phase = 段階の見出しの帯
+    "life": "shape=line;direction=south;html=1;dashed=1;strokeColor=#999999;",
+    "phase": "rounded=0;whiteSpace=wrap;html=1;fillColor=#eeeeee;strokeColor=none;align=left;spacingLeft=8;fontStyle=1;",
 }
 FILL = {"start": "#dae8fc", "end": "#dae8fc", "return": "#dae8fc", "do": "#ffffff", "call": "#fff2cc",
         "if": "#f5f5f5", "loop": "#e1d5e7", "label": "#d5e8d4", "center": "#dae8fc", "func": "#ffffff",
         "ext": "#f5f5f5", "note": "#ffffff",
-        "grp": "#fafafa", "sw": "#dae8fc", "mem": "#d5e8d4", "pub": "#ffe6cc", "reg": "#fff2cc", "hw": "#f8cecc"}
+        "grp": "#fafafa", "sw": "#dae8fc", "mem": "#d5e8d4", "pub": "#ffe6cc", "reg": "#fff2cc", "hw": "#f8cecc",
+        "life": "none", "phase": "#eeeeee"}
 STROKE = {"start": "#6c8ebf", "end": "#6c8ebf", "return": "#6c8ebf", "call": "#d6b656", "loop": "#9673a6",
           "label": "#82b366", "center": "#6c8ebf", "ext": "#999999", "note": "#999999",
-          "grp": "#999999", "sw": "#6c8ebf", "mem": "#82b366", "pub": "#d79b00", "reg": "#d6b656", "hw": "#b85450"}
+          "grp": "#999999", "sw": "#6c8ebf", "mem": "#82b366", "pub": "#d79b00", "reg": "#d6b656", "hw": "#b85450",
+          "life": "#999999", "phase": "none"}
 
 
 def svg_shape(nd):
@@ -829,6 +834,9 @@ def svg_shape(nd):
     dash = ' stroke-dasharray="4 3"' if nd.get("dashed") or nd["kind"] == "note" else ""
     k = nd["kind"]
     a = 'fill="%s" stroke="%s"%s' % (fill, stroke, dash)
+    if k == "life":
+        return '<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-dasharray="4 3"/>' % (
+            x + w / 2, y, x + w / 2, y + h, stroke)
     if k in ("start", "end", "return"):
         s = '<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="%.1f" %s/>' % (x, y, w, h, min(h / 2, 17), a)
     elif k == "if":
@@ -854,11 +862,11 @@ def svg_shape(nd):
     top = y + h / 2 - (len(lines) - 1) * LINE_H / 2
     if k == "grp":
         top = y + 12
-    left = k == "grp" or nd.get("align") == "left"
+    left = k in ("grp", "phase") or nd.get("align") == "left"
     tx, anchor = (x + 8, "start") if left else (x + w / 2, "middle")
     t = []
     for i, ln in enumerate(lines):
-        weight = ' font-weight="bold"' if (k in ("center", "grp") and i == 0) or (nd.get("head") and i == 0) else ""
+        weight = ' font-weight="bold"' if (k in ("center", "grp", "phase") and i == 0) or (nd.get("head") and i == 0) else ""
         size = FONT - 2 if (k in ("center", "func", "ext") and i > 0) else FONT
         t.append('<text x="%.1f" y="%.1f" font-size="%d" text-anchor="%s" dominant-baseline="central" '
                  'fill="%s"%s>%s</text>' % (tx, top + i * LINE_H, size, anchor, color, weight, xesc(ln)))
@@ -939,9 +947,10 @@ def write_drawio_svg(lay, path, name):
         if txt:
             body.append('<text x="%.1f" y="13" font-size="12" font-weight="bold" text-anchor="middle">%s</text>' % (
                 hx, xesc(txt)))
-    body += [svg_shape(nd) for nd in lay.nodes if nd["kind"] == "grp"]
+    back = ("grp", "phase", "life")   # 線より先に描く(線と上に乗る箱を隠さない)
+    body += [svg_shape(nd) for nd in lay.nodes if nd["kind"] in back]
     body += [svg_edge(e) for e in lay.edges]
-    body += [svg_shape(nd) for nd in lay.nodes if nd["kind"] != "grp"]
+    body += [svg_shape(nd) for nd in lay.nodes if nd["kind"] not in back]
     svg = ('<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="%.0f" height="%.0f" viewBox="0 0 %.0f %.0f" '
            'font-family="Noto Sans CJK JP, Meiryo, sans-serif" content="%s">%s</svg>\n' % (
                W, H, W, H, html.escape(mx_xml(lay, name), quote=True), "".join(body)))

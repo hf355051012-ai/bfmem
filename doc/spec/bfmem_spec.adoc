@@ -159,6 +159,28 @@ ConnectX は「FW が管理する資源(QP・CQ・EQ・MKey・PD・UAR)」と「
 |QP・CQ・EQ・MKey のコンテキスト |NIC の中(ICM) |コマンドで作り、状態を変える。直接は触らない
 |===
 
+==== ラダーチャート
+
+ドライバ(CPU)・ホストのメモリ・ConnectX・相手の間のやり取りを、時間の順に上から下へ並べる。矢印の文字の頭で種類を分ける。
+
+* *MMIO 読み / 書き*: CPU が BAR0(初期化セグメント・UAR ページ)を直接読み書きする。BlueFlame の窓は WC、それ以外は UC。
+* *書く / 読む*(CPU → ホストのメモリ): CPU が普通にメモリを読み書きする。NIC はそれを DMA で読む / NIC が DMA で書いたものを CPU が読む。
+* *DMA 読み / 書き*(ConnectX → ホストのメモリ): NIC がバスマスタとしてホストのメモリを読み書きする。
+* *コマンド X*: 図の「コマンドを 1 つ出す」の段の手順(entry とメールボックスを書く → ドアベル → FW が処理 → 完了を待つ)をまとめて 1 本の矢印にしたもの。
+* *RoCE v2*: ワイヤ上のパケット(UDP / IPv4 の上の IB の RC)。
+* 破線は応答。四角は、その者の中での処理。
+
+.ラダーチャート(FW の起動・コマンド・ページの受け渡し・資源の作成・停止)
+image::hw_ladder_boot.drawio.svg[ラダーチャート(起動・コマンド・資源)]
+
+.ラダーチャート(データの転送)
+image::hw_ladder_data.drawio.svg[ラダーチャート(データの転送)]
+
+* write も read も、CPU の MMIO の書き込みは BlueFlame の 1 回だけ。BlueFlame で WQE を受けた NIC は、SQ のリングを読みに行かない。
+  埋め込み(inline)の write は送るデータも WQE の中なので、ホストのメモリへの DMA の読み出しが無い。
+* 完了は CQE を CPU が見に行って知る(割り込みは使わない)。CQ の doorbell record は、NIC が CQ の空きを知るためのもの。
+* 相手からの write / read / atomic には、こちらの CPU も FW も関わらない。NIC が rkey と範囲を確かめて、公開メモリを直接読み書きする。
+
 [[cx-reg]]
 === 設定するレジスタの一覧
 

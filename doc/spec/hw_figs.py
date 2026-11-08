@@ -220,6 +220,113 @@ def qp(g):
 
 
 # ---------------------------------------------------------------------------
+# ラダーチャート(ドライバと ConnectX の間のやり取り)
+# ---------------------------------------------------------------------------
+
+LANES = [("cpu", "sw", ["CPU", "bfmem"]),
+         ("mem", "mem", ["ホストのメモリ", "DMA 領域・公開メモリ"]),
+         ("nic", "hw", ["ConnectX", "BAR0・FW・送受信"]),
+         ("peer", "sw", ["相手", "ConnectX・メモリ"])]
+LANE_GAP = 270
+
+
+def ladder(g, steps):
+    """steps: ("phase", 文字) / ("msg", 元, 先, 文字[, "ret"]) / ("act", 登場するもの, 文字)。
+    msg の "ret" は応答(破線)。"""
+    f = Fig(g)
+    cx = {}
+    for i, (lid, kind, title) in enumerate(LANES):
+        cx[lid] = 140 + i * LANE_GAP
+        f.box("h_" + lid, kind, cx[lid] - 100, 20, 200, title, head=True)
+    right = cx[LANES[-1][0]] + 130
+    y = 20 + max(f.byid["h_" + lid]["h"] for lid, _, _ in LANES) + 16
+    top = y - 8
+    n = 0
+    for st in steps:
+        n += 1
+        if st[0] == "phase":
+            y += 6
+            f.box("p%d" % n, "phase", 10, y, right - 10, st[1], h=24)
+            y += 34
+        elif st[0] == "act":
+            b = f.box("a%d" % n, "do", cx[st[1]] - 105, y, 210, st[2])
+            y += b["h"] + 12
+        else:
+            a, b, text = st[1], st[2], st[3]
+            ret = len(st) > 4 and st[4] == "ret"
+            x0, x1 = cx[a], cx[b]
+            lines = g.wrap(text, abs(x1 - x0) - 24)
+            y += len(lines) * 14 + 2
+            f.edge("l_" + a, "l_" + b, [(x0, y), (x1, y)], "\n".join(lines),
+                   lpos=(min(x0, x1) + 10, y - (len(lines) - 1) * 14 - 5), dashed=ret)
+            y += 14
+    for lid, _, _ in LANES:
+        f.box("l_" + lid, "life", cx[lid] - 5, top, 10, [], h=y + 10 - top)
+    return f
+
+
+LADDER_BOOT = [
+    ("phase", "FW の起動を待つ"),
+    ("msg", "cpu", "nic", "MMIO 読み: 初期化セグメント 0x1fc(initializing)"),
+    ("msg", "nic", "cpu", "bit31 が 0 になるまで読み直す", "ret"),
+    ("phase", "コマンドを 1 つ出す(例: ENABLE_HCA。コマンドキューは先に 0x010 / 0x014 で登録してある)"),
+    ("msg", "cpu", "mem", "書く: entry 0 に入力の先頭 16 バイト、メールボックスに残り。最後に ownership = 1"),
+    ("msg", "cpu", "nic", "MMIO 書き: 0x018 コマンドのドアベル(bit0 = entry 0)"),
+    ("msg", "nic", "mem", "DMA 読み: entry 0・入力のメールボックス"),
+    ("act", "nic", "FW がコマンドを処理する"),
+    ("msg", "nic", "mem", "DMA 書き: 出力(entry・出力のメールボックス)、ownership = 0"),
+    ("msg", "cpu", "mem", "読む: ownership が 0 になるまで。出力の status / syndrome を見る"),
+    ("phase", "FW にページを渡す(boot・init の 2 回と、INIT_HCA の後は要求のたびに)"),
+    ("msg", "cpu", "nic", "コマンド QUERY_PAGES"),
+    ("msg", "nic", "cpu", "応答: 要るページの数", "ret"),
+    ("msg", "cpu", "nic", "コマンド MANAGE_PAGES(GIVE): ページの物理アドレスの並び"),
+    ("msg", "nic", "mem", "DMA: 渡されたページを ICM(コンテキストの置き場)として使う"),
+    ("msg", "nic", "mem", "DMA 書き: EQE(ページ要求のイベント)"),
+    ("msg", "cpu", "mem", "読む: EQE の owner と中身(bfm_poll())"),
+    ("msg", "cpu", "nic", "MMIO 書き: UAR + 0x048 EQ のドアベル(読んだ数)"),
+    ("msg", "cpu", "nic", "コマンド MANAGE_PAGES(GIVE)"),
+    ("phase", "資源を作る(例: 接続ごとの CQ と RC の QP)"),
+    ("msg", "cpu", "mem", "用意する: CQ のリング(全部 INVALID)・WQ・doorbell record"),
+    ("msg", "cpu", "nic", "コマンド CREATE_CQ / CREATE_QP: ページの表(PAS)・dbr_addr・uar_page"),
+    ("msg", "nic", "cpu", "応答: cqn / qpn", "ret"),
+    ("msg", "cpu", "nic", "コマンド RST2INIT → INIT2RTR → RTR2RTS(相手の QPN・PSN・GID・MAC)"),
+    ("phase", "止める"),
+    ("msg", "cpu", "nic", "コマンド TEARDOWN_HCA(この後はコマンドを出さない)"),
+    ("msg", "cpu", "nic", "設定空間の書き込み: Command の Bus Master を落とす"),
+]
+
+LADDER_DATA = [
+    ("phase", "write(WQE に埋め込む 220 バイトまで。BlueFlame)"),
+    ("msg", "cpu", "mem", "書く: WQE を SQ へ、doorbell record[1] = sq_pc"),
+    ("msg", "cpu", "nic", "MMIO 書き(WC): BlueFlame の窓へ WQE 全体 → sfence"),
+    ("act", "nic", "WQE を実行する(リングは読みに行かない)"),
+    ("msg", "nic", "peer", "RoCE v2: RDMA WRITE(データは WQE の中)"),
+    ("act", "peer", "相手の公開メモリへ DMA 書き"),
+    ("msg", "peer", "nic", "ACK", "ret"),
+    ("msg", "nic", "mem", "DMA 書き: CQE(通知を求めた WQE)"),
+    ("msg", "cpu", "mem", "読む: CQE の owner。CQ の doorbell record を進める"),
+    ("phase", "read(32 バイトまで。scatter to CQE)"),
+    ("msg", "cpu", "mem", "書く: WQE を SQ へ、doorbell record[1]"),
+    ("msg", "cpu", "nic", "MMIO 書き(WC): BlueFlame の窓へ WQE"),
+    ("msg", "nic", "peer", "RoCE v2: RDMA READ の要求"),
+    ("act", "peer", "相手の公開メモリから DMA 読み"),
+    ("msg", "peer", "nic", "RDMA READ の応答(データ)", "ret"),
+    ("msg", "nic", "mem", "DMA 書き: CQE(データも CQE の中)"),
+    ("msg", "cpu", "mem", "読む: CQE からデータを写す"),
+    ("phase", "read(32 バイトより大きい。要求までは上と同じ)"),
+    ("msg", "nic", "mem", "DMA 書き: データを中継バッファへ、その後に CQE"),
+    ("msg", "cpu", "mem", "読む: CQE を見て、中継バッファから呼び出し側へ写す"),
+    ("phase", "WQE が窓に収まらない・BlueFlame が無いとき"),
+    ("msg", "cpu", "nic", "MMIO 書き(UC): ドアベルへ WQE の先頭 8 バイト"),
+    ("msg", "nic", "mem", "DMA 読み: SQ のリングから WQE(データのセグメントなら送るデータも)"),
+    ("phase", "相手からの write / read / atomic(こちらの CPU は関わらない)"),
+    ("msg", "peer", "nic", "RoCE v2: RDMA WRITE / READ / ATOMIC(rkey で公開メモリを指す)"),
+    ("msg", "nic", "mem", "DMA: 公開メモリを読み書きする(rkey の範囲を外れれば断る)"),
+    ("msg", "nic", "peer", "ACK / 応答(読んだデータ・atomic の元の値)", "ret"),
+]
+
+
+# ---------------------------------------------------------------------------
 # 手順の図(フロー図の配置を使う)
 # ---------------------------------------------------------------------------
 
@@ -265,6 +372,8 @@ def build(g):
     """図を作って {名前: (配置, 図の名前)} を返す。名前は images/hw_<名前>.drawio.svg になる。"""
     return {
         "block": (block(g), "ConnectX ブロック図"),
+        "ladder_boot": (ladder(g, LADDER_BOOT), "ラダーチャート(起動・コマンド・資源)"),
+        "ladder_data": (ladder(g, LADDER_DATA), "ラダーチャート(データの転送)"),
         "mailbox": (mailbox(g), "コマンドとメールボックス"),
         "qp": (qp(g), "QP の持ち方"),
         "boot": (g.layout_flow("", BOOT, "開始: bfm_init()"), "立ち上げの手順"),
