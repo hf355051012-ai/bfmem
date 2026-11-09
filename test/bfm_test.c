@@ -1,9 +1,11 @@
 /* bfmem の試験プログラム(Linux + VFIO)。
  *
  *   bfmem_test [オプション] server                 受け側。公開メモリを決まった模様で埋めて待つ
- *   bfmem_test [オプション] client <IP> <MAC>      掛け側。相手の公開メモリへ一通りの操作をして確かめ、速さを測る
+ *   bfmem_test [オプション] client <IP> [MAC]      掛け側。相手の公開メモリへ一通りの操作をして確かめ、速さを測る
  *   bfmem_test [オプション] info                   立ち上げて能力を表示するだけ
- *   bfmem_test [-t 本数] mt <IP> <MAC>             掛け側。複数のスレッド(コア)から別々の接続で同時に転送する
+ *   bfmem_test [-t 本数] mt <IP> [MAC]             掛け側。複数のスレッド(コア)から別々の接続で同時に転送する
+ *
+ * MAC を省くと、相手の MAC は bfm_connect() が自動で取る(REQ を同報で送り、REP から取る)。
  *
  * 相手は別の機械で動かす同じプログラムの server(相手は常に bfmem)。
  *
@@ -83,8 +85,9 @@ static int parse_mac(const char *s, uint8_t mac[6])
 static void usage(void)
 {
     printf("使い方: bfmem_test [-d BDF] [-i 自分のIP] [-p ポート] [-m 経路MTU 1-5] [-M ポートのMTU] [-n 回数] [-B] [-S] [-C] [-x] [-v]\n"
-           "                   [-t スレッド数] server | client <相手のIP> <相手のMAC> | bench <相手のIP> <相手のMAC> |\n"
-           "                   mt <相手のIP> <相手のMAC> | info\n"
+           "                   [-t スレッド数] server | client <相手のIP> [相手のMAC] | bench <相手のIP> [相手のMAC] |\n"
+           "                   mt <相手のIP> [相手のMAC] | info\n"
+           "  相手のMAC を省くと自動で取る(REQ を同報で送り、REP に入った MAC を使う)\n"
            "  bench: write / read を 4B〜256KiB、多重度 1・4・8・16 で -n 回(既定 100000)ずつ流し、\n"
            "         IOPS・MB/s・平均遅延を出す\n"
            "  -B  BlueFlame を使わない(8 バイトのドアベルだけ。比べるため)\n"
@@ -1058,10 +1061,11 @@ int main(int argc, char **argv)
     int ret = 0;
     if (strcmp(mode, "server") == 0) {
         ret = run_server(port);
-    } else if ((strcmp(mode, "client") == 0 || bench || mt) && optind + 2 < argc) {
+    } else if ((strcmp(mode, "client") == 0 || bench || mt) && optind + 1 < argc) {
         uint32_t ip;
-        uint8_t mac[6];
-        if (parse_ip(argv[optind + 1], &ip) != 0 || parse_mac(argv[optind + 2], mac) != 0) {
+        uint8_t mac[6] = {0, 0, 0, 0, 0, 0};       /* 全部 0 = 自動(bfm_connect() が REQ を同報で送る)*/
+        if (parse_ip(argv[optind + 1], &ip) != 0 ||
+            (optind + 2 < argc && parse_mac(argv[optind + 2], mac) != 0)) {
             usage();
             ret = 2;
         } else if (bench) {

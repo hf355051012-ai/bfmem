@@ -71,8 +71,9 @@ int  bfm_poll(void);
 
 /* ---- 接続 ---- */
 
-/* 相手へ接続する。peer_ip が 0 なら g_bfm_peer_ip / g_bfm_peer_mac を、
- * port が 0 なら g_bfm_cm_port を使う。失敗なら NULL(理由は表示する)。 */
+/* 相手へ接続する。peer_ip が 0 なら g_bfm_peer_ip を、peer_mac が NULL なら g_bfm_peer_mac を、
+ * port が 0 なら g_bfm_cm_port を使う。相手の MAC が全部 0 なら、REQ を同報で送って
+ * 相手の MAC を REP から取る(自動)。失敗なら NULL(理由は表示する)。 */
 bfm_conn_t *bfm_connect(uint32_t peer_ip, const uint8_t peer_mac[6], uint16_t port,
                         uint32_t timeout_ms);
 

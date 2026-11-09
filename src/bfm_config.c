@@ -27,7 +27,7 @@ uint64_t g_bfm_mr_size  = 0x40000000ull;            /* 公開メモリの大き�
 uint32_t g_bfm_local_ip     = 0xC0A8650Bu;          /* 自分の IPv4。192.168.101.11 */
 uint8_t  g_bfm_local_mac[6] = {0, 0, 0, 0, 0, 0};   /* 自分の MAC。全部 0 = NIC の固有の MAC */
 uint32_t g_bfm_peer_ip      = 0xC0A86515u;          /* 既定の相手の IPv4。192.168.101.21 */
-uint8_t  g_bfm_peer_mac[6]  = {0, 0, 0, 0, 0, 0};   /* 既定の相手の MAC。未設定(bfm_connect() で渡す)*/
+uint8_t  g_bfm_peer_mac[6]  = {0, 0, 0, 0, 0, 0};   /* 既定の相手の MAC。全部 0 = 自動(REQ を同報)*/
 
 #else /* VxWorks */
 
@@ -49,7 +49,7 @@ uint64_t g_bfm_mr_size  = 0x40000000ull;            /* 公開メモリの大き�
 uint32_t g_bfm_local_ip     = 0xC0A8650Au;          /* 自分の IPv4。例: 192.168.101.10 */
 uint8_t  g_bfm_local_mac[6] = {0, 0, 0, 0, 0, 0};   /* 自分の MAC。全部 0 = NIC の固有の MAC */
 uint32_t g_bfm_peer_ip      = 0;                    /* 既定の相手の IPv4。未設定(bfm_connect() で渡す)*/
-uint8_t  g_bfm_peer_mac[6]  = {0, 0, 0, 0, 0, 0};   /* 既定の相手の MAC。未設定(bfm_connect() で渡す)*/
+uint8_t  g_bfm_peer_mac[6]  = {0, 0, 0, 0, 0, 0};   /* 既定の相手の MAC。全部 0 = 自動(REQ を同報)*/
 
 #endif
 

@@ -1,6 +1,6 @@
 {
   "file": "test/bfm_test.c",
-  "summary": "試験プログラム `bfmem_test`(Linux + VFIO)。動きはコマンドの引数で選ぶ。\n\n* `server`: 受け側。公開メモリを決まった模様で埋めて接続を待ち、Ctrl-\\(SIGQUIT)か切断のときにデータ領域の hash を表示する。\n* `client <IP> <MAC>`: 掛け側。相手の公開メモリへ read / write / write_post / atomic を一通り出して手元の模型と突き合わせ、遅延と速さを測る。\n* `bench <IP> <MAC>`: write / read を 4B〜256KiB、多重度 1・4・8・16 で流し、IOPS・MB/s・平均遅延を表示する。\n* `info`: 立ち上げて HCA の能力を表示するだけ。\n\n相手は別の機械で動かす同じプログラムの server(相手は常に bfmem)。\n\n公開メモリの取り決め(server が埋める)は、先頭 64KiB がデータ領域(`(i * 7 + 3) & 0xff` で埋める)、その後ろ 4KiB が 8 バイトの atomic 語 512 個(0 で埋める)。",
+  "summary": "試験プログラム `bfmem_test`(Linux + VFIO)。動きはコマンドの引数で選ぶ。\n\n* `server`: 受け側。公開メモリを決まった模様で埋めて接続を待ち、Ctrl-\\(SIGQUIT)か切断のときにデータ領域の hash を表示する。\n* `client <IP> [MAC]`: 掛け側。相手の公開メモリへ read / write / write_post / atomic を一通り出して手元の模型と突き合わせ、遅延と速さを測る。\n* `bench <IP> [MAC]`: write / read を 4B〜256KiB、多重度 1・4・8・16 で流し、IOPS・MB/s・平均遅延を表示する。\n* `info`: 立ち上げて HCA の能力を表示するだけ。\n\n相手は別の機械で動かす同じプログラムの server(相手は常に bfmem)。\n\n公開メモリの取り決め(server が埋める)は、先頭 64KiB がデータ領域(`(i * 7 + 3) & 0xff` で埋める)、その後ろ 4KiB が 8 バイトの atomic 語 512 個(0 で埋める)。",
   "functions": [
     {
       "func": "on_sig",
@@ -1097,7 +1097,7 @@
       "args": {"argc": "引数の数", "argv": "引数"},
       "ret": "0: 成功。1: 立ち上げの失敗、または server / client / bench / mt が失敗を返した。2: 引数が正しくない。",
       "pre": "特になし。",
-      "notes": "* `bfm_init()` の前に `g_server` を決める(server のときだけ SIGQUIT で hash を出し、それ以外では SIGQUIT も止める合図になる。`on_sig()`)。\n* bench のときは `bfm_init()` の前に `g_bfm_stage_size` を `BENCH_QD_MAX * BENCH_SIZE_MAX`(4MiB)にし、中継バッファが大きいので接続の枠を 1 つにする(`g_bfm_max_conn = 1`)。\n* client / bench / mt で相手の IP と MAC が足りないときは、info の判定へ進み、使い方を表示して 2 を返す。\n* `-h` と知らないオプションは使い方を表示して 2 を返す。",
+      "notes": "* `bfm_init()` の前に `g_server` を決める(server のときだけ SIGQUIT で hash を出し、それ以外では SIGQUIT も止める合図になる。`on_sig()`)。\n* bench のときは `bfm_init()` の前に `g_bfm_stage_size` を `BENCH_QD_MAX * BENCH_SIZE_MAX`(4MiB)にし、中継バッファが大きいので接続の枠を 1 つにする(`g_bfm_max_conn = 1`)。\n* client / bench / mt で相手の MAC を省いたときは、全部 0 の MAC を渡す(`bfm_connect()` が REQ を同報で送り、相手の MAC を REP から取る)。\n* client / bench / mt で相手の IP が無いときは、info の判定へ進み、使い方を表示して 2 を返す。\n* `-h` と知らないオプションは使い方を表示して 2 を返す。",
       "entry_note": "プログラムの開始点(OS から呼ばれる)",
       "flow": [
         {"do": "port = 0、iters = 0、threads = 4、oob = 0"},
@@ -1144,14 +1144,15 @@
         {"if": "bfm_init() != BFM_OK ?", "then": [{"return": "1"}]},
         {"do": "ret = 0"},
         {"if": "mode が \"server\" ?", "then": [{"call": "ret = run_server(port) を呼ぶ"}], "else": [
-          {"if": "(mode が \"client\" または bench または mt) && optind + 2 < argc ?", "then": [
+          {"if": "(mode が \"client\" または bench または mt) && optind + 1 < argc ?", "then": [
+            {"do": "mac を全部 0 にする(自動)"},
             {"call": "parse_ip(argv[optind + 1], &ip) を呼ぶ"},
             {"if": "parse_ip() != 0 ?", "then": [
               {"call": "usage() を呼ぶ"},
               {"do": "ret = 2"}
             ], "else": [
-              {"call": "parse_mac(argv[optind + 2], mac) を呼ぶ"},
-              {"if": "parse_mac() != 0 ?", "then": [
+              {"if": "optind + 2 < argc ?", "then": [{"call": "parse_mac(argv[optind + 2], mac) を呼ぶ"}]},
+              {"if": "MAC を渡して parse_mac() != 0 だった ?", "then": [
                 {"call": "usage() を呼ぶ"},
                 {"do": "ret = 2"}
               ], "else": [

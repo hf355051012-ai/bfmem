@@ -45,7 +45,7 @@ WQE を UAR の BlueFlame の窓へ MMIO で書き込んで送る。相手の CP
 
 bfm_init();                                   /* PCIe・HCA・RoCE の準備 */
 bfm_conn_t *c = bfm_accept(0, 0);             /* 受け側(ポートは g_bfm_cm_port)*/
-bfm_conn_t *c = bfm_connect(ip, mac, 0, 0);   /* 掛け側 */
+bfm_conn_t *c = bfm_connect(ip, NULL, 0, 0);  /* 掛け側(相手の MAC は自動。知っていれば渡してもよい)*/
 
 bfm_write(c, off, src, len);                  /* 相手の公開メモリ + off へ。ACK まで待つ */
 bfm_write_post(c, off, src, len);             /* 待たない(inline に収まる長さだけ)*/
@@ -194,14 +194,21 @@ IP のスタックを持たないので、交換は **RoCE v2 の UD で相手�
 [0..3] 'BFM2'  [4] 種類  [5] 経路 MTU  [6..7] 待ち受けの番号
 [8..11] 送り手の接続の id  [12..15] 受け手の接続の id  [16..19] QPN  [20..23] 開始 PSN
 [24] 受け付ける read / atomic の数  [26..31] MAC  [32..35] IPv4
-[36..39] rkey  [40..47] 公開メモリの先頭  [48..55] 大きさ        (数はビッグエンディアン)
+[36..39] rkey  [40..47] 公開メモリの先頭  [48..55] 大きさ  [56..59] 宛先の IPv4
+                                                                   (数はビッグエンディアン)
 ```
 
 受け側は REP を送る前に RTS にするので、掛け側は REP を受けて RTS にすればすぐ使える(RTU は要らない)。
 REP が落ちたら掛け側が REQ を送り直し、受け側は確立済みの接続への REQ に REP を送り直す。
 
-**ARP を使わない。** 掛け側は相手の IP と MAC を引数(か `g_bfm_peer_ip` / `g_bfm_peer_mac`)で知り、
+**ARP を使わない。相手の MAC は自動で取る。** 掛け側は相手の IP を引数(か `g_bfm_peer_ip`)で知る。
+相手の MAC を知らなければ(引数が NULL で `g_bfm_peer_mac` が全部 0、または渡した MAC が全部 0)、
+REQ を **同報**(宛先の MAC が ff:ff:ff:ff:ff:ff。GRH の宛先 GID は相手の IP のもの)で送り、REP に入った相手の MAC を
+RC QP と BYE に使う。同報は同じ L2 の別の bfmem にも届くので、受け手は [56..59] の宛先の IPv4 が
+自分のものでないメッセージを捨てる。同報が届かない網(L2 を越える経路)では、相手の MAC を引数か `g_bfm_peer_mac` で渡す。
 受け側は相手の MAC を REQ から知る。GID は IP から作る(`::ffff:a.b.c.d`、RoCE v2)。
+同報の REQ は ConnectX-4 Lx どうしで受け取られることを確かめた(`TEST_PLAN.md`、2026-11-09)。
+ConnectX-7 では確かめていない。
 
 ### atomic のバイト順
 
@@ -313,7 +320,7 @@ PI は guard(データの CRC16、多項式 0x8BB7)・app tag・ref tag(ブロ�
 | `g_bfm_dif_buf_size` | 接続ごとの T10-DIF 用の中継バッファ(2 面に分けて交互に使う。既定 128KiB)|
 | `g_bfm_max_conn` | 用意する接続の枠の数(1〜`BFM_MAX_CONN`、既定 64。コアごとに 1 本使う)|
 | `g_bfm_local_ip` / `g_bfm_local_mac` | 自分の IPv4 / MAC(MAC が全部 0 なら NIC の固有の MAC)|
-| `g_bfm_peer_ip` / `g_bfm_peer_mac` | 既定の相手 |
+| `g_bfm_peer_ip` / `g_bfm_peer_mac` | 既定の相手(MAC が全部 0 なら自動。REQ を同報で送り、REP から取る)|
 | `g_bfm_cm_port` | 接続の番号 |
 | `g_bfm_path_mtu` / `g_bfm_port_mtu` | RoCE の経路 MTU(1〜5)/ ポートの MTU |
 | `g_bfm_bf_enable` / `g_bfm_scatter_cqe` | 機能の入り切り |
@@ -363,10 +370,11 @@ make
 # 受け側の機械
 sudo build/bfmem_test -d 0000:b3:00.0 -i 192.168.101.21 server
 # 掛け側の機械
-sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 client 192.168.101.21 <受け側の MAC>
+sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 client 192.168.101.21
 # 受け側が切断のときに出す hash と、client の「模型の hash」が同じことを見る
 # 複数のコア: 16 本のスレッドが別々の接続で同時に転送する(受け側の server はそのまま)
-sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -t 16 mt 192.168.101.21 <受け側の MAC>
+sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -t 16 mt 192.168.101.21
+# 相手の MAC は自動で取る(REQ を同報)。同報が届かない網では IP の後ろに相手の MAC を書く
 ```
 
 `mt` は、スレッドごとに別の接続を同時に張り、次を確かめてから、8 バイトの write / read / FAA を全スレッドで同時に

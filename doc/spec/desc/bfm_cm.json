@@ -1,6 +1,6 @@
 {
   "file": "src/bfm_cm.c",
-  "summary": "接続の確立と切断(bfmem どうし)。RC QP を繋ぐには、相手の QP 番号と開始 PSN、公開メモリのアドレスと rkey を交換する必要がある。IP のスタックを持たないので、交換は RoCE v2 の UD で、相手の QP1(GSI。番号が決まっている唯一の QP)へ送る。相手は常に bfmem なので、IB CM ではなく bfmem だけの次の 3 種類の短いメッセージ(`MSG_SIZE` = 64 バイト)を使う。\n\n* 掛け側 `bfm_connect()`: REQ を送り(REP が来るまで送り直す)、REP を受ける。\n* 受け側 `bfm_accept()`: REQ を受け、QP を RTS にしてから REP を送る。\n* 切断 `bfm_disconnect()`: BYE を送る(返事は待たない。相手は `bfm_poll()` で受けて閉じた扱いにする)。\n\n受け側は REP を送る前に RTS にするので、掛け側は REP を受けて RTS にすればすぐ使える(RTU は要らない)。REP が落ちたときは掛け側が REQ を送り直し、受け側は確立済みの接続への REQ に REP を送り直す。\n\nメッセージの中身(数はビッグエンディアン): [0..3] `'BFM2'`、[4] 種類、[5] 経路 MTU、[6..7] 待ち受けの番号、[8..11] 送り手の接続の id、[12..15] 受け手の接続の id(REQ では 0)、[16..19] QPN、[20..23] 開始 PSN、[24] 受け付ける read / atomic の数、[26..31] 送り手の MAC、[32..35] 送り手の IPv4、[36..39] 公開メモリの rkey、[40..47] 公開メモリの先頭、[48..55] 公開メモリの大きさ。\n\n受け取ったメッセージは `gsi_pump()` が `handle_msg()` でその場で処理する(REP はその接続の枠へ写し、BYE は接続を閉じた扱いにし、REQ は `bfm_accept()` のために 1 つだけ `s_req` に取っておく)。接続の枠 `g_bfm_conn[BFM_MAX_CONN]` もこのファイルが持つ。\n\n複数のコアから呼べるように、GSI・接続の枠の取り外し・FW のコマンドは `g_bfm_ctl_lock` の中で行う(`bfm_connect()` / `bfm_accept()` / `bfm_disconnect()` が取り、`bfm_cm_poll()` は `bfm_poll()` が取った中で呼ばれる)。REP や REQ を待つ間は、1 回まわるごとに `ctl_yield()` で鍵を手放す。受けた REQ は、接続の枠の数まで `s_req[]` に取っておく(`req_put()` / `req_take()`)。",
+  "summary": "接続の確立と切断(bfmem どうし)。RC QP を繋ぐには、相手の QP 番号と開始 PSN、公開メモリのアドレスと rkey を交換する必要がある。IP のスタックを持たないので、交換は RoCE v2 の UD で、相手の QP1(GSI。番号が決まっている唯一の QP)へ送る。相手は常に bfmem なので、IB CM ではなく bfmem だけの次の 3 種類の短いメッセージ(`MSG_SIZE` = 64 バイト)を使う。\n\n* 掛け側 `bfm_connect()`: REQ を送り(REP が来るまで送り直す)、REP を受ける。\n* 受け側 `bfm_accept()`: REQ を受け、QP を RTS にしてから REP を送る。\n* 切断 `bfm_disconnect()`: BYE を送る(返事は待たない。相手は `bfm_poll()` で受けて閉じた扱いにする)。\n\n受け側は REP を送る前に RTS にするので、掛け側は REP を受けて RTS にすればすぐ使える(RTU は要らない)。REP が落ちたときは掛け側が REQ を送り直し、受け側は確立済みの接続への REQ に REP を送り直す。\n\nメッセージの中身(数はビッグエンディアン): [0..3] `'BFM2'`、[4] 種類、[5] 経路 MTU、[6..7] 待ち受けの番号、[8..11] 送り手の接続の id、[12..15] 受け手の接続の id(REQ では 0)、[16..19] QPN、[20..23] 開始 PSN、[24] 受け付ける read / atomic の数、[26..31] 送り手の MAC、[32..35] 送り手の IPv4、[36..39] 公開メモリの rkey、[40..47] 公開メモリの先頭、[48..55] 公開メモリの大きさ、[56..59] 宛先の IPv4。\n\nARP を使わない。掛け側が相手の MAC を知らなければ(引数も `g_bfm_peer_mac` も全部 0)、REQ を同報(宛先の MAC が ff:ff:ff:ff:ff:ff)で送り、REP に入った相手の MAC を使う。同報は宛先でない bfmem にも届くので、受け手は [56..59] が自分の IPv4 でないメッセージを捨てる。\n\n受け取ったメッセージは `gsi_pump()` が `handle_msg()` でその場で処理する(REP はその接続の枠へ写し、BYE は接続を閉じた扱いにし、REQ は `bfm_accept()` のために 1 つだけ `s_req` に取っておく)。接続の枠 `g_bfm_conn[BFM_MAX_CONN]` もこのファイルが持つ。\n\n複数のコアから呼べるように、GSI・接続の枠の取り外し・FW のコマンドは `g_bfm_ctl_lock` の中で行う(`bfm_connect()` / `bfm_accept()` / `bfm_disconnect()` が取り、`bfm_cm_poll()` は `bfm_poll()` が取った中で呼ばれる)。REP や REQ を待つ間は、1 回まわるごとに `ctl_yield()` で鍵を手放す。受けた REQ は、接続の枠の数まで `s_req[]` に取っておく(`req_put()` / `req_take()`)。",
   "functions": [
     {
       "func": "cm_rand32",
@@ -28,6 +28,20 @@
       ]
     },
     {
+      "func": "mac_is_zero",
+      "summary": "MAC アドレス `mac` が全部 0(相手の MAC を知らない)かを返す。",
+      "args": {"mac": "調べる MAC アドレス(6 バイト)"},
+      "ret": "1: 全部 0。0: 0 でないバイトがある。",
+      "pre": "`mac` が 6 バイトを指すこと。",
+      "notes": "`bfm_connect()` が、相手の MAC を同報にするかを決めるのに使う。",
+      "flow": [
+        {"while": "i < 6 ?(i は 0 から)", "body": [
+          {"if": "mac[i] != 0 ?", "then": [{"return": "0"}]}
+        ]},
+        {"return": "1"}
+      ]
+    },
+    {
       "func": "own_rr",
       "summary": "自分が受け付ける同時の read / atomic の数を返す。HCA の `log_max_ra_res_qp` を 4 で頭打ちにして、2 のその乗を返す。",
       "args": {},
@@ -41,14 +55,14 @@
     },
     {
       "func": "build_msg",
-      "summary": "接続 `c` の自分の情報を詰めたメッセージを `m` に作る。`MSG_SIZE` バイトを 0 で埋め、`'BFM2'`・種類 `type`・経路 MTU(`c->path_mtu`)・待ち受けの番号(`c->port`)・自分の接続の id(`c->local_id`)・相手の接続の id(`c->peer_id`)を書く。BYE ならここまで。REQ / REP なら続けて QPN・開始 PSN・`own_rr()`・自分の MAC・自分の IPv4・公開メモリの rkey・先頭(`g_bfm_mr_base`)・大きさ(`g_bfm_mr_size`)を書く。",
+      "summary": "接続 `c` の自分の情報を詰めたメッセージを `m` に作る。`MSG_SIZE` バイトを 0 で埋め、`'BFM2'`・種類 `type`・経路 MTU(`c->path_mtu`)・待ち受けの番号(`c->port`)・自分の接続の id(`c->local_id`)・相手の接続の id(`c->peer_id`)・宛先の IPv4(`c->peer_ip`)を書く。BYE ならここまで。REQ / REP なら続けて QPN・開始 PSN・`own_rr()`・自分の MAC・自分の IPv4・公開メモリの rkey・先頭(`g_bfm_mr_base`)・大きさ(`g_bfm_mr_size`)を書く。",
       "args": {"m": "書く先(`MSG_SIZE` バイト)", "type": "種類(`MSG_REQ` / `MSG_REP` / `MSG_BYE`)", "c": "接続"},
       "ret": "なし",
-      "pre": "`c->path_mtu`・`c->port`・`c->local_id`・`c->peer_id` が決まっていること。REQ / REP では `c->qp` が作ってあり、`g_bfm.mac`・`g_bfm.ip`・`g_bfm.rkey` が決まっていること。",
+      "pre": "`c->path_mtu`・`c->port`・`c->local_id`・`c->peer_id`・`c->peer_ip` が決まっていること。REQ / REP では `c->qp` が作ってあり、`g_bfm.mac`・`g_bfm.ip`・`g_bfm.rkey` が決まっていること。",
       "notes": "数はすべてビッグエンディアンで書く。",
       "flow": [
         {"do": "m を MSG_SIZE バイト 0 で埋める"},
-        {"do": "m[0..3] = MSG_MAGIC、m[4] = type、m[5] = c->path_mtu、m[6..7] = c->port、m[8..11] = c->local_id、m[12..15] = c->peer_id"},
+        {"do": "m[0..3] = MSG_MAGIC、m[4] = type、m[5] = c->path_mtu、m[6..7] = c->port、m[8..11] = c->local_id、m[12..15] = c->peer_id、m[56..59] = c->peer_ip"},
         {"if": "type == MSG_BYE ?", "then": [{"return": ""}]},
         {"do": "m[16..19] = c->qp.qpn、m[20..23] = c->qp.local_psn"},
         {"call": "m[24] = own_rr() を呼ぶ"},
@@ -169,13 +183,14 @@
     },
     {
       "func": "handle_msg",
-      "summary": "受け取ったメッセージ 1 つを処理する。REQ なら、確立済み(`BFM_CS_UP`)の接続で相手の接続の id と IPv4 が同じものがあれば(REP が落ちたための送り直し)REP を送り直す。無ければ `bfm_accept()` のために `req_put()` で取っておく。REQ 以外は、受け手の接続の id が `local_id` と同じ最初の枠について、REP で枠が `BFM_CS_SETUP` かつまだ REP を受けていなければ相手の情報を写して `got_rep = 1` にし、BYE で相手の接続の id が同じかつ枠が `BFM_CS_UP` か `BFM_CS_ERROR` なら `BFM_CS_CLOSED` にする。",
+      "summary": "受け取ったメッセージ 1 つを処理する。宛先の IPv4(m[56..59])が自分の IPv4 でなければ捨てる(同報の REQ は同じ L2 の別の bfmem にも届く)。REQ なら、確立済み(`BFM_CS_UP`)の接続で相手の接続の id と IPv4 が同じものがあれば(REP が落ちたための送り直し)REP を送り直す。無ければ `bfm_accept()` のために `req_put()` で取っておく。REQ 以外は、受け手の接続の id が `local_id` と同じ最初の枠について、REP で枠が `BFM_CS_SETUP` かつまだ REP を受けていなければ相手の情報を写して `got_rep = 1` にし、BYE で相手の接続の id が同じかつ枠が `BFM_CS_UP` か `BFM_CS_ERROR` なら `BFM_CS_CLOSED` にする。",
       "args": {"m": "受け取ったメッセージ(`MSG_SIZE` バイト。magic は確認済み)"},
       "ret": "なし",
       "pre": "`m` の magic が `MSG_MAGIC` であること(`gsi_pump()` が確かめてから呼ぶ)。`g_bfm_ctl_lock` を持っていること。",
       "notes": "* 取っておける REQ は接続の枠の数まで(`req_put()`。一杯なら最も古いものを上書きする。掛け側が送り直すので失ってもよい)。\n* REP の送り直しの `gsi_send()` の失敗は無視する。\n* REQ 以外は `local_id` が合った最初の枠で処理を終える(条件に合わなければ何もしない)。どの枠にも合わなければ捨てる。\n* 相手が切った接続は `BFM_CS_CLOSED` にするだけで枠は返さない。アプリケーションが `bfm_disconnect()` で返すこと(表示もそう促す)。",
       "flow": [
         {"do": "type = m[4]、src = m[8..11]、dst = m[12..15]"},
+        {"if": "m[56..59] != g_bfm.ip ?", "then": [{"return": ""}]},
         {"if": "type == MSG_REQ ?", "then": [
           {"while": "i < g_bfm.nconn ?(i は 0 から)", "body": [
             {"do": "c = &g_bfm_conn[i]"},
@@ -390,11 +405,11 @@
     },
     {
       "func": "bfm_connect",
-      "summary": "相手へ接続を掛ける(掛け側)。接続の枠を取って RC QP を INIT まで作り(`conn_open()`)、相手の IP・MAC・GID を入れる。REQ を作り、REP を受けるまで `REQ_RETRY_MS`(1 秒)ごとに送り直しながら `gsi_pump()` を回す。REP を受けたら(`handle_msg()` が相手の情報を枠へ写す)QP を RTS へ進めてデータ経路に繋ぎ、`BFM_CS_UP` にする(`conn_up()`)。 接続の枠の取り外し・GSI・FW のコマンドは `g_bfm_ctl_lock` の中で行い、REP を待つ間は 1 回まわるごとに `ctl_yield()` で鍵を手放す。",
-      "args": {"peer_ip": "相手の IPv4 アドレス。0 なら `g_bfm_peer_ip`", "peer_mac": "相手の MAC(6 バイト)。NULL なら `g_bfm_peer_mac`", "port": "相手の待ち受けの番号。0 なら `g_bfm_cm_port`", "timeout_ms": "REP を待つ時間の上限(ミリ秒)。0 なら `REQ_TIMEOUT_MS`(5 秒)"},
+      "summary": "相手へ接続を掛ける(掛け側)。接続の枠を取って RC QP を INIT まで作り(`conn_open()`)、相手の IP・MAC・GID を入れる。相手の MAC が全部 0(知らない)なら ff:ff:ff:ff:ff:ff にして、REQ を同報で送る。REQ を作り、REP を受けるまで `REQ_RETRY_MS`(1 秒)ごとに送り直しながら `gsi_pump()` を回す。REP を受けたら(`handle_msg()` が相手の情報を枠へ写す)QP を RTS へ進めてデータ経路に繋ぎ、`BFM_CS_UP` にする(`conn_up()`)。 接続の枠の取り外し・GSI・FW のコマンドは `g_bfm_ctl_lock` の中で行い、REP を待つ間は 1 回まわるごとに `ctl_yield()` で鍵を手放す。",
+      "args": {"peer_ip": "相手の IPv4 アドレス。0 なら `g_bfm_peer_ip`", "peer_mac": "相手の MAC(6 バイト)。NULL なら `g_bfm_peer_mac`。全部 0 なら自動(REQ を同報で送り、REP から取る)", "port": "相手の待ち受けの番号。0 なら `g_bfm_cm_port`", "timeout_ms": "REP を待つ時間の上限(ミリ秒)。0 なら `REQ_TIMEOUT_MS`(5 秒)"},
       "ret": "接続(`bfm_conn_t *`)。失敗したら NULL(接続管理が用意されていない、相手の IP が無い、枠が無い、QP の失敗、REP が来ない、送信の失敗)。",
       "pre": "`bfm_init()` の後であること。`peer_mac` が NULL でなければ 6 バイトを指すこと。どのコアから同時に呼んでもよい。",
-      "notes": "* REQ は最初に 1 度作り、送り直しでも同じものを送る。\n* 相手の MAC・IP は引数(または設定の値)のものを入れるが、REP を受けると `take_peer()` が REP の中身で上書きする。\n* 失敗したときは相手へ何も送らずに(BYE も送らない)枠を返す(`conn_release()`)。\n* REP を待つ間の `gsi_pump()` の戻り値は見ない。",
+      "notes": "* REQ は最初に 1 度作り、送り直しでも同じものを送る。\n* 相手の MAC・IP は引数(または設定の値)のものを入れるが、REP を受けると `take_peer()` が REP の中身で上書きする。同報で送った場合も、RC QP と BYE には REP に入った相手の MAC を使う。\n* 同報が届かない網(L2 を越える経路)では、相手の MAC を渡すこと。\n* 失敗したときは相手へ何も送らずに(BYE も送らない)枠を返す(`conn_release()`)。\n* REP を待つ間の `gsi_pump()` の戻り値は見ない。",
       "flow": [
         {"if": "!s_gsi_ready ?", "then": [{"return": "NULL"}]},
         {"if": "peer_ip == 0 ?", "then": [{"do": "peer_ip = g_bfm_peer_ip"}]},
@@ -412,6 +427,8 @@
           {"return": "NULL"}
         ]},
         {"do": "c->peer_ip = peer_ip、c->peer_mac = peer_mac"},
+        {"call": "mac_is_zero(c->peer_mac) を呼ぶ"},
+        {"if": "mac_is_zero() != 0 ?", "then": [{"do": "c->peer_mac = ff:ff:ff:ff:ff:ff(同報)"}]},
         {"call": "mlx5_gid_from_ipv4(peer_ip, c->peer_gid) を呼ぶ"},
         {"call": "build_msg(req, MSG_REQ, c) を呼ぶ"},
         {"call": "t0 = bfm_port_time_ns() を呼ぶ"},

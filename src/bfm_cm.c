@@ -19,6 +19,11 @@
  *   [16..19] QPN  [20..23] 開始 PSN  [24] 受け付ける read / atomic の数
  *   [26..31] 送り手の MAC  [32..35] 送り手の IPv4
  *   [36..39] 公開メモリの rkey  [40..47] 公開メモリの先頭  [48..55] 公開メモリの大きさ
+ *   [56..59] 宛先の IPv4
+ *
+ * ARP を使わない。掛け側が相手の MAC を知らなければ(引数も g_bfm_peer_mac も全部 0)、
+ * REQ を同報(宛先の MAC が ff:ff:ff:ff:ff:ff)で送り、REP に入った相手の MAC を使う。
+ * 同報は宛先でない bfmem にも届くので、受け手は [56..59] が自分の IPv4 でないものを捨てる。
  *
  * 受け取ったメッセージは gsi_pump() がその場で処理する(REP はその接続の枠へ写し、BYE は
  * 接続を閉じた扱いにし、REQ は bfm_accept() のために接続の枠の数まで取っておく)。
@@ -76,6 +81,15 @@ static uint64_t ms_since(uint64_t t0)
     return (bfm_port_time_ns() - t0) / 1000000u;
 }
 
+/* MAC が全部 0(知らない)か。 */
+static int mac_is_zero(const uint8_t mac[6])
+{
+    for (unsigned i = 0; i < 6u; i++) {
+        if (mac[i] != 0u) return 0;
+    }
+    return 1;
+}
+
 /* ---------------------------------------------------------------------
  * メッセージ
  * ------------------------------------------------------------------- */
@@ -96,6 +110,7 @@ static void build_msg(uint8_t *m, uint8_t type, const struct bfm_conn *c)
     bfm_wr16be(m + 6, c->port);
     bfm_wr32be(m + 8, c->local_id);
     bfm_wr32be(m + 12, c->peer_id);
+    bfm_wr32be(m + 56, c->peer_ip);
     if (type == MSG_BYE) return;
     bfm_wr32be(m + 16, c->qp.qpn);
     bfm_wr32be(m + 20, c->qp.local_psn);
@@ -244,6 +259,7 @@ static void handle_msg(const uint8_t *m)
 {
     const uint8_t type = m[4];
     const uint32_t src = bfm_rd32be(m + 8), dst = bfm_rd32be(m + 12);
+    if (bfm_rd32be(m + 56) != g_bfm.ip) return;          /* ほかの bfmem 宛て(同報の REQ)*/
     if (type == MSG_REQ) {
         /* 確立済みの接続への送り直し(REP が落ちた)なら、REP を送り直す */
         for (unsigned i = 0; i < g_bfm.nconn; i++) {
@@ -482,6 +498,7 @@ bfm_conn_t *bfm_connect(uint32_t peer_ip, const uint8_t peer_mac[6], uint16_t po
     }
     c->peer_ip = peer_ip;
     memcpy(c->peer_mac, peer_mac, 6);
+    if (mac_is_zero(c->peer_mac)) memset(c->peer_mac, 0xff, 6);   /* 知らなければ同報。REP で上書きされる */
     mlx5_gid_from_ipv4(peer_ip, c->peer_gid);
 
     uint8_t req[MSG_SIZE];

@@ -286,6 +286,7 @@ FAA は Linux どうし(受け側 Precision)の 1,761ns と同じところまで
 相手は常に bfmem なので、**両方の機械の ConnectX を vfio-pci にして bfmem_test を動かす**。
 Precision の PF0(`0000:b3:00.0`)は単独の IOMMU グループ(2)なので、それだけを vfio-pci にすればよい
 (ssh は別の NIC `eno1` を通るので切れない)。近隣表・経路の設定は要らない(どちらも ARP を使わない)。
+相手の MAC は省ける(REQ を同報で送り、REP から取る)。下の手順の MAC は、渡す形の例として残している。
 
 ```bash
 # 両方: ビルドして vfio-pci にする(OptiPlex は 01:00.0 と 01:00.1、Precision は b3:00.0)
@@ -401,3 +402,14 @@ sudo build/bfmem_test -d 0000:b3:00.0 -i 192.168.101.21 -n 10000 bench 192.168.1
 - Precision → OptiPlex: NG 0 件、受け側の hash 一致(e92cdeb4e6b0c81d)。
 - Precision の BAR0 は Linux が 0x3800c0000000 に割り当てていた(4GiB より上の 64bit の BAR0 でも動く)。
 - 終わった後、両方とも mlx5_core に戻した(Precision の `ens1f0np0` には 192.168.101.21 を付け直した)。
+
+記録(2026-11-09、相手の MAC を自動で取るようにした後): **合格。**
+- 相手の MAC を知らなければ、最初の REQ を同報(宛先の MAC が ff:ff:ff:ff:ff:ff)で送り、REP に入った MAC を RC QP と BYE に使う。
+  メッセージの [56..59] に宛先の IPv4 を足し、受け手は自分宛てでないものを捨てる。
+- OptiPlex → Precision の client(MAC なし): NG 0 件、hash は両側で `e92cdeb4e6b0c81d`、server は BYE を受けて閉じた。
+  遅延は前と同じ(write 8B 中央値 1,336ns、read 8B 1,646ns、FAA 1,638ns)。同報の REQ を ConnectX-4 Lx の受け側が受け取った。
+- 宛先でない IP(192.168.101.99)へ MAC なしで接続: 5 秒で「接続できない(REP が来ない)」、戻り値 1。
+  同じ L2 の Precision の server は同報の REQ を受けたはずだが、接続を受けなかった(宛先の IPv4 で捨てた)。
+- `mt -t 4`(MAC なし): 4 本とも同時に接続、[1]〜[4] OK、FAA の合計 400,000、速さは前と同じ(write 2.82 / read 2.26 / FAA 2.26 Mops)。
+- Precision → OptiPlex の client: MAC なし・MAC を渡す形の両方で NG 0 件、hash 一致。
+- 終わった後、両方とも mlx5_core に戻した(Precision の `ens1f0np0` は始める前から IP が付いていなかったので、付けていない)。

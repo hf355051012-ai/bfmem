@@ -30,7 +30,7 @@ bfmem の関数のうち、外から使うもの。関数名を押すと、そ�
 |<<src_bfm_core-bfm_shutdown,`bfm_shutdown()`>> |全部の接続を畳み、FW を止め(`TEARDOWN_HCA`)、Bus Master を落とす。
 |<<src_bfm_core-bfm_poll,`bfm_poll()`>> |相手からの切断の知らせ(BYE)と FW の非同期イベント(ページ要求など)を処理する。 データの経路では呼ばれないので、アプリケーションがときどき呼ぶこと。 戻り値: 処理したイベントの数。
 2+h|接続
-|<<src_bfm_cm-bfm_connect,`bfm_connect()`>> |相手へ接続する。`peer_ip` が 0 なら `g_bfm_peer_ip` / `g_bfm_peer_mac` を、 port が 0 なら `g_bfm_cm_port` を使う。失敗なら NULL(理由は表示する)。
+|<<src_bfm_cm-bfm_connect,`bfm_connect()`>> |相手へ接続する。`peer_ip` が 0 なら `g_bfm_peer_ip` を、`peer_mac` が NULL なら `g_bfm_peer_mac` を、 port が 0 なら `g_bfm_cm_port` を使う。相手の MAC が全部 0 なら、REQ を同報で送って 相手の MAC を REP から取る(自動)。失敗なら NULL(理由は表示する)。
 |<<src_bfm_cm-bfm_accept,`bfm_accept()`>> |port 宛ての接続要求を待って受ける(`timeout_ms` = 0 なら待ち続ける)。
 |<<src_bfm_cm-bfm_disconnect,`bfm_disconnect()`>> |相手へ切断の知らせ(BYE)を送って畳み、QP などを返す。c はこの後使えない。
 |<<src_bfm_ops-bfm_is_up,`bfm_is_up()`>> |1 = 使える。0 = エラーか相手から切断された(`bfm_disconnect()` で返すこと)。
@@ -2951,7 +2951,9 @@ image::call_src_mlx5_qp-mlx5_qp_destroy.drawio.svg[mlx5_qp_destroy() の関係�
 
 受け側は REP を送る前に RTS にするので、掛け側は REP を受けて RTS にすればすぐ使える(RTU は要らない)。REP が落ちたときは掛け側が REQ を送り直し、受け側は確立済みの接続への REQ に REP を送り直す。
 
-メッセージの中身(数はビッグエンディアン): [0..3] `'BFM2'`、[4] 種類、[5] 経路 MTU、[6..7] 待ち受けの番号、[8..11] 送り手の接続の id、[12..15] 受け手の接続の id(REQ では 0)、[16..19] QPN、[20..23] 開始 PSN、[24] 受け付ける read / atomic の数、[26..31] 送り手の MAC、[32..35] 送り手の IPv4、[36..39] 公開メモリの rkey、[40..47] 公開メモリの先頭、[48..55] 公開メモリの大きさ。
+メッセージの中身(数はビッグエンディアン): [0..3] `'BFM2'`、[4] 種類、[5] 経路 MTU、[6..7] 待ち受けの番号、[8..11] 送り手の接続の id、[12..15] 受け手の接続の id(REQ では 0)、[16..19] QPN、[20..23] 開始 PSN、[24] 受け付ける read / atomic の数、[26..31] 送り手の MAC、[32..35] 送り手の IPv4、[36..39] 公開メモリの rkey、[40..47] 公開メモリの先頭、[48..55] 公開メモリの大きさ、[56..59] 宛先の IPv4。
+
+ARP を使わない。掛け側が相手の MAC を知らなければ(引数も `g_bfm_peer_mac` も全部 0)、REQ を同報(宛先の MAC が ff:ff:ff:ff:ff:ff)で送り、REP に入った相手の MAC を使う。同報は宛先でない bfmem にも届くので、受け手は [56..59] が自分の IPv4 でないメッセージを捨てる。
 
 受け取ったメッセージは `gsi_pump()` が `handle_msg()` でその場で処理する(REP はその接続の枠へ写し、BYE は接続を閉じた扱いにし、REQ は `bfm_accept()` のために 1 つだけ `s_req` に取っておく)。接続の枠 `g_bfm_conn[BFM_MAX_CONN]` もこのファイルが持つ。
 
@@ -2962,7 +2964,7 @@ image::call_src_mlx5_qp-mlx5_qp_destroy.drawio.svg[mlx5_qp_destroy() の関係�
 [cols="1,5",options="autowidth"]
 .cm_rand32()
 |===
-|関数名 |`cm_rand32`(`src/bfm_cm.c` 64 行目)
+|関数名 |`cm_rand32`(`src/bfm_cm.c` 69 行目)
 |宣言 |`static uint32_t cm_rand32(void)`
 |処理内容 a|32 ビットの擬似乱数を返す。静的変数 `x` に `bfm_port_time_ns()` と定数を足した値を XOR で混ぜ、xorshift(13・7・17)をかけて、`x >> 16` の下位 32 ビットの最下位ビットを立てて返す。
 |引数 |なし
@@ -2984,7 +2986,7 @@ image::call_src_bfm_cm-cm_rand32.drawio.svg[cm_rand32() の関係図]
 [cols="1,5",options="autowidth"]
 .ms_since()
 |===
-|関数名 |`ms_since`(`src/bfm_cm.c` 74 行目)
+|関数名 |`ms_since`(`src/bfm_cm.c` 79 行目)
 |宣言 |`static uint64_t ms_since(uint64_t t0)`
 |処理内容 a|時刻 `t0` から今までの経過時間をミリ秒で返す。
 |引数 a|
@@ -3005,12 +3007,38 @@ image::flow_src_bfm_cm-ms_since.drawio.svg[ms_since() のフロー図]
 .ms_since() の関係図
 image::call_src_bfm_cm-ms_since.drawio.svg[ms_since() の関係図]
 
+[[src_bfm_cm-mac_is_zero]]
+=== `mac_is_zero()`
+[cols="1,5",options="autowidth"]
+.mac_is_zero()
+|===
+|関数名 |`mac_is_zero`(`src/bfm_cm.c` 85 行目)
+|宣言 |`static int mac_is_zero(const uint8_t mac[6])`
+|処理内容 a|MAC アドレス `mac` が全部 0(相手の MAC を知らない)かを返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const uint8_t [6]` !`mac` !調べる MAC アドレス(6 バイト)
+!===
+|戻り値 a|1: 全部 0。0: 0 でないバイトがある。
+|前提条件 a|`mac` が 6 バイトを指すこと。
+|注意事項 a|`bfm_connect()` が、相手の MAC を同報にするかを決めるのに使う。
+|使用関数 a|なし
+|===
+
+.mac_is_zero() のフロー図
+image::flow_src_bfm_cm-mac_is_zero.drawio.svg[mac_is_zero() のフロー図]
+
+.mac_is_zero() の関係図
+image::call_src_bfm_cm-mac_is_zero.drawio.svg[mac_is_zero() の関係図]
+
 [[src_bfm_cm-own_rr]]
 === `own_rr()`
 [cols="1,5",options="autowidth"]
 .own_rr()
 |===
-|関数名 |`own_rr`(`src/bfm_cm.c` 83 行目)
+|関数名 |`own_rr`(`src/bfm_cm.c` 97 行目)
 |宣言 |`static uint8_t own_rr(void)`
 |処理内容 a|自分が受け付ける同時の read / atomic の数を返す。HCA の `log_max_ra_res_qp` を 4 で頭打ちにして、2 のその乗を返す。
 |引数 |なし
@@ -3031,9 +3059,9 @@ image::call_src_bfm_cm-own_rr.drawio.svg[own_rr() の関係図]
 [cols="1,5",options="autowidth"]
 .build_msg()
 |===
-|関数名 |`build_msg`(`src/bfm_cm.c` 90 行目)
+|関数名 |`build_msg`(`src/bfm_cm.c` 104 行目)
 |宣言 |`static void build_msg(uint8_t *m, uint8_t type, const struct bfm_conn *c)`
-|処理内容 a|接続 `c` の自分の情報を詰めたメッセージを `m` に作る。`MSG_SIZE` バイトを 0 で埋め、`'BFM2'`・種類 `type`・経路 MTU(`c->path_mtu`)・待ち受けの番号(`c->port`)・自分の接続の id(`c->local_id`)・相手の接続の id(`c->peer_id`)を書く。BYE ならここまで。REQ / REP なら続けて QPN・開始 PSN・`own_rr()`・自分の MAC・自分の IPv4・公開メモリの rkey・先頭(`g_bfm_mr_base`)・大きさ(`g_bfm_mr_size`)を書く。
+|処理内容 a|接続 `c` の自分の情報を詰めたメッセージを `m` に作る。`MSG_SIZE` バイトを 0 で埋め、`'BFM2'`・種類 `type`・経路 MTU(`c->path_mtu`)・待ち受けの番号(`c->port`)・自分の接続の id(`c->local_id`)・相手の接続の id(`c->peer_id`)・宛先の IPv4(`c->peer_ip`)を書く。BYE ならここまで。REQ / REP なら続けて QPN・開始 PSN・`own_rr()`・自分の MAC・自分の IPv4・公開メモリの rkey・先頭(`g_bfm_mr_base`)・大きさ(`g_bfm_mr_size`)を書く。
 |引数 a|
 [cols="2,1,4"]
 !===
@@ -3043,7 +3071,7 @@ image::call_src_bfm_cm-own_rr.drawio.svg[own_rr() の関係図]
 !`const struct bfm_conn *` !`c` !接続
 !===
 |戻り値 a|なし
-|前提条件 a|`c->path_mtu`・`c->port`・`c->local_id`・`c->peer_id` が決まっていること。REQ / REP では `c->qp` が作ってあり、`g_bfm.mac`・`g_bfm.ip`・`g_bfm.rkey` が決まっていること。
+|前提条件 a|`c->path_mtu`・`c->port`・`c->local_id`・`c->peer_id`・`c->peer_ip` が決まっていること。REQ / REP では `c->qp` が作ってあり、`g_bfm.mac`・`g_bfm.ip`・`g_bfm.rkey` が決まっていること。
 |注意事項 a|数はすべてビッグエンディアンで書く。
 |使用関数 a|* `memset()`(外部)
 * <<include_bfm_port-bfm_wr32be,`bfm_wr32be()`>>
@@ -3064,7 +3092,7 @@ image::call_src_bfm_cm-build_msg.drawio.svg[build_msg() の関係図]
 [cols="1,5",options="autowidth"]
 .take_peer()
 |===
-|関数名 |`take_peer`(`src/bfm_cm.c` 111 行目)
+|関数名 |`take_peer`(`src/bfm_cm.c` 126 行目)
 |宣言 |`static void take_peer(struct bfm_conn *c, const uint8_t *m)`
 |処理内容 a|REQ / REP のメッセージ `m` から相手の情報を接続の枠 `c` へ写す。相手の接続の id・QPN(下位 24 ビット)・開始 PSN(下位 24 ビット)・同時の read / atomic の数・MAC・IPv4 を読み、IPv4 から GID を作り、公開メモリの rkey・先頭・大きさを読む。
 |引数 a|
@@ -3094,7 +3122,7 @@ image::call_src_bfm_cm-take_peer.drawio.svg[take_peer() の関係図]
 [cols="1,5",options="autowidth"]
 .gsi_post_recv()
 |===
-|関数名 |`gsi_post_recv`(`src/bfm_cm.c` 129 行目)
+|関数名 |`gsi_post_recv`(`src/bfm_cm.c` 144 行目)
 |宣言 |`static void gsi_post_recv(void)`
 |処理内容 a|GSI の受信キューに受信の WQE を 1 つ出す。`rq_pc` の位置の WQE(16 バイト)に、受信枠の大きさ `BFM_GSI_RX_SLOT`・`g_bfm.lkey`・受信枠 `s_rx_ring + idx * BFM_GSI_RX_SLOT` の DMA アドレスを書き、`rq_pc` を進めてドアベルレコード(`dbr[0]`)を書き換える。
 |引数 |なし
@@ -3119,7 +3147,7 @@ image::call_src_bfm_cm-gsi_post_recv.drawio.svg[gsi_post_recv() の関係図]
 [cols="1,5",options="autowidth"]
 .gsi_send()
 |===
-|関数名 |`gsi_send`(`src/bfm_cm.c` 146 行目)
+|関数名 |`gsi_send`(`src/bfm_cm.c` 161 行目)
 |宣言 |`static int gsi_send(const uint8_t *msg, const struct bfm_conn *c)`
 |処理内容 a|メッセージ(`MSG_SIZE` バイト)を接続 `c` の相手の QP1 へ UD の SEND で送る。送信中の数が `BFM_GSI_TXBUFS` に達していれば `gsi_pump()` で空くのを待つ。メッセージを送信の置き場 `s_tx_buf`(順に使い回す)へ写し、ctrl(16)・datagram(48。Q_Key・宛先 QPN 1・UDP の送り元ポート・相手の MAC・hop limit 64・GRH・相手の GID)・data(16)の 2 WQEBB の WQE を作り、ドアベルレコードを書き換えて、WQE の先頭 8 バイトを GSI の UAR のドアベルへ書く。
 |引数 a|
@@ -3161,7 +3189,7 @@ image::call_src_bfm_cm-gsi_send.drawio.svg[gsi_send() の関係図]
 [cols="1,5",options="autowidth"]
 .req_put()
 |===
-|関数名 |`req_put`(`src/bfm_cm.c` 198 行目)
+|関数名 |`req_put`(`src/bfm_cm.c` 213 行目)
 |宣言 |`static void req_put(const uint8_t *m)`
 |処理内容 a|受けた REQ を `bfm_accept()` のために取っておく。同じ掛け側(接続の id と IPv4 が同じ)の REQ が既にあれば置き換え(送り直し)、無ければ空きに、空きが無ければ最も古いものに入れ、受けた時刻を記録する。
 |引数 a|
@@ -3189,7 +3217,7 @@ image::call_src_bfm_cm-req_put.drawio.svg[req_put() の関係図]
 [cols="1,5",options="autowidth"]
 .req_take()
 |===
-|関数名 |`req_take`(`src/bfm_cm.c` 225 行目)
+|関数名 |`req_take`(`src/bfm_cm.c` 240 行目)
 |宣言 |`static int req_take(uint16_t port, uint8_t *msg)`
 |処理内容 a|取っておいた REQ のうち、待ち受けの番号が `port` のもので最も古いものを取り出して `msg` に写す。受けてから `REQ_STALE_MS`(2 秒)以上たったもの(掛け側があきらめた)は捨てる。
 |引数 a|
@@ -3218,9 +3246,9 @@ image::call_src_bfm_cm-req_take.drawio.svg[req_take() の関係図]
 [cols="1,5",options="autowidth"]
 .handle_msg()
 |===
-|関数名 |`handle_msg`(`src/bfm_cm.c` 243 行目)
+|関数名 |`handle_msg`(`src/bfm_cm.c` 258 行目)
 |宣言 |`static void handle_msg(const uint8_t *m)`
-|処理内容 a|受け取ったメッセージ 1 つを処理する。REQ なら、確立済み(`BFM_CS_UP`)の接続で相手の接続の id と IPv4 が同じものがあれば(REP が落ちたための送り直し)REP を送り直す。無ければ `bfm_accept()` のために `req_put()` で取っておく。REQ 以外は、受け手の接続の id が `local_id` と同じ最初の枠について、REP で枠が `BFM_CS_SETUP` かつまだ REP を受けていなければ相手の情報を写して `got_rep = 1` にし、BYE で相手の接続の id が同じかつ枠が `BFM_CS_UP` か `BFM_CS_ERROR` なら `BFM_CS_CLOSED` にする。
+|処理内容 a|受け取ったメッセージ 1 つを処理する。宛先の IPv4(m[56..59])が自分の IPv4 でなければ捨てる(同報の REQ は同じ L2 の別の bfmem にも届く)。REQ なら、確立済み(`BFM_CS_UP`)の接続で相手の接続の id と IPv4 が同じものがあれば(REP が落ちたための送り直し)REP を送り直す。無ければ `bfm_accept()` のために `req_put()` で取っておく。REQ 以外は、受け手の接続の id が `local_id` と同じ最初の枠について、REP で枠が `BFM_CS_SETUP` かつまだ REP を受けていなければ相手の情報を写して `got_rep = 1` にし、BYE で相手の接続の id が同じかつ枠が `BFM_CS_UP` か `BFM_CS_ERROR` なら `BFM_CS_CLOSED` にする。
 |引数 a|
 [cols="2,1,4"]
 !===
@@ -3252,7 +3280,7 @@ image::call_src_bfm_cm-handle_msg.drawio.svg[handle_msg() の関係図]
 [cols="1,5",options="autowidth"]
 .gsi_pump()
 |===
-|関数名 |`gsi_pump`(`src/bfm_cm.c` 280 行目)
+|関数名 |`gsi_pump`(`src/bfm_cm.c` 296 行目)
 |宣言 |`static int gsi_pump(void)`
 |処理内容 a|GSI の CQ を読み切る。送信の完了(`MLX5_CQE_REQ`)は送信中の数 `s_tx_outstanding` を減らすだけ。受信の完了(`MLX5_CQE_RESP_SEND`)は、受信枠の GRH(`MLX5_GRH_BYTES`)の後ろからメッセージを写して受信を出し直し、長さが足りて magic が `MSG_MAGIC` なら `handle_msg()` で処理して数える。それ以外の完了はエラーとして表示して -1 を返す。
 |引数 |なし
@@ -3282,7 +3310,7 @@ image::call_src_bfm_cm-gsi_pump.drawio.svg[gsi_pump() の関係図]
 [cols="1,5",options="autowidth"]
 .conn_open()
 |===
-|関数名 |`conn_open`(`src/bfm_cm.c` 322 行目)
+|関数名 |`conn_open`(`src/bfm_cm.c` 338 行目)
 |宣言 |`static struct bfm_conn *conn_open(uint16_t port)`
 |処理内容 a|接続の枠 `g_bfm_conn`(用意した `g_bfm.nconn` 個)から空き(`BFM_CS_FREE`)を 1 つ取り、`BFM_CS_SETUP` にして、待ち受けの番号・自分の接続の id(`cm_rand32()`)・path_mtu・scatter to CQE の設定を入れ、RC QP を作って INIT まで進める。
 |引数 a|
@@ -3316,7 +3344,7 @@ image::call_src_bfm_cm-conn_open.drawio.svg[conn_open() の関係図]
 [cols="1,5",options="autowidth"]
 .conn_release()
 |===
-|関数名 |`conn_release`(`src/bfm_cm.c` 348 行目)
+|関数名 |`conn_release`(`src/bfm_cm.c` 364 行目)
 |宣言 |`static void conn_release(struct bfm_conn *c)`
 |処理内容 a|接続 `c` を返す。データ経路の状態を外し(`bfm_ops_detach()`)、RC QP を壊し(`mlx5_qp_destroy()`)、枠を `BFM_CS_FREE` に戻して、自分と相手の接続の id を 0 にする。
 |引数 a|
@@ -3343,7 +3371,7 @@ image::call_src_bfm_cm-conn_release.drawio.svg[conn_release() の関係図]
 [cols="1,5",options="autowidth"]
 .conn_up()
 |===
-|関数名 |`conn_up`(`src/bfm_cm.c` 357 行目)
+|関数名 |`conn_up`(`src/bfm_cm.c` 373 行目)
 |宣言 |`static int conn_up(struct bfm_conn *c, const char *how)`
 |処理内容 a|接続 `c` の RC QP を INIT から RTR、RTS へ進め、データ経路を用意して(`bfm_ops_attach()`)、`BFM_CS_UP` にする。接続の内容(掛け側・受け側の別、自分と相手の QPN、相手の IP、相手の公開メモリの先頭・大きさ・rkey、MTU、同時の read / atomic の数、BlueFlame の有無)を表示する。
 |引数 a|
@@ -3373,7 +3401,7 @@ image::call_src_bfm_cm-conn_up.drawio.svg[conn_up() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_cm_init()
 |===
-|関数名 |`bfm_cm_init`(`src/bfm_cm.c` 379 行目)
+|関数名 |`bfm_cm_init`(`src/bfm_cm.c` 395 行目)
 |宣言 |`int bfm_cm_init(void)`
 |処理内容 a|接続管理を用意する(`bfm_init()` から呼ばれる)。GSI の状態と `s_req` を 0 で埋め、送信の数を 0 にし、GSI の WQ・ドアベルレコード・CQ・受信枠・送信の置き場を DMA 領域から切り出す。UAR を取って GSI(QP1)を作り、INIT・RTS へ進め、受信を `BFM_GSI_PREPOST` 個出す。続けて接続の枠ごとに(`g_bfm.nconn` 個)、0 で埋めて、RC QP の WQ・ドアベルレコード・CQ・CQ のドアベルレコード・中継バッファ(`g_bfm_stage_size` を `BFM_PAGE` に切り上げた大きさ)と T10-DIF 用の中継バッファ(2 面。1 面 = `g_bfm_dif_buf_size` の半分を `BFM_PAGE` に切り上げた大きさ)を切り出し、UAR を取ってドアベルの窓を決め、BlueFlame を使うなら UAR を write-combining でも張る。全部そろってから `s_gsi_ready = 1` にする。
 |引数 |なし
@@ -3406,7 +3434,7 @@ image::call_src_bfm_cm-bfm_cm_init.drawio.svg[bfm_cm_init() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_cm_fini()
 |===
-|関数名 |`bfm_cm_fini`(`src/bfm_cm.c` 447 行目)
+|関数名 |`bfm_cm_fini`(`src/bfm_cm.c` 463 行目)
 |宣言 |`void bfm_cm_fini(void)`
 |処理内容 a|接続管理を畳む(`bfm_shutdown()` から呼ばれる)。使っている接続の枠はすべて `bfm_disconnect()` で切断し、write-combining で張った UAR の窓を外して、`s_gsi_ready = 0` にする。
 |引数 |なし
@@ -3428,7 +3456,7 @@ image::call_src_bfm_cm-bfm_cm_fini.drawio.svg[bfm_cm_fini() の関係図]
 [cols="1,5",options="autowidth"]
 .ctl_yield()
 |===
-|関数名 |`ctl_yield`(`src/bfm_cm.c` 459 行目)
+|関数名 |`ctl_yield`(`src/bfm_cm.c` 475 行目)
 |宣言 |`static void ctl_yield(void)`
 |処理内容 a|`g_bfm_ctl_lock` を手放し、`pause` を 64 回回ってから取り直す。REP や REQ を待つ間に、ほかのコアの接続・切断・`bfm_poll()` が鍵を取れるようにする。
 |引数 |なし
@@ -3451,22 +3479,23 @@ image::call_src_bfm_cm-ctl_yield.drawio.svg[ctl_yield() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_connect()
 |===
-|関数名 |`bfm_connect`(`src/bfm_cm.c` 466 行目)
+|関数名 |`bfm_connect`(`src/bfm_cm.c` 482 行目)
 |宣言 |`bfm_conn_t *bfm_connect(uint32_t peer_ip, const uint8_t peer_mac[6], uint16_t port, uint32_t timeout_ms)`
-|処理内容 a|相手へ接続を掛ける(掛け側)。接続の枠を取って RC QP を INIT まで作り(`conn_open()`)、相手の IP・MAC・GID を入れる。REQ を作り、REP を受けるまで `REQ_RETRY_MS`(1 秒)ごとに送り直しながら `gsi_pump()` を回す。REP を受けたら(`handle_msg()` が相手の情報を枠へ写す)QP を RTS へ進めてデータ経路に繋ぎ、`BFM_CS_UP` にする(`conn_up()`)。 接続の枠の取り外し・GSI・FW のコマンドは `g_bfm_ctl_lock` の中で行い、REP を待つ間は 1 回まわるごとに `ctl_yield()` で鍵を手放す。
+|処理内容 a|相手へ接続を掛ける(掛け側)。接続の枠を取って RC QP を INIT まで作り(`conn_open()`)、相手の IP・MAC・GID を入れる。相手の MAC が全部 0(知らない)なら ff:ff:ff:ff:ff:ff にして、REQ を同報で送る。REQ を作り、REP を受けるまで `REQ_RETRY_MS`(1 秒)ごとに送り直しながら `gsi_pump()` を回す。REP を受けたら(`handle_msg()` が相手の情報を枠へ写す)QP を RTS へ進めてデータ経路に繋ぎ、`BFM_CS_UP` にする(`conn_up()`)。 接続の枠の取り外し・GSI・FW のコマンドは `g_bfm_ctl_lock` の中で行い、REP を待つ間は 1 回まわるごとに `ctl_yield()` で鍵を手放す。
 |引数 a|
 [cols="2,1,4"]
 !===
 !型 !名称 !意味
 !`uint32_t` !`peer_ip` !相手の IPv4 アドレス。0 なら `g_bfm_peer_ip`
-!`const uint8_t [6]` !`peer_mac` !相手の MAC(6 バイト)。NULL なら `g_bfm_peer_mac`
+!`const uint8_t [6]` !`peer_mac` !相手の MAC(6 バイト)。NULL なら `g_bfm_peer_mac`。全部 0 なら自動(REQ を同報で送り、REP から取る)
 !`uint16_t` !`port` !相手の待ち受けの番号。0 なら `g_bfm_cm_port`
 !`uint32_t` !`timeout_ms` !REP を待つ時間の上限(ミリ秒)。0 なら `REQ_TIMEOUT_MS`(5 秒)
 !===
 |戻り値 a|接続(`bfm_conn_t *`)。失敗したら NULL(接続管理が用意されていない、相手の IP が無い、枠が無い、QP の失敗、REP が来ない、送信の失敗)。
 |前提条件 a|`bfm_init()` の後であること。`peer_mac` が NULL でなければ 6 バイトを指すこと。どのコアから同時に呼んでもよい。
 |注意事項 a|* REQ は最初に 1 度作り、送り直しでも同じものを送る。
-* 相手の MAC・IP は引数(または設定の値)のものを入れるが、REP を受けると `take_peer()` が REP の中身で上書きする。
+* 相手の MAC・IP は引数(または設定の値)のものを入れるが、REP を受けると `take_peer()` が REP の中身で上書きする。同報で送った場合も、RC QP と BYE には REP に入った相手の MAC を使う。
+* 同報が届かない網(L2 を越える経路)では、相手の MAC を渡すこと。
 * 失敗したときは相手へ何も送らずに(BYE も送らない)枠を返す(`conn_release()`)。
 * REP を待つ間の `gsi_pump()` の戻り値は見ない。
 |使用関数 a|* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
@@ -3474,6 +3503,8 @@ image::call_src_bfm_cm-ctl_yield.drawio.svg[ctl_yield() の関係図]
 * <<src_bfm_cm-conn_open,`conn_open()`>>
 * <<src_bfm_internal-bfm_unlock,`bfm_unlock()`>>
 * `memcpy()`(外部)
+* <<src_bfm_cm-mac_is_zero,`mac_is_zero()`>>
+* `memset()`(外部)
 * <<src_mlx5_hca-mlx5_gid_from_ipv4,`mlx5_gid_from_ipv4()`>>
 * <<src_bfm_cm-build_msg,`build_msg()`>>
 * `bfm_port_time_ns()`(<<port_linux_vfio_port_linux-bfm_port_time_ns,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_time_ns,VxWorks 版>>)
@@ -3496,7 +3527,7 @@ image::call_src_bfm_cm-bfm_connect.drawio.svg[bfm_connect() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_accept()
 |===
-|関数名 |`bfm_accept`(`src/bfm_cm.c` 512 行目)
+|関数名 |`bfm_accept`(`src/bfm_cm.c` 529 行目)
 |宣言 |`bfm_conn_t *bfm_accept(uint16_t port, uint32_t timeout_ms)`
 |処理内容 a|相手からの接続を受ける(受け側)。`g_bfm_ctl_lock` を取り、`gsi_pump()` を回しながら、`handle_msg()` が取っておいた REQ のうち待ち受けの番号が `port` のものを `req_take()` で待つ(1 回まわるごとに `ctl_yield()` で鍵を手放す)。REQ が来たら接続の枠を取って RC QP を INIT まで作り(`conn_open()`)、REQ から相手の情報を写し(`take_peer()`)、path_mtu を自分と相手の小さい方にする。QP を RTS へ進めてデータ経路に繋いで `BFM_CS_UP` にし(`conn_up()`)、REP を送ってから鍵を返す。
 |引数 a|
@@ -3538,7 +3569,7 @@ image::call_src_bfm_cm-bfm_accept.drawio.svg[bfm_accept() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_disconnect()
 |===
-|関数名 |`bfm_disconnect`(`src/bfm_cm.c` 548 行目)
+|関数名 |`bfm_disconnect`(`src/bfm_cm.c` 565 行目)
 |宣言 |`int bfm_disconnect(bfm_conn_t *c)`
 |処理内容 a|接続を切って枠を返す(`g_bfm_ctl_lock` の中で)。接続が `BFM_CS_UP` か `BFM_CS_ERROR` なら、相手へ BYE を送り、送信の完了を最大 `TX_DRAIN_MS`(100 ミリ秒)待つ(返事は待たない)。最後に `conn_release()` で QP を壊して枠を返す。
 |引数 a|
@@ -3575,7 +3606,7 @@ image::call_src_bfm_cm-bfm_disconnect.drawio.svg[bfm_disconnect() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_cm_poll()
 |===
-|関数名 |`bfm_cm_poll`(`src/bfm_cm.c` 574 行目)
+|関数名 |`bfm_cm_poll`(`src/bfm_cm.c` 591 行目)
 |宣言 |`int bfm_cm_poll(void)`
 |処理内容 a|GSI に来たものを処理する(`gsi_pump()` を 1 回呼ぶ)。相手からの BYE で接続を閉じた扱いにし、REP が落ちたときの REQ の送り直しに REP を送り直す(どちらも `handle_msg()` が行う)。
 |引数 |なし
@@ -6722,8 +6753,8 @@ image::call_port_x86_bfm_x86-bfm_x86_report.drawio.svg[bfm_x86_report() の関�
 試験プログラム `bfmem_test`(Linux + VFIO)。動きはコマンドの引数で選ぶ。
 
 * `server`: 受け側。公開メモリを決まった模様で埋めて接続を待ち、Ctrl-\(SIGQUIT)か切断のときにデータ領域の hash を表示する。
-* `client <IP> <MAC>`: 掛け側。相手の公開メモリへ read / write / write_post / atomic を一通り出して手元の模型と突き合わせ、遅延と速さを測る。
-* `bench <IP> <MAC>`: write / read を 4B〜256KiB、多重度 1・4・8・16 で流し、IOPS・MB/s・平均遅延を表示する。
+* `client <IP> [MAC]`: 掛け側。相手の公開メモリへ read / write / write_post / atomic を一通り出して手元の模型と突き合わせ、遅延と速さを測る。
+* `bench <IP> [MAC]`: write / read を 4B〜256KiB、多重度 1・4・8・16 で流し、IOPS・MB/s・平均遅延を表示する。
 * `info`: 立ち上げて HCA の能力を表示するだけ。
 
 相手は別の機械で動かす同じプログラムの server(相手は常に bfmem)。
@@ -6735,7 +6766,7 @@ image::call_port_x86_bfm_x86-bfm_x86_report.drawio.svg[bfm_x86_report() の関�
 [cols="1,5",options="autowidth"]
 .on_sig()
 |===
-|関数名 |`on_sig`(`test/bfm_test.c` 39 行目)
+|関数名 |`on_sig`(`test/bfm_test.c` 41 行目)
 |宣言 |`static void on_sig(int s)`
 |処理内容 a|シグナルの受け口。server のとき(`g_server` が 0 以外)の SIGQUIT なら `g_dump` を、それ以外なら `g_stop` を 1 にする。
 |引数 a|
@@ -6763,7 +6794,7 @@ image::call_test_bfm_test-on_sig.drawio.svg[on_sig() の関係図]
 [cols="1,5",options="autowidth"]
 .now_ns()
 |===
-|関数名 |`now_ns`(`test/bfm_test.c` 45 行目)
+|関数名 |`now_ns`(`test/bfm_test.c` 47 行目)
 |宣言 |`static uint64_t now_ns(void)`
 |処理内容 a|`CLOCK_MONOTONIC` の今の時刻をナノ秒で返す。
 |引数 |なし
@@ -6784,7 +6815,7 @@ image::call_test_bfm_test-now_ns.drawio.svg[now_ns() の関係図]
 [cols="1,5",options="autowidth"]
 .pattern()
 |===
-|関数名 |`pattern`(`test/bfm_test.c` 52 行目)
+|関数名 |`pattern`(`test/bfm_test.c` 54 行目)
 |宣言 |`static uint8_t pattern(uint32_t i)`
 |処理内容 a|データ領域の i バイトめの初期値 `(i * 7 + 3) & 0xff` を返す。
 |引数 a|
@@ -6810,7 +6841,7 @@ image::call_test_bfm_test-pattern.drawio.svg[pattern() の関係図]
 [cols="1,5",options="autowidth"]
 .fnv1a()
 |===
-|関数名 |`fnv1a`(`test/bfm_test.c` 57 行目)
+|関数名 |`fnv1a`(`test/bfm_test.c` 59 行目)
 |宣言 |`static uint64_t fnv1a(const volatile uint8_t *p, uint32_t n)`
 |処理内容 a|p から n バイトの FNV-1a 64 の hash を計算する。
 |引数 a|
@@ -6837,7 +6868,7 @@ image::call_test_bfm_test-fnv1a.drawio.svg[fnv1a() の関係図]
 [cols="1,5",options="autowidth"]
 .parse_ip()
 |===
-|関数名 |`parse_ip`(`test/bfm_test.c` 67 行目)
+|関数名 |`parse_ip`(`test/bfm_test.c` 69 行目)
 |宣言 |`static int parse_ip(const char *s, uint32_t *out)`
 |処理内容 a|`a.b.c.d` 形式の IPv4 アドレスの文字列を、`a` を最上位の 8 ビットとする 32 ビットの値に直す。
 |引数 a|
@@ -6864,7 +6895,7 @@ image::call_test_bfm_test-parse_ip.drawio.svg[parse_ip() の関係図]
 [cols="1,5",options="autowidth"]
 .parse_mac()
 |===
-|関数名 |`parse_mac`(`test/bfm_test.c` 75 行目)
+|関数名 |`parse_mac`(`test/bfm_test.c` 77 行目)
 |宣言 |`static int parse_mac(const char *s, uint8_t mac[6])`
 |処理内容 a|`xx:xx:xx:xx:xx:xx` 形式の MAC アドレスの文字列を 6 バイトに直す。
 |引数 a|
@@ -6891,7 +6922,7 @@ image::call_test_bfm_test-parse_mac.drawio.svg[parse_mac() の関係図]
 [cols="1,5",options="autowidth"]
 .usage()
 |===
-|関数名 |`usage`(`test/bfm_test.c` 83 行目)
+|関数名 |`usage`(`test/bfm_test.c` 85 行目)
 |宣言 |`static void usage(void)`
 |処理内容 a|使い方(オプションと、server / client / bench / info の書き方)を表示する。
 |引数 |なし
@@ -6912,7 +6943,7 @@ image::call_test_bfm_test-usage.drawio.svg[usage() の関係図]
 [cols="1,5",options="autowidth"]
 .fill_area()
 |===
-|関数名 |`fill_area`(`test/bfm_test.c` 102 行目)
+|関数名 |`fill_area`(`test/bfm_test.c` 105 行目)
 |宣言 |`static void fill_area(void)`
 |処理内容 a|自分の公開メモリ(`g_bfm_mr_base`)のデータ領域 64KiB を `pattern()` の値で埋め、その後ろの atomic 語 512 個(4KiB)を 0 で埋める。
 |引数 |なし
@@ -6933,7 +6964,7 @@ image::call_test_bfm_test-fill_area.drawio.svg[fill_area() の関係図]
 [cols="1,5",options="autowidth"]
 .dump_area()
 |===
-|関数名 |`dump_area`(`test/bfm_test.c` 109 行目)
+|関数名 |`dump_area`(`test/bfm_test.c` 112 行目)
 |宣言 |`static void dump_area(const char *why)`
 |処理内容 a|自分の公開メモリのデータ領域 64KiB の hash と、atomic 語 0〜2 の中身(8 バイトの並びとリトルエンディアンとしての値)を表示する。
 |引数 a|
@@ -6960,7 +6991,7 @@ image::call_test_bfm_test-dump_area.drawio.svg[dump_area() の関係図]
 [cols="1,5",options="autowidth"]
 .run_server()
 |===
-|関数名 |`run_server`(`test/bfm_test.c` 122 行目)
+|関数名 |`run_server`(`test/bfm_test.c` 125 行目)
 |宣言 |`static int run_server(uint16_t port)`
 |処理内容 a|受け側の本体。公開メモリを埋め、接続を同時にいくつでも(接続の枠の数まで)受ける。`bfm_accept()` を短く区切って呼び(接続が無ければ 200ms、あれば 1ms)、受けた接続を表に足し、`bfm_poll()` を呼び、使えなくなった接続を `bfm_disconnect()` で返す。全部の接続が切れたら hash を表示し、埋め直して待つ。`g_stop` が立つまで繰り返す。`g_dump` が立てば hash を表示する。
 |引数 a|
@@ -6995,7 +7026,7 @@ image::call_test_bfm_test-run_server.drawio.svg[run_server() の関係図]
 [cols="1,5",options="autowidth"]
 .check()
 |===
-|関数名 |`check`(`test/bfm_test.c` 166 行目)
+|関数名 |`check`(`test/bfm_test.c` 169 行目)
 |宣言 |`static void check(const char *what, int ok)`
 |処理内容 a|検査の名前と結果(OK / NG)を表示し、NG なら `g_ng` を 1 増やす。
 |引数 a|
@@ -7022,7 +7053,7 @@ image::call_test_bfm_test-check.drawio.svg[check() の関係図]
 [cols="1,5",options="autowidth"]
 .cmp_u32()
 |===
-|関数名 |`cmp_u32`(`test/bfm_test.c` 172 行目)
+|関数名 |`cmp_u32`(`test/bfm_test.c` 175 行目)
 |宣言 |`static int cmp_u32(const void *a, const void *b)`
 |処理内容 a|`qsort()` の比較関数。2 つの `uint32_t` を比べる。
 |引数 a|
@@ -7049,7 +7080,7 @@ image::call_test_bfm_test-cmp_u32.drawio.svg[cmp_u32() の関係図]
 [cols="1,5",options="autowidth"]
 .op_write8()
 |===
-|関数名 |`op_write8`(`test/bfm_test.c` 182 行目)
+|関数名 |`op_write8`(`test/bfm_test.c` 185 行目)
 |宣言 |`static int op_write8(bfm_conn_t *c, uint32_t i)`
 |処理内容 a|相手のデータ領域の `(i & 63) * 64` へ `g_src` の先頭 8 バイトを `bfm_write()` で書く(遅延の測定用)。
 |引数 a|
@@ -7076,7 +7107,7 @@ image::call_test_bfm_test-op_write8.drawio.svg[op_write8() の関係図]
 [cols="1,5",options="autowidth"]
 .op_write64()
 |===
-|関数名 |`op_write64`(`test/bfm_test.c` 183 行目)
+|関数名 |`op_write64`(`test/bfm_test.c` 186 行目)
 |宣言 |`static int op_write64(bfm_conn_t *c, uint32_t i)`
 |処理内容 a|相手のデータ領域の `(i & 63) * 64` へ `g_src` の先頭 64 バイトを `bfm_write()` で書く(遅延の測定用)。
 |引数 a|
@@ -7103,7 +7134,7 @@ image::call_test_bfm_test-op_write64.drawio.svg[op_write64() の関係図]
 [cols="1,5",options="autowidth"]
 .op_read8()
 |===
-|関数名 |`op_read8`(`test/bfm_test.c` 184 行目)
+|関数名 |`op_read8`(`test/bfm_test.c` 187 行目)
 |宣言 |`static int op_read8(bfm_conn_t *c, uint32_t i)`
 |処理内容 a|相手のデータ領域の `(i & 63) * 64` から 8 バイトを `bfm_read()` で手元の一時領域へ読む(遅延の測定用)。
 |引数 a|
@@ -7130,7 +7161,7 @@ image::call_test_bfm_test-op_read8.drawio.svg[op_read8() の関係図]
 [cols="1,5",options="autowidth"]
 .op_read64()
 |===
-|関数名 |`op_read64`(`test/bfm_test.c` 185 行目)
+|関数名 |`op_read64`(`test/bfm_test.c` 188 行目)
 |宣言 |`static int op_read64(bfm_conn_t *c, uint32_t i)`
 |処理内容 a|相手のデータ領域の `(i & 63) * 64` から 64 バイトを `bfm_read()` で手元の一時領域へ読む(遅延の測定用)。
 |引数 a|
@@ -7157,7 +7188,7 @@ image::call_test_bfm_test-op_read64.drawio.svg[op_read64() の関係図]
 [cols="1,5",options="autowidth"]
 .op_faa()
 |===
-|関数名 |`op_faa`(`test/bfm_test.c` 186 行目)
+|関数名 |`op_faa`(`test/bfm_test.c` 189 行目)
 |宣言 |`static int op_faa(bfm_conn_t *c, uint32_t i)`
 |処理内容 a|相手の atomic 語 100〜163 のうち `100 + (i & 63)` 番めへ `bfm_faa()` で 1 を足す(遅延の測定用)。
 |引数 a|
@@ -7184,7 +7215,7 @@ image::call_test_bfm_test-op_faa.drawio.svg[op_faa() の関係図]
 [cols="1,5",options="autowidth"]
 .op_cas()
 |===
-|関数名 |`op_cas`(`test/bfm_test.c` 187 行目)
+|関数名 |`op_cas`(`test/bfm_test.c` 190 行目)
 |宣言 |`static int op_cas(bfm_conn_t *c, uint32_t i)`
 |処理内容 a|相手の atomic 語 200〜263 のうち `200 + (i & 63)` 番めへ `bfm_cas()` で比較値 1・置き換え値 2 の CAS を出す(遅延の測定用)。
 |引数 a|
@@ -7211,7 +7242,7 @@ image::call_test_bfm_test-op_cas.drawio.svg[op_cas() の関係図]
 [cols="1,5",options="autowidth"]
 .op_faa32()
 |===
-|関数名 |`op_faa32`(`test/bfm_test.c` 188 行目)
+|関数名 |`op_faa32`(`test/bfm_test.c` 191 行目)
 |宣言 |`static int op_faa32(bfm_conn_t *c, uint32_t i)`
 |処理内容 a|相手の公開メモリの `ATOM_OFF + 8 * 300` からの 4 バイトの語 64 個のうち `i & 63` 番めへ `bfm_faa32()` で 1 を足す(遅延の測定用)。
 |引数 a|
@@ -7238,7 +7269,7 @@ image::call_test_bfm_test-op_faa32.drawio.svg[op_faa32() の関係図]
 [cols="1,5",options="autowidth"]
 .op_cas32()
 |===
-|関数名 |`op_cas32`(`test/bfm_test.c` 189 行目)
+|関数名 |`op_cas32`(`test/bfm_test.c` 192 行目)
 |宣言 |`static int op_cas32(bfm_conn_t *c, uint32_t i)`
 |処理内容 a|相手の公開メモリの `ATOM_OFF + 8 * 400` からの 4 バイトの語 64 個のうち `i & 63` 番めへ `bfm_cas32()` で比較値 1・置き換え値 2 の CAS を出す(遅延の測定用)。
 |引数 a|
@@ -7265,7 +7296,7 @@ image::call_test_bfm_test-op_cas32.drawio.svg[op_cas32() の関係図]
 [cols="1,5",options="autowidth"]
 .lat()
 |===
-|関数名 |`lat`(`test/bfm_test.c` 191 行目)
+|関数名 |`lat`(`test/bfm_test.c` 194 行目)
 |宣言 |`static void lat(bfm_conn_t *c, const char *name, op_fn fn, uint32_t n)`
 |処理内容 a|操作 fn を 1 個ずつ完了まで待つ形で n 回流し、1 回ごとの遅延の中央値・平均・最小・p99・p99.9 を表示する。先に `n / 10 + 100` 回を暖機として流す。
 |引数 a|
@@ -7306,7 +7337,7 @@ image::call_test_bfm_test-lat.drawio.svg[lat() の関係図]
 [cols="1,5",options="autowidth"]
 .run_client()
 |===
-|関数名 |`run_client`(`test/bfm_test.c` 215 行目)
+|関数名 |`run_client`(`test/bfm_test.c` 218 行目)
 |宣言 |`static int run_client(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t iters, int oob)`
 |処理内容 a|掛け側の本体。相手へ接続し、手元に公開メモリのデータ領域の模型を持って、次の検査をして結果を表示する。
 
@@ -7374,7 +7405,7 @@ image::call_test_bfm_test-run_client.drawio.svg[run_client() の関係図]
 [cols="1,5",options="autowidth"]
 .crc16_bitwise()
 |===
-|関数名 |`crc16_bitwise`(`test/bfm_test.c` 412 行目)
+|関数名 |`crc16_bitwise`(`test/bfm_test.c` 415 行目)
 |宣言 |`static uint16_t crc16_bitwise(const uint8_t *p, uint32_t n)`
 |処理内容 a|CRC16(T10-DIF、多項式 0x8BB7、初期値 0)をビットごとに計算する。ライブラリの表引き(`crc16()`)とは別の書き方で期待値を作るため。
 |引数 a|
@@ -7401,7 +7432,7 @@ image::call_test_bfm_test-crc16_bitwise.drawio.svg[crc16_bitwise() の関係図]
 [cols="1,5",options="autowidth"]
 .dif_make()
 |===
-|関数名 |`dif_make`(`test/bfm_test.c` 424 行目)
+|関数名 |`dif_make`(`test/bfm_test.c` 427 行目)
 |宣言 |`static void dif_make(const uint8_t *plain, uint8_t *out, uint16_t app, uint32_t ref)`
 |処理内容 a|`plain`(512 バイトおきの `DIF_N` ブロック)から、PI つき(520 バイトおき)の期待値を `out` に作る。guard は `crc16_bitwise()`、app tag は `app`、ref tag は `ref + ブロックの番号`(どれもビッグエンディアン)。
 |引数 a|
@@ -7431,7 +7462,7 @@ image::call_test_bfm_test-dif_make.drawio.svg[dif_make() の関係図]
 [cols="1,5",options="autowidth"]
 .dif_what()
 |===
-|関数名 |`dif_what`(`test/bfm_test.c` 437 行目)
+|関数名 |`dif_what`(`test/bfm_test.c` 440 行目)
 |宣言 |`static const char *dif_what(uint8_t w)`
 |処理内容 a|誤りの種類(`BFM_DIF_CHK_*`)を表示用の名前(guard / app / ref)にする。
 |引数 a|
@@ -7457,7 +7488,7 @@ image::call_test_bfm_test-dif_what.drawio.svg[dif_what() の関係図]
 [cols="1,5",options="autowidth"]
 .dif_expect_err()
 |===
-|関数名 |`dif_expect_err`(`test/bfm_test.c` 443 行目)
+|関数名 |`dif_expect_err`(`test/bfm_test.c` 446 行目)
 |宣言 |`static void dif_expect_err(const char *name, int rc, const bfm_dif_err_t *e, uint32_t block, uint8_t what)`
 |処理内容 a|DIF の操作が期待どおりの誤り(`BFM_E_DIF`、ブロック `block`、種類 `what`)を返したかを確かめて、`check()` で表示する。表示には実際の種類・ブロック・あるべき値・実際の値(誤りでなければ戻り値)を添える。
 |引数 a|
@@ -7490,7 +7521,7 @@ image::call_test_bfm_test-dif_expect_err.drawio.svg[dif_expect_err() の関係�
 [cols="1,5",options="autowidth"]
 .dif_tests()
 |===
-|関数名 |`dif_tests`(`test/bfm_test.c` 455 行目)
+|関数名 |`dif_tests`(`test/bfm_test.c` 458 行目)
 |宣言 |`static void dif_tests(bfm_conn_t *c, uint8_t mode)`
 |処理内容 a|[8] の検査を `mode`(SW か HW)で一通り行う。乱数のデータ `DIF_N` ブロックで、write INSERT(相手の R1 に PI つき)→ read CHECK → read CHECK_SWAP → read CHECK_DELETE、次のデータで write CHECK → write CHECK_SWAP → write CHECK_DELETE(相手の R2 に PI なし)→ read INSERT の 8 通りを、相手のメモリを `bfm_read()` で読んだものや手元の結果と、`dif_make()` で独立に作った期待値と比べる。その後、誤りの検出(write のブロック 200 の guard、期待する ref tag のずれ、相手のメモリのブロック 150 の app tag)と、誤りの後に app tag を検査しなければ読めることを確かめる。
 |引数 a|
@@ -7528,7 +7559,7 @@ image::call_test_bfm_test-dif_tests.drawio.svg[dif_tests() の関係図]
 [cols="1,5",options="autowidth"]
 .dif_async_tests()
 |===
-|関数名 |`dif_async_tests`(`test/bfm_test.c` 565 行目)
+|関数名 |`dif_async_tests`(`test/bfm_test.c` 568 行目)
 |宣言 |`static void dif_async_tests(bfm_conn_t *c, uint8_t mode)`
 |処理内容 a|[8] 起動と完了確認を分けた使い方を確かめる。
 
@@ -7569,7 +7600,7 @@ image::call_test_bfm_test-dif_async_tests.drawio.svg[dif_async_tests() の関係
 [cols="1,5",options="autowidth"]
 .dif_tput()
 |===
-|関数名 |`dif_tput`(`test/bfm_test.c` 616 行目)
+|関数名 |`dif_tput`(`test/bfm_test.c` 619 行目)
 |宣言 |`static void dif_tput(bfm_conn_t *c, uint8_t mode, uint8_t op, int is_read, uint32_t reps)`
 |処理内容 a|DIF のスループットを測る。`DIF_N` ブロックずつの `bfm_dif_write()` / `bfm_dif_read()`(相手は R1)を `reps` 回続け、データ 512 バイト分で数えた MB/s と 1 回の時間を表示する。
 |引数 a|
@@ -7604,7 +7635,7 @@ image::call_test_bfm_test-dif_tput.drawio.svg[dif_tput() の関係図]
 [cols="1,5",options="autowidth"]
 .dif_lat()
 |===
-|関数名 |`dif_lat`(`test/bfm_test.c` 644 行目)
+|関数名 |`dif_lat`(`test/bfm_test.c` 647 行目)
 |宣言 |`static void dif_lat(bfm_conn_t *c, uint8_t mode, uint8_t op, int is_read, uint32_t n)`
 |処理内容 a|DIF の操作 `op` を 8 ブロック(4KiB)ずつ 1 回ごとに完了を待つ形で `n` 回流し(先に 100 回を暖機)、遅延の中央値と p99 を表示する。相手のメモリは R1(520 バイトおき)を使う。
 |引数 a|
@@ -7642,7 +7673,7 @@ image::call_test_bfm_test-dif_lat.drawio.svg[dif_lat() の関係図]
 [cols="1,5",options="autowidth"]
 .run_dif()
 |===
-|関数名 |`run_dif`(`test/bfm_test.c` 674 行目)
+|関数名 |`run_dif`(`test/bfm_test.c` 677 行目)
 |宣言 |`static void run_dif(bfm_conn_t *c, uint32_t iters)`
 |処理内容 a|[8] T10-DIF の検査をまとめて行う。SW で `dif_tests()` と `dif_async_tests()`(起動と完了確認を分けた使い方)を行い、オフロードを使えれば HW でも行う。使えなければ、`BFM_DIF_HW` が `BFM_E_NOTSUP` を返すことを確かめる。NG が無ければ、DIF の遅延(write INSERT・write CHECK・read CHECK・read CHECK_DELETE、4KiB)と、同じ 4 通りの DIF_N ブロックずつのスループットを SW と(使えれば)HW で測る。
 |引数 a|
@@ -7679,7 +7710,7 @@ image::call_test_bfm_test-run_dif.drawio.svg[run_dif() の関係図]
 [cols="1,5",options="autowidth"]
 .mt_fail()
 |===
-|関数名 |`mt_fail`(`test/bfm_test.c` 753 行目)
+|関数名 |`mt_fail`(`test/bfm_test.c` 756 行目)
 |宣言 |`static void mt_fail(struct mt_arg *a, const char *what, int rc)`
 |処理内容 a|スレッドの NG を数え、最初の NG だけ理由(`what` と `rc` の説明)を `a->why` に残す。
 |引数 a|
@@ -7708,7 +7739,7 @@ image::call_test_bfm_test-mt_fail.drawio.svg[mt_fail() の関係図]
 [cols="1,5",options="autowidth"]
 .mt_poller()
 |===
-|関数名 |`mt_poller`(`test/bfm_test.c` 758 行目)
+|関数名 |`mt_poller`(`test/bfm_test.c` 761 行目)
 |宣言 |`static void *mt_poller(void *p)`
 |処理内容 a|mt の間ずっと `bfm_poll()` を 200µs ごとに呼び続ける(鍵を取る側を、データ経路と同時に動かす)。`g_mt_poll_stop` が立つと終わる。
 |引数 a|
@@ -7735,7 +7766,7 @@ image::call_test_bfm_test-mt_poller.drawio.svg[mt_poller() の関係図]
 [cols="1,5",options="autowidth"]
 .mt_check()
 |===
-|関数名 |`mt_check`(`test/bfm_test.c` 768 行目)
+|関数名 |`mt_check`(`test/bfm_test.c` 771 行目)
 |宣言 |`static void mt_check(struct mt_arg *a)`
 |処理内容 a|[1][2] スレッドの区画(`MT_OFF` + 番号 × `MT_SPAN`)で、4KiB の write と read での読み戻しを 64 回、8 バイトの write と read での読み戻しを 1000 回行い、違えば NG にする。
 |引数 a|
@@ -7765,7 +7796,7 @@ image::call_test_bfm_test-mt_check.drawio.svg[mt_check() の関係図]
 [cols="1,5",options="autowidth"]
 .mt_dif()
 |===
-|関数名 |`mt_dif`(`test/bfm_test.c` 793 行目)
+|関数名 |`mt_dif`(`test/bfm_test.c` 796 行目)
 |宣言 |`static void mt_dif(struct mt_arg *a)`
 |処理内容 a|[4] スレッドの区画 + 8KiB に、`MT_DIF_N` ブロックを T10-DIF(SW)で書いて読み戻す。write INSERT を `bfm_dif_write_start()` で起動して `bfm_dif_poll()` を終わるまで回し、read CHECK_DELETE を `bfm_dif_read_start()` で起動して `bfm_dif_wait()` で待つ。元のデータに戻らなければ NG。
 |引数 a|
@@ -7797,7 +7828,7 @@ image::call_test_bfm_test-mt_dif.drawio.svg[mt_dif() の関係図]
 [cols="1,5",options="autowidth"]
 .mt_worker()
 |===
-|関数名 |`mt_worker`(`test/bfm_test.c` 822 行目)
+|関数名 |`mt_worker`(`test/bfm_test.c` 825 行目)
 |宣言 |`static void *mt_worker(void *p)`
 |処理内容 a|mt のスレッド 1 本。CPU に固定し、全スレッドがそろってから同時に `bfm_connect()` で自分の接続を作る。スレッド 0 が共有の語を 0 にした後、[1][2](`mt_check()`)、[3] 共有の語への FAA を `g_mt_n` 回、[4](`mt_dif()`)を行う。スレッド 0 が共有の語を読んだ後、全スレッドで同時に 8 バイトの write / read / FAA(自分の語)を `g_mt_n` 回ずつ打って時間を測り、最後に全スレッドで同時に切断する。
 |引数 a|
@@ -7838,7 +7869,7 @@ image::call_test_bfm_test-mt_worker.drawio.svg[mt_worker() の関係図]
 [cols="1,5",options="autowidth"]
 .run_mt()
 |===
-|関数名 |`run_mt`(`test/bfm_test.c` 870 行目)
+|関数名 |`run_mt`(`test/bfm_test.c` 873 行目)
 |宣言 |`static int run_mt(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t nthreads, uint32_t n)`
 |処理内容 a|mt の本体。`bfm_poll()` を回すスレッド(`mt_poller()`)と `nthreads` 本の `mt_worker()` を作って終わるのを待ち、全スレッドが接続できたか、[1][2][4] で NG のスレッドが無いか、[3] 共有の語への FAA の合計が `n` × `nthreads` かを確かめる。NG が無ければ、write / read / FAA の合計の速さ(全スレッドの回数 ÷ 最も遅いスレッドの時間)・1 本あたりの速さ・1 回の時間を表示する。
 |引数 a|
@@ -7876,7 +7907,7 @@ image::call_test_bfm_test-run_mt.drawio.svg[run_mt() の関係図]
 [cols="1,5",options="autowidth"]
 .rdtsc()
 |===
-|関数名 |`rdtsc`(`test/bfm_test.c` 938 行目)
+|関数名 |`rdtsc`(`test/bfm_test.c` 941 行目)
 |宣言 |`static uint64_t rdtsc(void)`
 |処理内容 a|`rdtsc` 命令で CPU のタイムスタンプカウンタを読む。
 |引数 |なし
@@ -7897,7 +7928,7 @@ image::call_test_bfm_test-rdtsc.drawio.svg[rdtsc() の関係図]
 [cols="1,5",options="autowidth"]
 .tsc_calibrate()
 |===
-|関数名 |`tsc_calibrate`(`test/bfm_test.c` 945 行目)
+|関数名 |`tsc_calibrate`(`test/bfm_test.c` 948 行目)
 |宣言 |`static void tsc_calibrate(void)`
 |処理内容 a|200ms 眠る前後の `now_ns()` と `rdtsc()` の差から、1 ナノ秒あたりのカウンタの数 `g_tsc_per_ns` を求める。
 |引数 |なし
@@ -7920,7 +7951,7 @@ image::call_test_bfm_test-tsc_calibrate.drawio.svg[tsc_calibrate() の関係図]
 [cols="1,5",options="autowidth"]
 .bench_one()
 |===
-|関数名 |`bench_one`(`test/bfm_test.c` 957 行目)
+|関数名 |`bench_one`(`test/bfm_test.c` 960 行目)
 |宣言 |`static int bench_one(bfm_conn_t *c, int is_read, uint32_t size, uint32_t qd, uint32_t n)`
 |処理内容 a|write(is_read = 0)か read(is_read = 1)を size バイトで n 回、常に qd 個を出しておく形で流し、IOPS・MB/s・平均遅延を 1 行表示する。1 回ごとに完了通知を求め(完了は出した順に来る)、出してから完了を拾うまでを遅延とする。相手のアドレスは size ずつずらし、相手の公開メモリの中の最大 1024 か所を回る。
 |引数 a|
@@ -7958,7 +7989,7 @@ image::call_test_bfm_test-bench_one.drawio.svg[bench_one() の関係図]
 [cols="1,5",options="autowidth"]
 .run_bench()
 |===
-|関数名 |`run_bench`(`test/bfm_test.c` 994 行目)
+|関数名 |`run_bench`(`test/bfm_test.c` 997 行目)
 |宣言 |`static int run_bench(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t n)`
 |処理内容 a|bench の本体。相手へ接続し、write と read のそれぞれについて、大きさ 4・8・32・64・128・256・512・8192・65536・262144 バイトと多重度 1・4・8・16 の組を `bench_one()` で n 回ずつ流す。
 |引数 a|
@@ -7995,7 +8026,7 @@ image::call_test_bfm_test-run_bench.drawio.svg[run_bench() の関係図]
 [cols="1,5",options="autowidth"]
 .main()
 |===
-|関数名 |`main`(`test/bfm_test.c` 1020 行目)
+|関数名 |`main`(`test/bfm_test.c` 1023 行目)
 |宣言 |`int main(int argc, char **argv)`
 |処理内容 a|オプションを読んで設定の変数を決め、シグナルの受け口を登録し、ライブラリを立ち上げて、引数の動き(server / client / bench / mt / info)を行い、ライブラリを止める。
 
@@ -8020,7 +8051,8 @@ image::call_test_bfm_test-run_bench.drawio.svg[run_bench() の関係図]
 |前提条件 a|特になし。
 |注意事項 a|* `bfm_init()` の前に `g_server` を決める(server のときだけ SIGQUIT で hash を出し、それ以外では SIGQUIT も止める合図になる。`on_sig()`)。
 * bench のときは `bfm_init()` の前に `g_bfm_stage_size` を `BENCH_QD_MAX * BENCH_SIZE_MAX`(4MiB)にし、中継バッファが大きいので接続の枠を 1 つにする(`g_bfm_max_conn = 1`)。
-* client / bench / mt で相手の IP と MAC が足りないときは、info の判定へ進み、使い方を表示して 2 を返す。
+* client / bench / mt で相手の MAC を省いたときは、全部 0 の MAC を渡す(`bfm_connect()` が REQ を同報で送り、相手の MAC を REP から取る)。
+* client / bench / mt で相手の IP が無いときは、info の判定へ進み、使い方を表示して 2 を返す。
 * `-h` と知らないオプションは使い方を表示して 2 を返す。
 |使用関数 a|* `getopt()`(外部)
 * <<test_bfm_test-parse_ip,`parse_ip()`>>

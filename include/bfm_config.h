@@ -110,7 +110,8 @@ extern uint32_t g_bfm_local_ip;
 extern uint8_t g_bfm_local_mac[6];
 
 /* 既定の相手(bfm_connect() の peer_ip が 0 / peer_mac が NULL のときに使う)。
- * ARP を使わないので、掛け側は相手の MAC が必ず要る(受け側は REQ に入った MAC を使う)。 */
+ * 相手の MAC が全部 0 なら自動(REQ を同報で送り、REP に入った MAC を使う)。
+ * 同報が届かない網(L2 を越える経路など)では相手の MAC を書く。受け側は REQ に入った MAC を使う。 */
 extern uint32_t g_bfm_peer_ip;
 extern uint8_t  g_bfm_peer_mac[6];
 
