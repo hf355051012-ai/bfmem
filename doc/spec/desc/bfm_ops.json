@@ -672,7 +672,7 @@
     {
       "func": "bfm_strerror",
       "summary": "ライブラリの戻り値を、表示用の説明の文字列に直す。",
-      "args": {"rc": "ライブラリの戻り値(`BFM_OK` / `BFM_E_*`)"},
+      "args": {"rc": "ライブラリの戻り値(`BFM_OK` / `BFM_E_*` / `BFM_INPROGRESS`)"},
       "ret": "説明の文字列(静的な文字列)。知らない値は `\"?\"`。",
       "pre": "特になし。",
       "notes": "特になし。",
@@ -690,7 +690,7 @@
           {"case": "BFM_E_DIF", "body": [{"return": "\"T10-DIF の検査で誤り\""}]},
           {"case": "BFM_E_NOTSUP", "body": [{"return": "\"装置が対応していない\""}]},
           {"case": "BFM_E_BUSY", "body": [{"return": "\"前の T10-DIF の転送が終わっていない\""}]},
-          {"case": "BFM_DIF_INPROGRESS", "body": [{"return": "\"T10-DIF の転送の途中\""}]},
+          {"case": "BFM_INPROGRESS", "body": [{"return": "\"途中(もう一度呼ぶと先へ進む)\""}]},
           {"default": true, "body": [{"return": "\"?\""}]}
         ]}
       ]

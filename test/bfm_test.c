@@ -99,6 +99,44 @@ static void usage(void)
 }
 
 /* ---------------------------------------------------------------------
+ * 待ちを返す関数を最後まで進める(BFM_INPROGRESS の間、少し眠っては呼び直す)
+ * ------------------------------------------------------------------- */
+
+/* 呼び直すまでの合間(本番ではここでほかの仕事をする)。 */
+static void idle(void)
+{
+    usleep(50);
+}
+
+static int do_init(void)
+{
+    int rc;
+    while ((rc = bfm_init()) == BFM_INPROGRESS) idle();
+    return rc;
+}
+
+static void do_shutdown(void)
+{
+    while (bfm_shutdown() == BFM_INPROGRESS) idle();
+}
+
+/* 接続する。失敗なら NULL(理由は bfmem が表示する)。 */
+static bfm_conn_t *do_connect(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t ms)
+{
+    bfm_conn_t *c = NULL;
+    int rc;
+    while ((rc = bfm_connect(&c, ip, mac, port, ms)) == BFM_INPROGRESS) idle();
+    return (rc == BFM_OK) ? c : NULL;
+}
+
+static int do_disconnect(bfm_conn_t *c)
+{
+    int rc;
+    while ((rc = bfm_disconnect(c)) == BFM_INPROGRESS) idle();
+    return rc;
+}
+
+/* ---------------------------------------------------------------------
  * server
  * ------------------------------------------------------------------- */
 
@@ -128,14 +166,21 @@ static int run_server(uint16_t port)
         printf("server: 公開メモリが小さすぎる\n");
         return 1;
     }
-    /* 接続を同時にいくつでも(接続の枠の数まで)受ける。全部が切れたら hash を出して埋め直す。 */
+    /* 接続を同時にいくつでも(接続の枠の数まで)受ける。全部が切れたら hash を出して埋め直す。
+     * 受け付けの途中の枠(pending)を 1 つ持ち、回るたびに bfm_accept() で進める。 */
     static bfm_conn_t *conns[BFM_MAX_CONN];
+    bfm_conn_t *pending = NULL;
     unsigned n = 0;
     fill_area();
     printf("server: ポート %u で接続を待つ(Ctrl-C で終わる、Ctrl-\\ で hash)\n", port);
     while (!g_stop) {
-        bfm_conn_t *c = (n < g_bfm.nconn) ? bfm_accept(port, n ? 1u : 200u) : NULL;
-        if (c) conns[n++] = c;
+        if (n < g_bfm.nconn) {                     /* 受け付けの途中の枠も含めて枠の数まで */
+            const int rc = bfm_accept(&pending, port, 0);
+            if (rc == BFM_OK) {
+                conns[n++] = pending;
+                pending = NULL;
+            }
+        }
         (void)bfm_poll();
         if (g_dump) { g_dump = 0; dump_area("要求"); }
         unsigned k = 0;
@@ -144,7 +189,7 @@ static int run_server(uint16_t port)
             if (bfm_is_up(conns[i])) {
                 conns[k++] = conns[i];
             } else {
-                (void)bfm_disconnect(conns[i]);
+                (void)do_disconnect(conns[i]);
                 closed = 1;
             }
         }
@@ -154,9 +199,10 @@ static int run_server(uint16_t port)
             fill_area();
             printf("server: ポート %u で接続を待つ(Ctrl-C で終わる、Ctrl-\\ で hash)\n", port);
         }
-        if (n == g_bfm.nconn) usleep(1000);
+        usleep(n == g_bfm.nconn ? 1000 : 50);
     }
-    for (unsigned i = 0; i < n; i++) (void)bfm_disconnect(conns[i]);
+    if (pending != NULL) (void)do_disconnect(pending);
+    for (unsigned i = 0; i < n; i++) (void)do_disconnect(conns[i]);
     return 0;
 }
 
@@ -217,13 +263,13 @@ static void run_dif(bfm_conn_t *c, uint32_t iters);
 
 static int run_client(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t iters, int oob)
 {
-    bfm_conn_t *c = bfm_connect(ip, mac, port, 0);
+    bfm_conn_t *c = do_connect(ip, mac, port, 0);
     if (c == NULL) return 1;
     printf("client: 相手の公開メモリ %llu バイト、BlueFlame %s、inline %u バイトまで\n",
            (unsigned long long)bfm_remote_size(c), bfm_bf_active(c) ? "あり" : "なし", bfm_inline_max());
     if (bfm_remote_size(c) < AREA_BYTES) {
         printf("client: 相手の公開メモリが小さすぎる(%u バイト要る)\n", AREA_BYTES);
-        bfm_disconnect(c);
+        (void)do_disconnect(c);
         return 1;
     }
     for (uint32_t i = 0; i < DATA_BYTES; i++) g_model[i] = pattern(i);
@@ -380,7 +426,7 @@ static int run_client(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t
         check("[7] 公開メモリの外を読むと相手が断る(REMOTE_ACCESS)", rc == BFM_E_REMOTE);
     }
     printf("client: 結果 %s(NG %d 件)\n", g_ng ? "NG" : "OK", g_ng);
-    (void)bfm_disconnect(c);
+    (void)do_disconnect(c);
     return g_ng ? 1 : 0;
 }
 
@@ -832,7 +878,7 @@ static void *mt_worker(void *p)
     (void)pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
 
     pthread_barrier_wait(&g_mt_bar);                         /* 全スレッドで同時に接続する */
-    a->c = bfm_connect(a->ip, a->mac, a->port, 20000u);
+    a->c = do_connect(a->ip, a->mac, a->port, 20000u);
     if (a->c == NULL) mt_fail(a, "接続できない", 0);
     pthread_barrier_wait(&g_mt_bar);
     int rc;
@@ -866,7 +912,7 @@ static void *mt_worker(void *p)
         a->ns[ph] = now_ns() - t0;
     }
     pthread_barrier_wait(&g_mt_bar);                         /* 全スレッドで同時に切断する */
-    if (a->c && bfm_disconnect(a->c) != BFM_OK) mt_fail(a, "切断", 0);
+    if (a->c && do_disconnect(a->c) != BFM_OK) mt_fail(a, "切断", 0);
     return NULL;
 }
 
@@ -998,7 +1044,7 @@ static int run_bench(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t 
 {
     static const uint32_t sizes[] = { 4, 8, 32, 64, 128, 256, 512, 8192, 65536, 262144 };
     static const uint32_t qds[] = { 1, 4, 8, 16 };
-    bfm_conn_t *c = bfm_connect(ip, mac, port, 0);
+    bfm_conn_t *c = do_connect(ip, mac, port, 0);
     if (c == NULL) return 1;
     tsc_calibrate();
     for (unsigned i = 0; i < sizeof(g_src); i++) g_src[i] = (uint8_t)(0x5a ^ i);
@@ -1016,7 +1062,7 @@ static int run_bench(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t 
         for (unsigned s = 0; s < sizeof(sizes) / sizeof(sizes[0]) && !ng; s++)
             for (unsigned q = 0; q < sizeof(qds) / sizeof(qds[0]) && !ng; q++)
                 if (bench_one(c, is_read, sizes[s], qds[q], n) != 0) ng = 1;
-    (void)bfm_disconnect(c);
+    (void)do_disconnect(c);
     return ng;
 }
 
@@ -1057,7 +1103,7 @@ int main(int argc, char **argv)
         g_bfm_stage_size = BENCH_QD_MAX * BENCH_SIZE_MAX;   /* 多重度ぶんの着地点 / 送り元 */
         g_bfm_max_conn = 1;                                 /* 中継バッファが大きいので枠は 1 つだけ */
     }
-    if (bfm_init() != BFM_OK) return 1;
+    if (do_init() != BFM_OK) return 1;
     int ret = 0;
     if (strcmp(mode, "server") == 0) {
         ret = run_server(port);
@@ -1085,6 +1131,6 @@ int main(int argc, char **argv)
         usage();
         ret = 2;
     }
-    bfm_shutdown();
+    do_shutdown();
     return ret;
 }

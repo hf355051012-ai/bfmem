@@ -28,8 +28,11 @@
  * 受け取ったメッセージは gsi_pump() がその場で処理する(REP はその接続の枠へ写し、BYE は
  * 接続を閉じた扱いにし、REQ は bfm_accept() のために接続の枠の数まで取っておく)。
  *
- * 複数のコアから呼べるように、GSI・接続の枠の取り外し・FW のコマンドは g_bfm_ctl_lock の中で行う。
- * REP や REQ を待つ間は、1 回まわるごとに鍵を手放す(ほかのコアの接続・切断・bfm_poll() を止めない)。 */
+ * 接続の確立と切断は、接続の枠ごとの状態機械(conn_step())で進める。待つところ(FW の
+ * コマンドの完了・REQ / REP の到着・GSI の送信の空き)では待たずに BFM_INPROGRESS を返し、
+ * bfm_connect() / bfm_accept() / bfm_disconnect() を呼び直すたびに先へ進む。
+ * 複数のコアから呼べるように、GSI・接続の枠の取り外し・FW のコマンドは g_bfm_ctl_lock の中で行う
+ * (1 回の呼び出しの間だけ持つ)。 */
 #include "bfm_internal.h"
 
 #include <string.h>
@@ -43,7 +46,24 @@
 #define REQ_RETRY_MS      1000u       /* REP が来なければ REQ を送り直す間隔 */
 #define REQ_TIMEOUT_MS    5000u       /* bfm_connect() の timeout_ms = 0 のときの上限 */
 #define REQ_STALE_MS      2000u       /* これより古い REQ は掛け側があきらめたとみなして捨てる */
-#define TX_DRAIN_MS       100u        /* BYE が出ていくのを待つ上限 */
+#define TX_DRAIN_MS       100u        /* BYE を出す・出ていくのを待つ上限 */
+
+/* 接続の枠の状態機械の手順(struct bfm_conn の step)。 */
+enum {
+    K_IDLE = 0,       /* 使っていない(state = BFM_CS_FREE)*/
+    K_WAIT_REQ,       /* 受け側: REQ を待つ */
+    K_CQ,             /* CREATE_CQ */
+    K_QP,             /* CREATE_QP */
+    K_INIT,           /* RST2INIT_QP */
+    K_WAIT_REP,       /* 掛け側: REQ を送り(送り直し)、REP を待つ */
+    K_RTR,            /* INIT2RTR_QP */
+    K_RTS,            /* RTR2RTS_QP(atomic_mode が断られたら付けずにもう一度)*/
+    K_REP,            /* 受け側: REP を送る */
+    K_UP,             /* 使える */
+    K_BYE,            /* 畳む: 相手へ BYE を送る */
+    K_DESTROY         /* 畳む: QP と CQ を消して枠を空ける */
+};
+enum { ROLE_CONNECT = 1, ROLE_ACCEPT = 2 };
 
 struct bfm_conn g_bfm_conn[BFM_MAX_CONN];   /* 接続の枠(使うのは先頭の g_bfm.nconn 個)*/
 
@@ -156,20 +176,17 @@ static void gsi_post_recv(void)
 
 /*=================================================================
  * メッセージ(MSG_SIZE バイト)を相手の QP1 へ送る。UD の WQE は
- * ctrl(16)+ datagram(48)+ data(16)で 2 WQEBB。
+ * ctrl(16)+ datagram(48)+ data(16)で 2 WQEBB。送信の置き場が全部使われていれば、
+ * GSI の CQ を 1 回読んでも空かなければ、待たずに BFM_INPROGRESS を返す(呼び出し側が後で送り直す)。
  * ===============================================================*/
 static int gsi_send(const uint8_t *msg, const struct bfm_conn *c)
 {
-    const uint64_t t0 = bfm_port_time_ns();
-    while (s_tx_outstanding >= BFM_GSI_TXBUFS) {
+    if (s_tx_outstanding >= BFM_GSI_TXBUFS) {
         if (gsi_pump() < 0) {
             BFM_LOG("bfm: GSI のエラーで送れない\n");
             return BFM_E_CQE;
         }
-        if (ms_since(t0) > 1000u) {
-            BFM_LOG("bfm: GSI の送信が詰まった\n");
-            return BFM_E_TIMEOUT;
-        }
+        if (s_tx_outstanding >= BFM_GSI_TXBUFS) return BFM_INPROGRESS;
     }
     volatile uint8_t *buf = s_tx_buf + (s_tx_next++ % BFM_GSI_TXBUFS) * MSG_SIZE;
     for (unsigned i = 0; i < MSG_SIZE; i++) buf[i] = msg[i];
@@ -261,13 +278,16 @@ static void handle_msg(const uint8_t *m)
     const uint32_t src = bfm_rd32be(m + 8), dst = bfm_rd32be(m + 12);
     if (bfm_rd32be(m + 56) != g_bfm.ip) return;          /* ほかの bfmem 宛て(同報の REQ)*/
     if (type == MSG_REQ) {
-        /* 確立済みの接続への送り直し(REP が落ちた)なら、REP を送り直す */
+        /* もう受けた掛け側からの送り直し: 確立済みなら REP が落ちたので送り直し、
+         * 用意の途中なら捨てる(REP は用意ができたら送る) */
         for (unsigned i = 0; i < g_bfm.nconn; i++) {
             struct bfm_conn *c = &g_bfm_conn[i];
-            if (c->state == BFM_CS_UP && c->peer_id == src && c->peer_ip == bfm_rd32be(m + 32)) {
-                uint8_t rep[MSG_SIZE];
-                build_msg(rep, MSG_REP, c);
-                (void)gsi_send(rep, c);
+            if (c->state != BFM_CS_FREE && c->peer_id == src && c->peer_ip == bfm_rd32be(m + 32)) {
+                if (c->state == BFM_CS_UP && c->step == K_UP) {
+                    uint8_t rep[MSG_SIZE];
+                    build_msg(rep, MSG_REP, c);
+                    (void)gsi_send(rep, c);
+                }
                 return;
             }
         }
@@ -277,7 +297,7 @@ static void handle_msg(const uint8_t *m)
     for (unsigned i = 0; i < g_bfm.nconn; i++) {
         struct bfm_conn *c = &g_bfm_conn[i];
         if (c->local_id != dst) continue;
-        if (type == MSG_REP && c->state == BFM_CS_SETUP && !c->got_rep) {
+        if (type == MSG_REP && c->step == K_WAIT_REP && !c->got_rep) {
             take_peer(c, m);
             c->got_rep = 1;
         } else if (type == MSG_BYE && c->peer_id == src &&
@@ -331,11 +351,11 @@ static int gsi_pump(void)
 }
 
 /* ---------------------------------------------------------------------
- * 接続の枠
+ * 接続の枠の状態機械
  * ------------------------------------------------------------------- */
 
-/* 空いている枠を取り、RC QP を作って INIT まで進める。 */
-static struct bfm_conn *conn_open(uint16_t port)
+/* 空いている枠を取り、確立の手順の最初に置く(コマンドはまだ出さない)。 */
+static struct bfm_conn *conn_open(uint16_t port, uint8_t role)
 {
     struct bfm_conn *c = NULL;
     for (unsigned i = 0; i < g_bfm.nconn && c == NULL; i++) {
@@ -346,42 +366,378 @@ static struct bfm_conn *conn_open(uint16_t port)
         return NULL;
     }
     c->state = BFM_CS_SETUP;
+    c->role = role;
+    c->step = (role == ROLE_CONNECT) ? K_CQ : K_WAIT_REQ;
+    c->abort = 0;
+    c->result = BFM_OK;
     c->port = port;
     c->local_id = cm_rand32();
     c->peer_id = 0;
+    c->peer_ip = 0;
     c->got_rep = 0;
     c->path_mtu = (g_bfm_path_mtu >= 1u && g_bfm_path_mtu <= 5u) ? g_bfm_path_mtu : 3u;
     c->cs_req = g_bfm_scatter_cqe ? 0x11u : 0u;
-    if (mlx5_qp_create(&g_bfm, &c->qp, MLX5_QP_ST_RC, c->cs_req) != BFM_OK ||
-        mlx5_qp_rst2init(&g_bfm, &c->qp, 0) != BFM_OK) {
-        mlx5_qp_destroy(&g_bfm, &c->qp);
-        c->state = BFM_CS_FREE;
-        return NULL;
-    }
+    c->t0 = bfm_port_time_ns();
+    c->t_sent = 0;
+    memset(&c->cmd, 0, sizeof(c->cmd));
     return c;
 }
 
-static void conn_release(struct bfm_conn *c)
+/* 失敗した: 結果を覚えて畳む手順へ回す(次に conn_step() の頭で切り替わる)。 */
+static void conn_fail(struct bfm_conn *c, int rc)
 {
-    bfm_ops_detach(c);
-    mlx5_qp_destroy(&g_bfm, &c->qp);
-    c->state = BFM_CS_FREE;
-    c->local_id = c->peer_id = 0;
+    c->result = rc;
+    c->abort = 1;
 }
 
-/* RTS にしてデータ経路を用意する。 */
-static int conn_up(struct bfm_conn *c, const char *how)
+/*=================================================================
+ * 接続の枠 c の状態機械を、待つところまで進める。
+ *   確立: [受け側 K_WAIT_REQ] -> K_CQ -> K_QP -> K_INIT -> [掛け側 K_WAIT_REP] -> K_RTR -> K_RTS
+ *         -> [受け側 K_REP] -> K_UP
+ *   畳む(c->abort): [UP / ERROR なら K_BYE] -> K_DESTROY -> 枠を空ける
+ * 待つところ(コマンドの完了・REQ / REP・GSI の送信の空き)では BFM_INPROGRESS を返す。
+ * 最初に EQ を読む(FW のページ要求に答える手順がコマンドの入口を持っていれば、それを進める)。
+ * 戻り値: BFM_INPROGRESS = 途中。BFM_OK = 使える(K_UP)。畳み終えたら c->result
+ * (bfm_disconnect() なら BFM_OK、確立の失敗ならその理由)。g_bfm_ctl_lock の中で呼ぶ。
+ * ===============================================================*/
+static int conn_step(struct bfm_conn *c)
 {
-    int rc = mlx5_qp_init2rtr_rc(&g_bfm, &c->qp, c);
-    if (rc == BFM_OK) rc = mlx5_qp_rtr2rts_rc(&g_bfm, &c->qp, c);
-    if (rc == BFM_OK) rc = bfm_ops_attach(c);
-    if (rc != BFM_OK) return rc;
-    c->state = BFM_CS_UP;
-    BFM_LOG("bfm: 接続した(%s): qpn %u <-> %u  相手 %u.%u.%u.%u  公開メモリ 0x%llx+0x%llx rkey 0x%08x"
-            "  MTU %u  read/atomic %u 本  BlueFlame %s\n", how, c->qp.qpn, c->peer_qpn,
-            c->peer_ip >> 24, (c->peer_ip >> 16) & 0xffu, (c->peer_ip >> 8) & 0xffu, c->peer_ip & 0xffu,
-            (unsigned long long)c->raddr, (unsigned long long)c->rlen, c->rkey, 128u << c->path_mtu,
-            c->max_rd, c->bf ? "あり" : "なし");
+    int rc;
+    /* FW のページ要求に答える手順がコマンドの入口を持っていることがあるので、ここでも進める */
+    (void)mlx5_eq_poll(&g_bfm);
+    for (;;) {
+        /* 確立の時間切れ(掛け側。コマンドの途中でなければ)*/
+        if (!c->abort && c->role == ROLE_CONNECT && c->state == BFM_CS_SETUP && !c->cmd.posted &&
+            ms_since(c->t0) > c->timeout_ms) {
+            BFM_LOG(c->step == K_WAIT_REP ? "bfm: 接続できない(REP が来ない)\n"
+                                          : "bfm: 接続できない(時間内に用意が済まない)\n");
+            conn_fail(c, BFM_E_TIMEOUT);
+        }
+        /* 畳む手順へ(コマンドを出していれば、その完了を受け取ってから)*/
+        if (c->abort && c->step < K_BYE && !c->cmd.posted) {
+            c->step = (c->state == BFM_CS_UP || c->state == BFM_CS_ERROR) ? K_BYE : K_DESTROY;
+            c->t_sent = bfm_port_time_ns();
+        }
+        switch (c->step) {
+        case K_WAIT_REQ: {
+            uint8_t msg[MSG_SIZE];
+            (void)gsi_pump();
+            if (!req_take(c->port, msg)) {
+                if (c->timeout_ms && ms_since(c->t0) > c->timeout_ms) {
+                    conn_fail(c, BFM_E_TIMEOUT);
+                    break;
+                }
+                return BFM_INPROGRESS;
+            }
+            take_peer(c, msg);
+            if (msg[5] >= 1u && msg[5] < c->path_mtu) c->path_mtu = msg[5];
+            c->step = K_CQ;
+            break;
+        }
+        case K_CQ:
+            rc = mlx5_cq_create(&g_bfm, &c->cmd, c->qp.uarn, c->qp.cq, c->qp.cq_log, c->qp.cq_dbr, &c->qp.cqn);
+            if (rc == BFM_INPROGRESS) return rc;
+            if (rc != BFM_OK) {
+                conn_fail(c, rc);
+                break;
+            }
+            c->qp.has_cq = 1;
+            c->qp.cq_cc = 0;
+            c->step = K_QP;
+            break;
+        case K_QP:
+            rc = mlx5_qp_create(&g_bfm, &c->cmd, &c->qp, MLX5_QP_ST_RC, c->cs_req);
+            if (rc == BFM_INPROGRESS) return rc;
+            if (rc != BFM_OK) {
+                conn_fail(c, rc);
+                break;
+            }
+            c->step = K_INIT;
+            break;
+        case K_INIT:
+            rc = mlx5_qp_rst2init(&g_bfm, &c->cmd, &c->qp, 0);
+            if (rc == BFM_INPROGRESS) return rc;
+            if (rc != BFM_OK) {
+                conn_fail(c, rc);
+                break;
+            }
+            c->step = (c->role == ROLE_CONNECT) ? K_WAIT_REP : K_RTR;
+            break;
+        case K_WAIT_REP:
+            (void)gsi_pump();
+            if (c->got_rep) {
+                c->step = K_RTR;
+                break;
+            }
+            if (c->t_sent == 0 || ms_since(c->t_sent) > REQ_RETRY_MS) {
+                uint8_t req[MSG_SIZE];
+                build_msg(req, MSG_REQ, c);
+                rc = gsi_send(req, c);
+                if (rc == BFM_OK) {
+                    c->t_sent = bfm_port_time_ns();
+                } else if (rc != BFM_INPROGRESS) {
+                    conn_fail(c, rc);
+                    break;
+                }
+            }
+            return BFM_INPROGRESS;
+        case K_RTR:
+            rc = mlx5_qp_init2rtr_rc(&g_bfm, &c->cmd, &c->qp, c);
+            if (rc == BFM_INPROGRESS) return rc;
+            if (rc != BFM_OK) {
+                conn_fail(c, rc);
+                break;
+            }
+            c->amode = g_bfm.atomic_mode;
+            c->step = K_RTS;
+            break;
+        case K_RTS:
+            rc = mlx5_qp_rtr2rts_rc(&g_bfm, &c->cmd, &c->qp, c, c->amode);
+            if (rc == BFM_INPROGRESS) return rc;
+            if (rc != BFM_OK) {
+                if (c->amode != 0u) {
+                    c->amode = 0u;                  /* atomic_mode を付けずにもう一度 */
+                } else {
+                    conn_fail(c, rc);
+                }
+                break;
+            }
+            if (c->amode != g_bfm.atomic_mode)
+                BFM_LOG("bfm: 注意: atomic_mode=%u は断られた。相手からの atomic は受けない\n", g_bfm.atomic_mode);
+            if ((rc = bfm_ops_attach(c)) != BFM_OK) {
+                conn_fail(c, rc);
+                break;
+            }
+            c->state = BFM_CS_UP;
+            BFM_LOG("bfm: 接続した(%s): qpn %u <-> %u  相手 %u.%u.%u.%u  公開メモリ 0x%llx+0x%llx rkey 0x%08x"
+                    "  MTU %u  read/atomic %u 本  BlueFlame %s\n",
+                    c->role == ROLE_CONNECT ? "掛け側" : "受け側", c->qp.qpn, c->peer_qpn,
+                    c->peer_ip >> 24, (c->peer_ip >> 16) & 0xffu, (c->peer_ip >> 8) & 0xffu, c->peer_ip & 0xffu,
+                    (unsigned long long)c->raddr, (unsigned long long)c->rlen, c->rkey, 128u << c->path_mtu,
+                    c->max_rd, c->bf ? "あり" : "なし");
+            c->step = (c->role == ROLE_ACCEPT) ? K_REP : K_UP;
+            break;
+        case K_REP: {
+            uint8_t rep[MSG_SIZE];
+            build_msg(rep, MSG_REP, c);
+            rc = gsi_send(rep, c);
+            if (rc == BFM_INPROGRESS) return rc;
+            if (rc != BFM_OK) {
+                conn_fail(c, rc);
+                break;
+            }
+            c->step = K_UP;
+            break;
+        }
+        case K_UP:
+            return BFM_OK;
+        case K_BYE: {
+            /* 返事は待たない。出せなければ TX_DRAIN_MS まで出し直し、それでも出なければあきらめる */
+            uint8_t bye[MSG_SIZE];
+            build_msg(bye, MSG_BYE, c);
+            rc = gsi_send(bye, c);
+            if (rc == BFM_INPROGRESS && ms_since(c->t_sent) < TX_DRAIN_MS) return rc;
+            c->step = K_DESTROY;
+            break;
+        }
+        case K_DESTROY:
+            bfm_ops_detach(c);
+            if (mlx5_qp_destroy(&g_bfm, &c->cmd, &c->qp) == BFM_INPROGRESS) return BFM_INPROGRESS;
+            c->state = BFM_CS_FREE;
+            c->step = K_IDLE;
+            c->role = 0;
+            c->abort = 0;
+            c->local_id = c->peer_id = 0;
+            BFM_DBG("bfm: 接続 %d の枠を空けた\n", c->index);
+            return c->result;
+        default:   /* K_IDLE */
+            return BFM_E_STATE;
+        }
+    }
+}
+
+/* ---------------------------------------------------------------------
+ * 立ち上げと停止
+ * ------------------------------------------------------------------- */
+
+/* 立ち上げの状態(bfm_cm_init_step())。 */
+enum { G_START = 0, G_UAR, G_CQ, G_QP, G_INIT, G_RTR, G_RTS, G_SLOT, G_DONE };
+
+static struct {
+    int step;                        /* 今の状態(G_*)*/
+    unsigned i;                      /* 用意している接続の枠 */
+    int slot_mem;                    /* 枠 i のメモリを切り出した */
+    bfm_cmd_t cmd;                   /* 出しているコマンド */
+} s_ci;
+
+/* 停止の状態(bfm_cm_fini_step())。 */
+enum { F_CONNS = 0, F_DRAIN, F_DONE };
+
+static struct {
+    int step;                        /* 今の状態(F_*)*/
+    uint64_t t0;                     /* 送信が出ていくのを待ち始めた時刻 */
+} s_cf;
+
+/* 立ち上げ・停止の状態を最初に戻す(bfm_init() が始めるときに呼ぶ)。 */
+void bfm_cm_reset(void)
+{
+    memset(&s_ci, 0, sizeof(s_ci));
+    memset(&s_cf, 0, sizeof(s_cf));
+    memset(&s_gsi, 0, sizeof(s_gsi));
+    memset(&s_req, 0, sizeof(s_req));
+    s_tx_next = s_tx_outstanding = 0;
+    s_gsi_ready = 0;
+}
+
+/* 接続の枠 i のメモリ(WQ・CQ・ドアベルレコード・中継バッファ)を DMA 領域から切り出す。 */
+static int slot_alloc(unsigned i)
+{
+    struct bfm_conn *c = &g_bfm_conn[i];
+    memset(c, 0, sizeof(*c));
+    c->index = (int)i;
+    c->qp.rq_log = BFM_RC_RQ_LOG;
+    c->qp.sq_log = BFM_RC_SQ_LOG;
+    c->qp.cq_log = BFM_RC_CQ_LOG;
+    c->qp.wq = (volatile uint8_t *)bfm_mem_alloc((16u << BFM_RC_RQ_LOG) + (MLX5_SEND_WQE_BB << BFM_RC_SQ_LOG), BFM_PAGE);
+    c->qp.dbr = (volatile uint32_t *)bfm_mem_alloc(64u, 64u);
+    c->qp.cq = (volatile uint8_t *)bfm_mem_alloc(64u << BFM_RC_CQ_LOG, BFM_PAGE);
+    c->qp.cq_dbr = (volatile uint32_t *)bfm_mem_alloc(64u, 64u);
+    c->stage_size = (g_bfm_stage_size + BFM_PAGE - 1u) & ~(BFM_PAGE - 1u);
+    c->stage = (volatile uint8_t *)bfm_mem_alloc(c->stage_size, BFM_PAGE);
+    c->dif_slot_size = (g_bfm_dif_buf_size / BFM_DIF_SLOTS + BFM_PAGE - 1u) & ~(BFM_PAGE - 1u);
+    c->dif_buf = (volatile uint8_t *)bfm_mem_alloc((uint64_t)c->dif_slot_size * BFM_DIF_SLOTS, BFM_PAGE);
+    if (!c->qp.wq || !c->qp.dbr || !c->qp.cq || !c->qp.cq_dbr || !c->stage || !c->dif_buf) return BFM_E_NOMEM;
+    return BFM_OK;
+}
+
+/*=================================================================
+ * GSI と接続の枠を、待つところまで用意する(bfm_init() から)。GSI の QP を RTS まで進めて
+ * 受信を投稿し、接続の枠ごとにメモリと UAR を切り出す(UAR の WC の窓もここで張る)。
+ * コマンドの完了を待つところで BFM_INPROGRESS を返す。失敗したときの WC の窓は
+ * bfm_cm_fini_step() が返す。
+ * 戻り値: BFM_INPROGRESS = 途中。BFM_OK = 済んだ。負 = 失敗。
+ * ===============================================================*/
+int bfm_cm_init_step(void)
+{
+    int rc;
+    for (;;) {
+        switch (s_ci.step) {
+        case G_START:
+            s_gsi.rq_log = BFM_GSI_RQ_LOG;
+            s_gsi.sq_log = BFM_GSI_SQ_LOG;
+            s_gsi.cq_log = BFM_GSI_CQ_LOG;
+            s_gsi.wq = (volatile uint8_t *)bfm_mem_alloc((16u << BFM_GSI_RQ_LOG) + (MLX5_SEND_WQE_BB << BFM_GSI_SQ_LOG), BFM_PAGE);
+            s_gsi.dbr = (volatile uint32_t *)bfm_mem_alloc(64u, 64u);
+            s_gsi.cq = (volatile uint8_t *)bfm_mem_alloc(64u << BFM_GSI_CQ_LOG, BFM_PAGE);
+            s_gsi.cq_dbr = (volatile uint32_t *)bfm_mem_alloc(64u, 64u);
+            s_rx_ring = (volatile uint8_t *)bfm_mem_alloc((uint64_t)BFM_GSI_RX_SLOT << BFM_GSI_RQ_LOG, BFM_PAGE);
+            s_tx_buf = (volatile uint8_t *)bfm_mem_alloc(BFM_GSI_TXBUFS * MSG_SIZE, BFM_PAGE);
+            if (!s_gsi.wq || !s_gsi.dbr || !s_gsi.cq || !s_gsi.cq_dbr || !s_rx_ring || !s_tx_buf) return BFM_E_NOMEM;
+            s_ci.step = G_UAR;
+            break;
+        case G_UAR:
+            if ((rc = mlx5_alloc_uar(&g_bfm, &s_ci.cmd, &s_gsi.uarn)) != BFM_OK) return rc;
+            s_gsi.has_uar = 1;
+            s_gsi_db = g_bfm.bar0 + (uint64_t)s_gsi.uarn * BFM_PAGE + MLX5_BF_OFFSET;
+            s_ci.step = G_CQ;
+            break;
+        case G_CQ:
+            if ((rc = mlx5_cq_create(&g_bfm, &s_ci.cmd, s_gsi.uarn, s_gsi.cq, s_gsi.cq_log, s_gsi.cq_dbr,
+                                     &s_gsi.cqn)) != BFM_OK) return rc;
+            s_gsi.has_cq = 1;
+            s_gsi.cq_cc = 0;
+            s_ci.step = G_QP;
+            break;
+        case G_QP:
+            if ((rc = mlx5_qp_create(&g_bfm, &s_ci.cmd, &s_gsi, MLX5_QP_ST_QP1, 0)) != BFM_OK) return rc;
+            s_ci.step = G_INIT;
+            break;
+        case G_INIT:
+            if ((rc = mlx5_qp_rst2init(&g_bfm, &s_ci.cmd, &s_gsi, 1)) != BFM_OK) return rc;
+            s_ci.step = G_RTR;
+            break;
+        case G_RTR:
+            if ((rc = mlx5_qp_ud_init2rtr(&g_bfm, &s_ci.cmd, &s_gsi)) != BFM_OK) return rc;
+            s_ci.step = G_RTS;
+            break;
+        case G_RTS:
+            if ((rc = mlx5_qp_ud_rtr2rts(&g_bfm, &s_ci.cmd, &s_gsi)) != BFM_OK) return rc;
+            for (unsigned i = 0; i < BFM_GSI_PREPOST; i++) gsi_post_recv();
+            s_ci.i = 0;
+            s_ci.slot_mem = 0;
+            s_ci.step = G_SLOT;
+            break;
+        case G_SLOT: {
+            struct bfm_conn *c = &g_bfm_conn[s_ci.i];
+            if (!s_ci.slot_mem) {
+                if ((rc = slot_alloc(s_ci.i)) != BFM_OK) return rc;
+                s_ci.slot_mem = 1;
+            }
+            /* UAR(ドアベルと BlueFlame の窓)は枠ごとに 1 つ。WC の窓もここで張っておく。 */
+            if ((rc = mlx5_alloc_uar(&g_bfm, &s_ci.cmd, &c->qp.uarn)) != BFM_OK) return rc;
+            c->qp.has_uar = 1;
+            c->db = g_bfm.bar0 + (uint64_t)c->qp.uarn * BFM_PAGE + MLX5_BF_OFFSET;
+            c->bf = NULL;
+            if (g_bfm_bf_enable && g_bfm.bf_cap) {
+                volatile uint8_t *wc = bfm_port_bar0_wc((uint64_t)c->qp.uarn * BFM_PAGE, BFM_PAGE);
+                if (wc) c->bf = wc + MLX5_BF_OFFSET;
+            }
+            s_ci.slot_mem = 0;
+            if (++s_ci.i < g_bfm.nconn) break;
+            if (g_bfm_bf_enable && g_bfm.bf_cap && g_bfm_conn[0].bf == NULL)
+                BFM_LOG("bfm: 注意: UAR を write-combining で張れない。BlueFlame を使わずに動かす\n");
+            s_gsi_ready = 1;                          /* 全部そろってから使えるようにする */
+            s_ci.step = G_DONE;
+            break;
+        }
+        default:   /* G_DONE */
+            return BFM_OK;
+        }
+    }
+}
+
+/*=================================================================
+ * 接続を畳み、GSI の送信が出ていくのを待ち(上限 TX_DRAIN_MS)、WC の窓を返す
+ * (bfm_shutdown() から。待たずに進める)。使っている接続の枠は、それぞれの状態機械を
+ * 畳む手順で進める(UP なら BYE を送り、QP と CQ を消す)。
+ * 戻り値: BFM_INPROGRESS = 途中。BFM_OK = 済んだ。
+ * ===============================================================*/
+int bfm_cm_fini_step(void)
+{
+    bfm_lock(&g_bfm_ctl_lock);
+    if (s_cf.step == F_CONNS) {
+        int busy = 0;
+        for (unsigned i = 0; i < g_bfm.nconn; i++) {
+            struct bfm_conn *c = &g_bfm_conn[i];
+            if (c->state == BFM_CS_FREE) continue;
+            if (!c->abort) {
+                c->abort = 1;
+                c->result = BFM_OK;
+            }
+            if (conn_step(c) == BFM_INPROGRESS) busy = 1;
+        }
+        if (busy) {
+            bfm_unlock(&g_bfm_ctl_lock);
+            return BFM_INPROGRESS;
+        }
+        s_cf.t0 = bfm_port_time_ns();
+        s_cf.step = F_DRAIN;
+    }
+    if (s_cf.step == F_DRAIN) {
+        if (s_gsi_ready && s_tx_outstanding > 0 && ms_since(s_cf.t0) < TX_DRAIN_MS && gsi_pump() >= 0 &&
+            s_tx_outstanding > 0) {
+            bfm_unlock(&g_bfm_ctl_lock);
+            return BFM_INPROGRESS;
+        }
+        for (unsigned i = 0; i < g_bfm.nconn; i++) {
+            struct bfm_conn *c = &g_bfm_conn[i];
+            if (c->bf) bfm_port_bar0_wc_release((uint64_t)c->qp.uarn * BFM_PAGE, BFM_PAGE);
+            c->bf = NULL;
+        }
+        s_gsi_ready = 0;
+        s_cf.step = F_DONE;
+    }
+    bfm_unlock(&g_bfm_ctl_lock);
     return BFM_OK;
 }
 
@@ -389,179 +745,69 @@ static int conn_up(struct bfm_conn *c, const char *how)
  * 公開する関数
  * ------------------------------------------------------------------- */
 
-/*=================================================================
- * GSI を用意する(bfm_init() から)。接続の枠ごとの資源もここで切り出す。
- * ===============================================================*/
-int bfm_cm_init(void)
+int bfm_connect(bfm_conn_t **pc, uint32_t peer_ip, const uint8_t peer_mac[6], uint16_t port, uint32_t timeout_ms)
 {
-    int rc;
-    memset(&s_gsi, 0, sizeof(s_gsi));
-    memset(&s_req, 0, sizeof(s_req));
-    s_tx_next = s_tx_outstanding = 0;
-    s_gsi.rq_log = BFM_GSI_RQ_LOG;
-    s_gsi.sq_log = BFM_GSI_SQ_LOG;
-    s_gsi.cq_log = BFM_GSI_CQ_LOG;
-    s_gsi.wq = (volatile uint8_t *)bfm_mem_alloc((16u << BFM_GSI_RQ_LOG) + (MLX5_SEND_WQE_BB << BFM_GSI_SQ_LOG), BFM_PAGE);
-    s_gsi.dbr = (volatile uint32_t *)bfm_mem_alloc(64u, 64u);
-    s_gsi.cq = (volatile uint8_t *)bfm_mem_alloc(64u << BFM_GSI_CQ_LOG, BFM_PAGE);
-    s_gsi.cq_dbr = (volatile uint32_t *)bfm_mem_alloc(64u, 64u);
-    s_rx_ring = (volatile uint8_t *)bfm_mem_alloc((uint64_t)BFM_GSI_RX_SLOT << BFM_GSI_RQ_LOG, BFM_PAGE);
-    s_tx_buf = (volatile uint8_t *)bfm_mem_alloc(BFM_GSI_TXBUFS * MSG_SIZE, BFM_PAGE);
-    if (!s_gsi.wq || !s_gsi.dbr || !s_gsi.cq || !s_gsi.cq_dbr || !s_rx_ring || !s_tx_buf) return BFM_E_NOMEM;
-
-    if ((rc = mlx5_alloc_uar(&g_bfm, &s_gsi.uarn)) != BFM_OK) return rc;
-    s_gsi.has_uar = 1;
-    s_gsi_db = g_bfm.bar0 + (uint64_t)s_gsi.uarn * BFM_PAGE + MLX5_BF_OFFSET;
-    if ((rc = mlx5_qp_create(&g_bfm, &s_gsi, MLX5_QP_ST_QP1, 0)) != BFM_OK) return rc;
-    if ((rc = mlx5_qp_rst2init(&g_bfm, &s_gsi, 1)) != BFM_OK) return rc;
-    if ((rc = mlx5_qp_ud_to_rts(&g_bfm, &s_gsi)) != BFM_OK) return rc;
-    for (unsigned i = 0; i < BFM_GSI_PREPOST; i++) gsi_post_recv();
-
-    for (unsigned i = 0; i < g_bfm.nconn; i++) {
-        struct bfm_conn *c = &g_bfm_conn[i];
-        memset(c, 0, sizeof(*c));
-        c->index = (int)i;
-        c->qp.rq_log = BFM_RC_RQ_LOG;
-        c->qp.sq_log = BFM_RC_SQ_LOG;
-        c->qp.cq_log = BFM_RC_CQ_LOG;
-        c->qp.wq = (volatile uint8_t *)bfm_mem_alloc((16u << BFM_RC_RQ_LOG) + (MLX5_SEND_WQE_BB << BFM_RC_SQ_LOG), BFM_PAGE);
-        c->qp.dbr = (volatile uint32_t *)bfm_mem_alloc(64u, 64u);
-        c->qp.cq = (volatile uint8_t *)bfm_mem_alloc(64u << BFM_RC_CQ_LOG, BFM_PAGE);
-        c->qp.cq_dbr = (volatile uint32_t *)bfm_mem_alloc(64u, 64u);
-        c->stage_size = (g_bfm_stage_size + BFM_PAGE - 1u) & ~(BFM_PAGE - 1u);
-        c->stage = (volatile uint8_t *)bfm_mem_alloc(c->stage_size, BFM_PAGE);
-        c->dif_slot_size = (g_bfm_dif_buf_size / BFM_DIF_SLOTS + BFM_PAGE - 1u) & ~(BFM_PAGE - 1u);
-        c->dif_buf = (volatile uint8_t *)bfm_mem_alloc((uint64_t)c->dif_slot_size * BFM_DIF_SLOTS, BFM_PAGE);
-        if (!c->qp.wq || !c->qp.dbr || !c->qp.cq || !c->qp.cq_dbr || !c->stage || !c->dif_buf) {
-            rc = BFM_E_NOMEM;
-            goto fail;
+    if (pc == NULL) return BFM_E_PARAM;
+    if (!s_gsi_ready) return BFM_E_STATE;
+    bfm_lock(&g_bfm_ctl_lock);
+    struct bfm_conn *c = *pc;
+    if (c == NULL) {
+        /* 最初の呼び出し: 枠を取り、相手を決める */
+        if (peer_ip == 0) peer_ip = g_bfm_peer_ip;
+        if (peer_mac == NULL) peer_mac = g_bfm_peer_mac;
+        if (peer_ip == 0) {
+            bfm_unlock(&g_bfm_ctl_lock);
+            BFM_LOG("bfm: 相手の IP が無い(peer_ip も g_bfm_peer_ip も 0)\n");
+            return BFM_E_PARAM;
         }
-        /* UAR(ドアベルと BlueFlame の窓)は枠ごとに 1 つ。WC の窓もここで張っておく。 */
-        if ((rc = mlx5_alloc_uar(&g_bfm, &c->qp.uarn)) != BFM_OK) goto fail;
-        c->qp.has_uar = 1;
-        c->db = g_bfm.bar0 + (uint64_t)c->qp.uarn * BFM_PAGE + MLX5_BF_OFFSET;
-        c->bf = NULL;
-        if (g_bfm_bf_enable && g_bfm.bf_cap) {
-            volatile uint8_t *wc = bfm_port_bar0_wc((uint64_t)c->qp.uarn * BFM_PAGE, BFM_PAGE);
-            if (wc) c->bf = wc + MLX5_BF_OFFSET;
+        if (port == 0) port = g_bfm_cm_port;
+        c = conn_open(port, ROLE_CONNECT);
+        if (c == NULL) {
+            bfm_unlock(&g_bfm_ctl_lock);
+            return BFM_E_NOMEM;
         }
+        c->timeout_ms = timeout_ms ? timeout_ms : REQ_TIMEOUT_MS;
+        c->peer_ip = peer_ip;
+        memcpy(c->peer_mac, peer_mac, 6);
+        if (mac_is_zero(c->peer_mac)) memset(c->peer_mac, 0xff, 6);   /* 知らなければ同報。REP で上書きされる */
+        mlx5_gid_from_ipv4(peer_ip, c->peer_gid);
+        *pc = c;
+    } else if (c->role != ROLE_CONNECT) {
+        bfm_unlock(&g_bfm_ctl_lock);
+        return BFM_E_PARAM;
     }
-    if (g_bfm_bf_enable && g_bfm.bf_cap && g_bfm_conn[0].bf == NULL)
-        BFM_LOG("bfm: 注意: UAR を write-combining で張れない。BlueFlame を使わずに動かす\n");
-    s_gsi_ready = 1;                                  /* 全部そろってから使えるようにする */
-    return BFM_OK;
-fail:
-    /* 張った WC の窓を返す(HCA は呼び出し側の cleanup() が止める) */
-    for (unsigned i = 0; i < g_bfm.nconn; i++) {
-        struct bfm_conn *c = &g_bfm_conn[i];
-        if (c->bf) bfm_port_bar0_wc_release((uint64_t)c->qp.uarn * BFM_PAGE, BFM_PAGE);
-        c->bf = NULL;
-    }
+    const int rc = conn_step(c);
+    if (rc != BFM_INPROGRESS && rc != BFM_OK) *pc = NULL;
+    bfm_unlock(&g_bfm_ctl_lock);
     return rc;
 }
 
-void bfm_cm_fini(void)
+int bfm_accept(bfm_conn_t **pc, uint16_t port, uint32_t timeout_ms)
 {
-    for (unsigned i = 0; i < g_bfm.nconn; i++) {
-        struct bfm_conn *c = &g_bfm_conn[i];
-        if (c->state != BFM_CS_FREE) (void)bfm_disconnect(c);
-        if (c->bf) bfm_port_bar0_wc_release((uint64_t)c->qp.uarn * BFM_PAGE, BFM_PAGE);
-        c->bf = NULL;
-    }
-    s_gsi_ready = 0;
-}
-
-/* 鍵を手放して少し回り、取り直す(REP や REQ を待つ間、ほかのコアに鍵を渡す)。 */
-static void ctl_yield(void)
-{
-    bfm_unlock(&g_bfm_ctl_lock);
-    for (unsigned i = 0; i < 64u; i++) bfm_cpu_relax();
+    if (pc == NULL) return BFM_E_PARAM;
+    if (!s_gsi_ready) return BFM_E_STATE;
     bfm_lock(&g_bfm_ctl_lock);
-}
-
-bfm_conn_t *bfm_connect(uint32_t peer_ip, const uint8_t peer_mac[6], uint16_t port, uint32_t timeout_ms)
-{
-    if (!s_gsi_ready) return NULL;
-    if (peer_ip == 0) peer_ip = g_bfm_peer_ip;
-    if (peer_mac == NULL) peer_mac = g_bfm_peer_mac;
-    if (peer_ip == 0) {
-        BFM_LOG("bfm: 相手の IP が無い(peer_ip も g_bfm_peer_ip も 0)\n");
-        return NULL;
-    }
-    if (port == 0) port = g_bfm_cm_port;
-    if (timeout_ms == 0) timeout_ms = REQ_TIMEOUT_MS;
-    bfm_lock(&g_bfm_ctl_lock);
-    struct bfm_conn *c = conn_open(port);
+    struct bfm_conn *c = *pc;
     if (c == NULL) {
-        bfm_unlock(&g_bfm_ctl_lock);
-        return NULL;
-    }
-    c->peer_ip = peer_ip;
-    memcpy(c->peer_mac, peer_mac, 6);
-    if (mac_is_zero(c->peer_mac)) memset(c->peer_mac, 0xff, 6);   /* 知らなければ同報。REP で上書きされる */
-    mlx5_gid_from_ipv4(peer_ip, c->peer_gid);
-
-    uint8_t req[MSG_SIZE];
-    build_msg(req, MSG_REQ, c);
-    const uint64_t t0 = bfm_port_time_ns();
-    uint64_t t_sent = 0;
-    while (!c->got_rep) {
-        if (ms_since(t0) > timeout_ms) {
-            BFM_LOG("bfm: 接続できない(REP が来ない)\n");
-            goto fail;
-        }
-        if (t_sent == 0 || ms_since(t_sent) > REQ_RETRY_MS) {
-            if (gsi_send(req, c) != BFM_OK) goto fail;
-            t_sent = bfm_port_time_ns();
-        }
-        (void)gsi_pump();
-        if (!c->got_rep) ctl_yield();
-    }
-    if (conn_up(c, "掛け側") != BFM_OK) goto fail;
-    bfm_unlock(&g_bfm_ctl_lock);
-    return c;
-fail:
-    conn_release(c);
-    bfm_unlock(&g_bfm_ctl_lock);
-    return NULL;
-}
-
-bfm_conn_t *bfm_accept(uint16_t port, uint32_t timeout_ms)
-{
-    if (!s_gsi_ready) return NULL;
-    if (port == 0) port = g_bfm_cm_port;
-    uint8_t msg[MSG_SIZE];
-    const uint64_t t0 = bfm_port_time_ns();
-    bfm_lock(&g_bfm_ctl_lock);
-    for (;;) {
-        (void)gsi_pump();
-        if (req_take(port, msg)) break;
-        if (timeout_ms && ms_since(t0) > timeout_ms) {
+        /* 最初の呼び出し: 枠を取って REQ を待つ */
+        if (port == 0) port = g_bfm_cm_port;
+        c = conn_open(port, ROLE_ACCEPT);
+        if (c == NULL) {
             bfm_unlock(&g_bfm_ctl_lock);
-            return NULL;
+            return BFM_E_NOMEM;
         }
-        ctl_yield();
-    }
-    struct bfm_conn *c = conn_open(port);
-    if (c == NULL) {
+        c->timeout_ms = timeout_ms;
+        *pc = c;
+    } else if (c->role != ROLE_ACCEPT) {
         bfm_unlock(&g_bfm_ctl_lock);
-        return NULL;
+        return BFM_E_PARAM;
     }
-    take_peer(c, msg);
-    if (msg[5] >= 1u && msg[5] < c->path_mtu) c->path_mtu = msg[5];
-    if (conn_up(c, "受け側") != BFM_OK) goto fail;
-    uint8_t rep[MSG_SIZE];
-    build_msg(rep, MSG_REP, c);
-    if (gsi_send(rep, c) != BFM_OK) goto fail;
+    const int rc = conn_step(c);
+    if (rc != BFM_INPROGRESS && rc != BFM_OK) *pc = NULL;
     bfm_unlock(&g_bfm_ctl_lock);
-    return c;
-fail:
-    conn_release(c);
-    bfm_unlock(&g_bfm_ctl_lock);
-    return NULL;
+    return rc;
 }
 
-/* 相手へ BYE を送り(返事は待たない。出ていくまでは待つ)、QP などを返す。 */
 int bfm_disconnect(bfm_conn_t *c)
 {
     if (c == NULL) return BFM_E_PARAM;
@@ -570,20 +816,13 @@ int bfm_disconnect(bfm_conn_t *c)
         bfm_unlock(&g_bfm_ctl_lock);
         return BFM_E_PARAM;
     }
-    if (c->state == BFM_CS_UP || c->state == BFM_CS_ERROR) {
-        uint8_t bye[MSG_SIZE];
-        build_msg(bye, MSG_BYE, c);
-        if (gsi_send(bye, c) == BFM_OK) {
-            const uint64_t t0 = bfm_port_time_ns();
-            while (s_tx_outstanding > 0 && ms_since(t0) < TX_DRAIN_MS) {
-                if (gsi_pump() < 0) break;
-            }
-        }
+    if (!c->abort) {
+        c->abort = 1;
+        c->result = BFM_OK;
     }
-    conn_release(c);
+    const int rc = conn_step(c);
     bfm_unlock(&g_bfm_ctl_lock);
-    BFM_DBG("bfm: 切断した\n");
-    return BFM_OK;
+    return rc;
 }
 
 /* GSI に来たものを処理する(相手からの BYE、REP が落ちたときの REQ の送り直し)。

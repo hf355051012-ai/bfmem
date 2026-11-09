@@ -495,35 +495,88 @@ static void progress(struct bfm_conn *c, struct job *j)
 /* ---------------------------------------------------------------------
  * 立ち上げ
  * ------------------------------------------------------------------- */
-int bfm_dif_init(void)
+/* 立ち上げの状態(bfm_dif_init_step() が進める)。 */
+enum { D_START = 0, D_PSV, D_MKEY, D_DONE };
+
+static struct {
+    int step;                        /* 今の状態(D_*)*/
+    unsigned i, si;                  /* 作っている接続の枠と面 */
+    uint8_t key8;                    /* 署名つき MKey の鍵の下位 8 ビットの起点 */
+    bfm_cmd_t cmd;                   /* 出しているコマンド */
+} s_di;
+
+/* 立ち上げの状態を最初に戻す(bfm_init() が始めるときに呼ぶ)。 */
+void bfm_dif_init_reset(void)
 {
-    memset(s_sig, 0, sizeof(s_sig));
-    memset(s_job, 0, sizeof(s_job));
-    s_hw = 0;
-    crc_ready();                           /* 表は立ち上げのときに作っておく */
-    if (!g_bfm.sho) {
-        BFM_DBG("bfm: 署名のオフロード(sho)が無い。T10-DIF は BFM_DIF_SW だけ\n");
-        return BFM_OK;
-    }
-    const uint8_t key8 = (uint8_t)(bfm_port_time_ns() >> 12);
-    for (unsigned i = 0; i < g_bfm.nconn; i++) {
-        for (unsigned si = 0; si < BFM_DIF_SLOTS; si++) {
-            struct sig_res *s = &s_sig[i][si];
-            uint32_t psv[2];
-            if (mlx5_create_psv2(&g_bfm, psv) != BFM_OK ||
-                mlx5_create_sig_mkey(&g_bfm, (uint8_t)(key8 + i * BFM_DIF_SLOTS + si), &s->mkey) != BFM_OK) {
-                BFM_LOG("bfm: 注意: 署名の資源を作れない。T10-DIF は BFM_DIF_SW だけ\n");
-                return BFM_OK;             /* 作った分は TEARDOWN_HCA で消える */
+    memset(&s_di, 0, sizeof(s_di));
+}
+
+/*=================================================================
+ * T10-DIF の準備を、待つところまで進める。CRC の表を作り、装置に署名オフロード(sho)が
+ * あれば、接続の枠・面ごとに PSV 2 つと署名つき MKey を作る(コマンドの完了を待つところで
+ * BFM_INPROGRESS を返す)。作れなければ表示して BFM_DIF_SW だけにする(失敗にはしない)。
+ * 戻り値: BFM_INPROGRESS = 途中。BFM_OK = 済んだ。
+ * ===============================================================*/
+int bfm_dif_init_step(void)
+{
+    for (;;) {
+        switch (s_di.step) {
+        case D_START:
+            memset(s_sig, 0, sizeof(s_sig));
+            memset(s_job, 0, sizeof(s_job));
+            s_hw = 0;
+            crc_ready();                   /* 表は立ち上げのときに作っておく */
+            if (!g_bfm.sho) {
+                BFM_DBG("bfm: 署名のオフロード(sho)が無い。T10-DIF は BFM_DIF_SW だけ\n");
+                s_di.step = D_DONE;
+                break;
             }
-            s->psv_mem = psv[0];
-            s->psv_wire = psv[1];
+            s_di.key8 = (uint8_t)(bfm_port_time_ns() >> 12);
+            s_di.i = s_di.si = 0;
+            s_di.step = D_PSV;
+            break;
+        case D_PSV:
+        case D_MKEY: {
+            struct sig_res *s = &s_sig[s_di.i][s_di.si];
+            int rc;
+            if (s_di.step == D_PSV) {
+                uint32_t psv[2];
+                rc = mlx5_create_psv2(&g_bfm, &s_di.cmd, psv);
+                if (rc == BFM_OK) {
+                    s->psv_mem = psv[0];
+                    s->psv_wire = psv[1];
+                }
+            } else {
+                rc = mlx5_create_sig_mkey(&g_bfm, &s_di.cmd,
+                                          (uint8_t)(s_di.key8 + s_di.i * BFM_DIF_SLOTS + s_di.si), &s->mkey);
+            }
+            if (rc == BFM_INPROGRESS) return rc;
+            if (rc != BFM_OK) {
+                BFM_LOG("bfm: 注意: 署名の資源を作れない。T10-DIF は BFM_DIF_SW だけ\n");
+                s_di.step = D_DONE;        /* 作った分は TEARDOWN_HCA で消える */
+                break;
+            }
+            if (s_di.step == D_PSV) {
+                s_di.step = D_MKEY;
+                break;
+            }
             s->sigerr_count = 1;           /* Linux と同じく、最初の UMR で sigerr の印を立てる */
+            s_di.step = D_PSV;
+            if (++s_di.si == BFM_DIF_SLOTS) {
+                s_di.si = 0;
+                if (++s_di.i == g_bfm.nconn) {
+                    s_hw = 1;
+                    BFM_DBG("bfm: T10-DIF のオフロードを使える(接続 0 の面 0: MKey 0x%08x PSV %u / %u)\n",
+                            s_sig[0][0].mkey, s_sig[0][0].psv_mem, s_sig[0][0].psv_wire);
+                    s_di.step = D_DONE;
+                }
+            }
+            break;
+        }
+        default:   /* D_DONE */
+            return BFM_OK;
         }
     }
-    s_hw = 1;
-    BFM_DBG("bfm: T10-DIF のオフロードを使える(接続 0 の面 0: MKey 0x%08x PSV %u / %u)\n",
-            s_sig[0][0].mkey, s_sig[0][0].psv_mem, s_sig[0][0].psv_wire);
-    return BFM_OK;
 }
 
 /* 接続ができたとき: 転送の状態を空にし、面ごとの署名つき MKey を poll_one() に教える。 */

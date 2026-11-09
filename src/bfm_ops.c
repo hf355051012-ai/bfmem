@@ -542,7 +542,7 @@ const char *bfm_strerror(int rc)
     case BFM_E_DIF:     return "T10-DIF の検査で誤り";
     case BFM_E_NOTSUP:  return "装置が対応していない";
     case BFM_E_BUSY:    return "前の T10-DIF の転送が終わっていない";
-    case BFM_DIF_INPROGRESS: return "T10-DIF の転送の途中";
+    case BFM_INPROGRESS: return "途中(もう一度呼ぶと先へ進む)";
     default:            return "?";
     }
 }

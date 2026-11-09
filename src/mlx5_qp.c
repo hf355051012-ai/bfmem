@@ -1,4 +1,5 @@
-/* QP(RC と GSI)の作成・状態遷移・破棄。
+/* QP(RC と GSI)の作成・状態遷移・破棄。どれも FW のコマンド 1 つで、待たずに進める
+ * (mlx5_cmd_run() と同じく、BFM_INPROGRESS の間は同じ j と引数で呼び直す)。
  *
  * QPC の欄の位置(qpc の先頭からのバイト。struct mlx5_ifc_qpc_bits のビット位置 / 8)は
  * vfio_nvme で ConnectX-4 / 4 Lx の実機で確かめたものをそのまま使う:
@@ -47,12 +48,13 @@ uint16_t mlx5_udp_sport(uint32_t lqpn, uint32_t rqpn)
 }
 
 /*=================================================================
- * QP を作る。qp の rq_log / sq_log / cq_log / wq / dbr / cq / cq_dbr / uarn は
- * 呼び出し側が埋めておく。CQ もここで作る(送受信で共有)。
+ * QP を作る(CREATE_QP)。qp の rq_log / sq_log / wq / dbr / uarn と CQ(cqn。
+ * mlx5_cq_create() で先に作る。送受信で共有)は呼び出し側が用意しておく。
  *   st     : MLX5_QP_ST_RC か MLX5_QP_ST_QP1(GSI)
  *   cs_req : 0x11 で 32 バイトまでの read / atomic の応答を CQE に書かせる
+ * 失敗しても CQ は消さない(呼び出し側が mlx5_qp_destroy() で消す)。
  * ===============================================================*/
-int mlx5_qp_create(bfm_dev_t *d, bfm_qp_t *qp, uint8_t st, uint8_t cs_req)
+int mlx5_qp_create(bfm_dev_t *d, bfm_cmd_t *j, bfm_qp_t *qp, uint8_t st, uint8_t cs_req)
 {
     static uint8_t in[272 + 8 * 32];
     if (qp->rq_log > 16u || qp->sq_log > 16u) return BFM_E_PARAM;
@@ -61,40 +63,33 @@ int mlx5_qp_create(bfm_dev_t *d, bfm_qp_t *qp, uint8_t st, uint8_t cs_req)
     const uint32_t npages = (wq_bytes + BFM_PAGE - 1u) / BFM_PAGE;
     if (npages > 32u) return BFM_E_PARAM;                    /* in[] に載る PAS は 32 ページまで */
 
-    int rc = mlx5_cq_create(d, qp->uarn, qp->cq, qp->cq_log, qp->cq_dbr, &qp->cqn);
-    if (rc != BFM_OK) return rc;
-    qp->has_cq = 1;
-    qp->cq_cc = 0;
+    if (!j->posted) {
+        qp->sq = qp->wq + rq_bytes;
+        memset((void *)(uintptr_t)qp->wq, 0, wq_bytes);
+        qp->dbr[0] = 0;
+        qp->dbr[1] = 0;
 
-    qp->sq = qp->wq + rq_bytes;
-    memset((void *)(uintptr_t)qp->wq, 0, wq_bytes);
-    qp->dbr[0] = 0;
-    qp->dbr[1] = 0;
-
-    memset(in, 0, sizeof(in));
-    bfm_wr16be(&in[0], MLX5_CMD_CREATE_QP);
-    uint8_t *qpc = &in[24];
-    qpc[1] = st;
-    bfm_wr24be(&qpc[5], d->pdn);
-    qpc[8] = (uint8_t)((3u << 5) | 20u);                     /* mtu = 1024(後で変える)、log_msg_max = 20 */
-    qpc[9] = (uint8_t)(qp->rq_log << 3);                     /* log_rq_stride = 0(16 バイト)*/
-    qpc[10] = (uint8_t)(qp->sq_log << 3);
-    qpc[11] = (uint8_t)(d->qp_ts_format << 6);
-    bfm_wr24be(&qpc[13], qp->uarn);
-    if (st == MLX5_QP_ST_RC) qpc[114] = 0x08u;               /* fre: UMR を出せる(T10-DIF のオフロードで使う)*/
-    bfm_wr24be(&qpc[125], qp->cqn);
-    bfm_wr24be(&qpc[157], qp->cqn);
-    bfm_wr64be(&qpc[160], bfm_dma_addr(qp->dbr));
-    qpc[172] = 0u;                                           /* rq_type = 通常の RQ */
-    qpc[198] = cs_req;
-    for (uint32_t p = 0; p < npages; p++) bfm_wr64be(&in[272 + p * 8u], bfm_dma_addr(qp->wq + p * BFM_PAGE));
-    uint8_t out[16];
-    rc = mlx5_cmd(d, in, 272u + npages * 8u, out, sizeof(out), "CREATE_QP");
-    if (rc != BFM_OK) {
-        (void)mlx5_destroy_obj(d, MLX5_CMD_DESTROY_CQ, qp->cqn, "DESTROY_CQ");
-        qp->has_cq = 0;
-        return rc;
+        memset(in, 0, sizeof(in));
+        bfm_wr16be(&in[0], MLX5_CMD_CREATE_QP);
+        uint8_t *qpc = &in[24];
+        qpc[1] = st;
+        bfm_wr24be(&qpc[5], d->pdn);
+        qpc[8] = (uint8_t)((3u << 5) | 20u);                 /* mtu = 1024(後で変える)、log_msg_max = 20 */
+        qpc[9] = (uint8_t)(qp->rq_log << 3);                 /* log_rq_stride = 0(16 バイト)*/
+        qpc[10] = (uint8_t)(qp->sq_log << 3);
+        qpc[11] = (uint8_t)(d->qp_ts_format << 6);
+        bfm_wr24be(&qpc[13], qp->uarn);
+        if (st == MLX5_QP_ST_RC) qpc[114] = 0x08u;           /* fre: UMR を出せる(T10-DIF のオフロードで使う)*/
+        bfm_wr24be(&qpc[125], qp->cqn);
+        bfm_wr24be(&qpc[157], qp->cqn);
+        bfm_wr64be(&qpc[160], bfm_dma_addr(qp->dbr));
+        qpc[172] = 0u;                                       /* rq_type = 通常の RQ */
+        qpc[198] = cs_req;
+        for (uint32_t p = 0; p < npages; p++) bfm_wr64be(&in[272 + p * 8u], bfm_dma_addr(qp->wq + p * BFM_PAGE));
     }
+    uint8_t out[16];
+    const int rc = mlx5_cmd_run(d, j, in, 272u + npages * 8u, out, sizeof(out), "CREATE_QP");
+    if (rc != BFM_OK) return rc;
     qp->qpn = bfm_rd24be(&out[9]);
     qp->has_qp = 1;
     qp->sq_pc = qp->rq_pc = 0;
@@ -104,7 +99,7 @@ int mlx5_qp_create(bfm_dev_t *d, bfm_qp_t *qp, uint8_t st, uint8_t cs_req)
 
 /* RST -> INIT。pd・rlky・ポート番号だけを入れる(rre などを入れると ConnectX-4 の FW は
  * BAD_PARAM で断る。vfio_nvme で確認)。UD(GSI)は Q_Key も入れる。 */
-int mlx5_qp_rst2init(bfm_dev_t *d, bfm_qp_t *qp, int ud)
+int mlx5_qp_rst2init(bfm_dev_t *d, bfm_cmd_t *j, bfm_qp_t *qp, int ud)
 {
     uint8_t in[QP_IN_SIZE], out[16];
     qp_in_header(in, MLX5_CMD_RST2INIT_QP, qp->qpn, 0);
@@ -113,11 +108,11 @@ int mlx5_qp_rst2init(bfm_dev_t *d, bfm_qp_t *qp, int ud)
     qpc[11] = 0x10u;                                         /* rlky */
     qpc[24 + 37] = 1u;                                       /* vhca_port_num */
     if (ud) bfm_wr32be(&qpc[168], MLX5_QP1_QKEY);
-    return mlx5_cmd(d, in, sizeof(in), out, sizeof(out), "RST2INIT_QP");
+    return mlx5_cmd_run(d, j, in, sizeof(in), out, sizeof(out), "RST2INIT_QP");
 }
 
-/* GSI(UD)を INIT -> RTR -> RTS。相手の情報は送る WQE に載せるので、ここでは要らない。 */
-int mlx5_qp_ud_to_rts(bfm_dev_t *d, bfm_qp_t *qp)
+/* GSI(UD)を INIT -> RTR。相手の情報は送る WQE に載せるので、ここでは要らない。 */
+int mlx5_qp_ud_init2rtr(bfm_dev_t *d, bfm_cmd_t *j, bfm_qp_t *qp)
 {
     uint8_t in[QP_IN_SIZE], out[16];
     qp_in_header(in, MLX5_CMD_INIT2RTR_QP, qp->qpn, OPT_PKEY | OPT_QKEY);
@@ -126,11 +121,16 @@ int mlx5_qp_ud_to_rts(bfm_dev_t *d, bfm_qp_t *qp)
     qpc[8] = (uint8_t)((3u << 5) | 20u);
     qpc[24 + 37] = 1u;
     bfm_wr32be(&qpc[168], MLX5_QP1_QKEY);
-    int rc = mlx5_cmd(d, in, sizeof(in), out, sizeof(out), "INIT2RTR_QP(GSI)");
-    if (rc != BFM_OK) return rc;
+    return mlx5_cmd_run(d, j, in, sizeof(in), out, sizeof(out), "INIT2RTR_QP(GSI)");
+}
+
+/* GSI(UD)を RTR -> RTS。 */
+int mlx5_qp_ud_rtr2rts(bfm_dev_t *d, bfm_cmd_t *j, bfm_qp_t *qp)
+{
+    uint8_t in[QP_IN_SIZE], out[16];
     qp_in_header(in, MLX5_CMD_RTR2RTS_QP, qp->qpn, 0);
     bfm_wr24be(&in[24 + 121], qp->local_psn);
-    return mlx5_cmd(d, in, sizeof(in), out, sizeof(out), "RTR2RTS_QP(GSI)");
+    return mlx5_cmd_run(d, j, in, sizeof(in), out, sizeof(out), "RTR2RTS_QP(GSI)");
 }
 
 /* 2 の冪に切り下げた log2(v >= 1)。 */
@@ -156,7 +156,7 @@ static uint8_t log_rra(const bfm_dev_t *d)
  * log_rra_max(responder として受け付ける read / atomic の数)はここで入れる
  * (RTR2RTS で書いても FW は保持しない)。
  * ===============================================================*/
-int mlx5_qp_init2rtr_rc(bfm_dev_t *d, bfm_qp_t *qp, struct bfm_conn *c)
+int mlx5_qp_init2rtr_rc(bfm_dev_t *d, bfm_cmd_t *j, bfm_qp_t *qp, struct bfm_conn *c)
 {
     uint8_t in[QP_IN_SIZE], out[16];
     qp_in_header(in, MLX5_CMD_INIT2RTR_QP, qp->qpn, OPT_RRE | OPT_RAE | OPT_RWE | OPT_PKEY);
@@ -174,53 +174,53 @@ int mlx5_qp_init2rtr_rc(bfm_dev_t *d, bfm_qp_t *qp, struct bfm_conn *c)
     bfm_wr16be(&ads[34], mlx5_udp_sport(qp->qpn, c->peer_qpn));
     ads[37] = 1u;
     memcpy(&ads[38], c->peer_mac, 6);
-    return mlx5_cmd(d, in, sizeof(in), out, sizeof(out), "INIT2RTR_QP");
+    return mlx5_cmd_run(d, j, in, sizeof(in), out, sizeof(out), "INIT2RTR_QP");
 }
 
 /*=================================================================
  * RC を RTR -> RTS。相手からの write / read / atomic を許す(rre / rwe / rae と
- * atomic_mode)。requester として出せる read / atomic の数は、自分の能力と相手が
- * 受け付ける数(c->peer_rr)の小さいほう。
- * atomic_mode を付けて断られたら、付けずにもう一度試す(相手からの atomic は受けない)。
+ * atomic_mode = amode)。requester として出せる read / atomic の数(c->max_rd)は、
+ * 自分の能力と相手が受け付ける数(c->peer_rr)の小さいほう。
+ * amode を付けて断られたら、呼び出し側が amode = 0 でもう一度呼ぶ(相手からの atomic は受けない)。
  * ===============================================================*/
-int mlx5_qp_rtr2rts_rc(bfm_dev_t *d, bfm_qp_t *qp, struct bfm_conn *c)
+int mlx5_qp_rtr2rts_rc(bfm_dev_t *d, bfm_cmd_t *j, bfm_qp_t *qp, struct bfm_conn *c, uint8_t amode)
 {
     uint8_t sra_cap = (d->log_max_ra_req_qp > 4u) ? 4u : d->log_max_ra_req_qp;
     uint8_t sra = c->peer_rr ? floor_log2(c->peer_rr) : 0u;
     if (sra > sra_cap) sra = sra_cap;
     c->max_rd = (uint8_t)(1u << sra);
 
-    uint8_t amode = d->atomic_mode;
-    for (;;) {
-        uint8_t in[QP_IN_SIZE], out[16];
-        qp_in_header(in, MLX5_CMD_RTR2RTS_QP, qp->qpn,
-                     OPT_RRE | OPT_RAE | OPT_RWE | OPT_PM_STATE | OPT_RNR_TIMEOUT);
-        uint8_t *qpc = &in[24];
-        qpc[2] = (uint8_t)(MLX5_QP_PM_MIGRATED << 3);
-        qpc[24 + 8] = (uint8_t)((g_bfm_ack_timeout & 0x1fu) << 3);
-        qpc[24 + 37] = 1u;
-        qpc[113] = (uint8_t)((sra << 5) | (g_bfm_retry_count & 0x7u));
-        qpc[114] = (uint8_t)(7u << 5);                       /* rnr_retry = 無限 */
-        bfm_wr24be(&qpc[121], c->peer_psn);                  /* next_send_psn = 相手が名乗った PSN */
-        qpc[145] = (uint8_t)((log_rra(d) << 5) | (amode & 0x0fu));
-        qpc[146] = (uint8_t)(0xc0u | (amode ? 0x20u : 0u));  /* rre | rwe | rae */
-        const int rc = mlx5_cmd(d, in, sizeof(in), out, sizeof(out), "RTR2RTS_QP");
-        if (rc == BFM_OK) {
-            if (amode != d->atomic_mode)
-                BFM_LOG("bfm: 注意: atomic_mode=%u は断られた。相手からの atomic は受けない\n",
-                        d->atomic_mode);
-            return BFM_OK;
-        }
-        if (amode == 0u) return rc;
-        amode = 0u;                                          /* atomic_mode を付けずにもう一度 */
-    }
+    uint8_t in[QP_IN_SIZE], out[16];
+    qp_in_header(in, MLX5_CMD_RTR2RTS_QP, qp->qpn,
+                 OPT_RRE | OPT_RAE | OPT_RWE | OPT_PM_STATE | OPT_RNR_TIMEOUT);
+    uint8_t *qpc = &in[24];
+    qpc[2] = (uint8_t)(MLX5_QP_PM_MIGRATED << 3);
+    qpc[24 + 8] = (uint8_t)((g_bfm_ack_timeout & 0x1fu) << 3);
+    qpc[24 + 37] = 1u;
+    qpc[113] = (uint8_t)((sra << 5) | (g_bfm_retry_count & 0x7u));
+    qpc[114] = (uint8_t)(7u << 5);                           /* rnr_retry = 無限 */
+    bfm_wr24be(&qpc[121], c->peer_psn);                      /* next_send_psn = 相手が名乗った PSN */
+    qpc[145] = (uint8_t)((log_rra(d) << 5) | (amode & 0x0fu));
+    qpc[146] = (uint8_t)(0xc0u | (amode ? 0x20u : 0u));      /* rre | rwe | rae */
+    return mlx5_cmd_run(d, j, in, sizeof(in), out, sizeof(out), "RTR2RTS_QP");
 }
 
-/* QP と CQ を壊す(UAR は呼び出し側が返す)。 */
-void mlx5_qp_destroy(bfm_dev_t *d, bfm_qp_t *qp)
+/*=================================================================
+ * QP と CQ を壊す(作ったものだけ。UAR は呼び出し側が返す)。失敗しても作ったものとしては
+ * 扱わない(作り直さず、TEARDOWN_HCA で消える)。
+ * 戻り値: BFM_INPROGRESS = まだ。BFM_OK = 済んだ。
+ * ===============================================================*/
+int mlx5_qp_destroy(bfm_dev_t *d, bfm_cmd_t *j, bfm_qp_t *qp)
 {
-    if (qp->has_qp) (void)mlx5_destroy_obj(d, MLX5_CMD_DESTROY_QP, qp->qpn, "DESTROY_QP");
-    if (qp->has_cq) (void)mlx5_destroy_obj(d, MLX5_CMD_DESTROY_CQ, qp->cqn, "DESTROY_CQ");
-    qp->has_qp = 0;
-    qp->has_cq = 0;
+    if (qp->has_qp) {
+        if (mlx5_destroy_obj(d, j, MLX5_CMD_DESTROY_QP, qp->qpn, "DESTROY_QP") == BFM_INPROGRESS)
+            return BFM_INPROGRESS;
+        qp->has_qp = 0;
+    }
+    if (qp->has_cq) {
+        if (mlx5_destroy_obj(d, j, MLX5_CMD_DESTROY_CQ, qp->cqn, "DESTROY_CQ") == BFM_INPROGRESS)
+            return BFM_INPROGRESS;
+        qp->has_cq = 0;
+    }
+    return BFM_OK;
 }

@@ -1,6 +1,6 @@
 {
   "file": "src/mlx5_qp.c",
-  "summary": "QP(RC と GSI)の作成・状態遷移・破棄を持つ。QP の作成のときに送受信で共有する CQ も作る。QPC の欄の位置は ConnectX-4 / 4 Lx の実機で確かめたもの(ソースの冒頭のコメント)を使う。RC は RST → INIT → RTR → RTS、GSI(UD)は RST → INIT → RTR → RTS と進める。",
+  "summary": "QP(RC と GSI)の作成・状態遷移・破棄を持つ。どれも FW のコマンド 1 つで、`mlx5_cmd_run()` と同じく待たずに進める(`BFM_INPROGRESS` の間は同じ `bfm_cmd_t` と引数で呼び直す)。送受信で共有する CQ は呼び出し側が先に `mlx5_cq_create()` で作り、破棄は `mlx5_qp_destroy()` が QP と一緒に行う。QPC の欄の位置は ConnectX-4 / 4 Lx の実機で確かめたもの(ソースの冒頭のコメント)を使う。RC は RST → INIT → RTR → RTS、GSI(UD)も RST → INIT → RTR → RTS と、1 つの遷移を 1 つの関数で進める。",
   "functions": [
     {
       "func": "qp_in_header",
@@ -37,33 +37,30 @@
     },
     {
       "func": "mlx5_qp_create",
-      "summary": "QP を作る。\n\n* RQ・SQ の大きさを検査し、WQ のページ数を数える(切り上げ)。\n* 送受信で共有する CQ を作る(`mlx5_cq_create()`)。\n* WQ(RQ の直後に SQ)とドアベルのレコードを 0 で埋める。`qp->sq` を SQ の先頭にする。\n* `CREATE_QP` を出す。QPC には st・pd・mtu(1024。後で変える)と log_msg_max(20)・RQ と SQ の大きさ・ts_format・uar_page・送受信の cqn・dbr_addr・rq_type(通常)・cs_req を入れ、WQ の各ページの物理アドレスを並べる。\n* 返った QPN を `qp->qpn` に入れ、生産位置を 0 にし、自分の開始 PSN を時刻から決める。",
+      "summary": "QP を作るコマンド(`CREATE_QP`)を待たずに進める。\n\n* RQ・SQ の大きさを検査し、WQ のページ数を数える(切り上げ)。\n* まだ出していなければ、WQ(RQ の直後に SQ)とドアベルのレコードを 0 で埋め、`qp->sq` を SQ の先頭にし、入力を作る。QPC には st・pd・mtu(1024。後で変える)と log_msg_max(20)・RQ と SQ の大きさ・ts_format・uar_page・送受信の cqn(`qp->cqn`)・dbr_addr・rq_type(通常)・cs_req を入れ、RC なら fre(UMR を出せる)も入れ、WQ の各ページの物理アドレスを並べる。\n* 完了したら、返った QPN を `qp->qpn` に入れ、`has_qp` を立て、生産位置を 0 にし、自分の開始 PSN を時刻から決める。",
       "args": {
         "d": "デバイスの状態",
-        "qp": "QP(`rq_log` / `sq_log` / `cq_log` / `wq` / `dbr` / `cq` / `cq_dbr` / `uarn` は呼び出し側が埋めておく)",
+        "j": "このコマンドの進み具合(`mlx5_cmd_run()` に渡す)",
+        "qp": "QP(`rq_log` / `sq_log` / `wq` / `dbr` / `uarn` / `cqn` は呼び出し側が埋めておく)",
         "st": "QP の種類(`MLX5_QP_ST_RC` か `MLX5_QP_ST_QP1`(GSI))",
         "cs_req": "QPC の cs_req。0x11 で 32 バイトまでの read / atomic の応答を CQE に書かせる"
       },
-      "ret": "`BFM_OK`: 作った。`BFM_E_PARAM`: `rq_log` か `sq_log` が 16 を超える、または WQ が 32 ページを超える。そのほか `mlx5_cq_create()` / `mlx5_cmd()` の戻り値。",
-      "pre": "`qp` の上の欄を埋めてあること。`wq` が WQ の大きさ(16 x 2^rq_log + 64 x 2^sq_log バイト)を 4KiB に切り上げた分だけあること(ページ数は切り上げで数え、各ページの物理アドレスを渡す)。`d->pdn` が決まっていること。",
-      "notes": "* `CREATE_QP` が失敗したら、作った CQ を壊して `has_cq` を 0 に戻す。\n* 大きさの検査(`rq_log` / `sq_log` が 16 以下、WQ が 32 ページ以下)は CQ を作る前に行うので、`BFM_E_PARAM` で戻るときは何も作らない。\n* 入力の領域は静的変数なので、再入できない。",
+      "ret": "`BFM_OK`: 作った。`BFM_E_PARAM`: `rq_log` か `sq_log` が 16 を超える、または WQ が 32 ページを超える。そのほか `mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS` なら同じ `j` と引数で呼び直す)。",
+      "pre": "送受信で共有する CQ を `mlx5_cq_create()` で先に作り、`qp->cqn` に入れてあること。`wq` が WQ の大きさ(16 x 2^rq_log + 64 x 2^sq_log バイト)を 4KiB に切り上げた分だけあること(ページ数は切り上げで数え、各ページの物理アドレスを渡す)。`d->pdn` が決まっていること。",
+      "notes": "* CQ は作らない。失敗しても CQ は消さない(呼び出し側が `mlx5_qp_destroy()` で消す)。\n* 入力の領域は静的変数で、`j` が出ていないときだけ作り直す(出した後は `mlx5_cmd_run()` が見ない)。WQ とドアベルのレコードを 0 で埋めるのも、出していないときだけ。",
       "flow": [
         {"if": "qp->rq_log > 16 または qp->sq_log > 16 ?", "then": [{"return": "BFM_E_PARAM"}]},
         {"do": "rq_bytes = 16 << rq_log、wq_bytes = rq_bytes + (64 << sq_log)、npages = wq_bytes を 4KiB で割って切り上げた数"},
         {"if": "npages > 32 ?", "then": [{"return": "BFM_E_PARAM"}]},
-        {"call": "rc = mlx5_cq_create(d, qp->uarn, qp->cq, qp->cq_log, qp->cq_dbr, &qp->cqn) を呼ぶ"},
-        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-        {"do": "qp->has_cq = 1、qp->cq_cc = 0"},
-        {"do": "qp->sq = qp->wq + rq_bytes。WQ と dbr[0..1] を 0 で埋める"},
-        {"do": "入力を 0 で埋め、opcode = CREATE_QP と QPC の各欄(st・pd・mtu と log_msg_max・log_rq_size・log_sq_size・ts_format・uar_page・cqn_snd・cqn_rcv・dbr_addr・rq_type・cs_req)を書く"},
-        {"if": "st == MLX5_QP_ST_RC ?", "then": [{"do": "qpc[114] = 0x08(fre: UMR を出せる。T10-DIF のオフロードで使う)"}]},
-        {"do": "WQ の各ページの物理アドレスを入力の 272 バイト目以降に並べる"},
-        {"call": "rc = mlx5_cmd(d, in, 272 + npages x 8, out, 16, \"CREATE_QP\") を呼ぶ"},
-        {"if": "rc != BFM_OK ?", "then": [
-          {"call": "mlx5_destroy_obj(d, MLX5_CMD_DESTROY_CQ, qp->cqn, \"DESTROY_CQ\") を呼ぶ"},
-          {"do": "qp->has_cq = 0"},
-          {"return": "rc"}
+        {"if": "!j->posted ?", "then": [
+          {"do": "qp->sq = qp->wq + rq_bytes。WQ と dbr[0..1] を 0 で埋める"},
+          {"do": "入力を 0 で埋め、opcode = CREATE_QP と QPC の各欄(st・pd・mtu と log_msg_max・log_rq_size・log_sq_size・ts_format・uar_page)を書く"},
+          {"if": "st == MLX5_QP_ST_RC ?", "then": [{"do": "qpc[114] = 0x08(fre: UMR を出せる。T10-DIF のオフロードで使う)"}]},
+          {"do": "QPC の cqn_snd・cqn_rcv = qp->cqn、dbr_addr、rq_type = 0(通常の RQ)、cs_req を書く"},
+          {"do": "WQ の各ページの物理アドレスを入力の 272 バイト目以降に並べる"}
         ]},
+        {"call": "rc = mlx5_cmd_run(d, j, in, 272 + npages x 8, out, 16, \"CREATE_QP\") を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
         {"do": "qp->qpn = out[9..11]、qp->has_qp = 1、qp->sq_pc = qp->rq_pc = 0"},
         {"do": "qp->local_psn = (bfm_port_time_ns() >> 6) の下位 24 ビット"},
         {"return": "BFM_OK"}
@@ -71,13 +68,14 @@
     },
     {
       "func": "mlx5_qp_rst2init",
-      "summary": "QP を RST から INIT へ移す(`RST2INIT_QP`)。QPC には pd・rlky・ポート番号(1)だけを入れ、UD(GSI)なら Q_Key(`MLX5_QP1_QKEY`)も入れる。",
+      "summary": "QP を RST から INIT へ移すコマンド(`RST2INIT_QP`)を待たずに進める。QPC には pd・rlky・ポート番号(1)だけを入れ、UD(GSI)なら Q_Key(`MLX5_QP1_QKEY`)も入れる。",
       "args": {
         "d": "デバイスの状態",
+        "j": "このコマンドの進み具合(`mlx5_cmd_run()` に渡す)",
         "qp": "QP(`qpn` が決まっていること)",
         "ud": "0 以外なら UD(GSI)として Q_Key を入れる"
       },
-      "ret": "`mlx5_cmd()` の戻り値。",
+      "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS` なら同じ `j` と引数で呼び直す)。",
       "pre": "`mlx5_qp_create()` が成功していること。",
       "notes": "rre などのアクセスのフラグを入れると ConnectX-4 の FW は BAD_PARAM で断るので、ここでは入れない(RTR2RTS で入れる)。",
       "flow": [
@@ -86,29 +84,44 @@
         {"if": "ud ?", "then": [
           {"do": "QPC の q_key = MLX5_QP1_QKEY"}
         ]},
-        {"call": "mlx5_cmd(d, in, QP_IN_SIZE, out, 16, \"RST2INIT_QP\") を呼ぶ"},
-        {"return": "mlx5_cmd() の戻り値"}
+        {"call": "mlx5_cmd_run(d, j, in, QP_IN_SIZE, out, 16, \"RST2INIT_QP\") を呼ぶ"},
+        {"return": "mlx5_cmd_run() の戻り値"}
       ]
     },
     {
-      "func": "mlx5_qp_ud_to_rts",
-      "summary": "GSI(UD)の QP を INIT → RTR → RTS へ移す。INIT2RTR では pd・mtu(1024)と log_msg_max・ポート番号・Q_Key を入れ(opt_param_mask は PKEY・QKEY)、RTR2RTS では next_send_psn に自分の開始 PSN を入れる。",
+      "func": "mlx5_qp_ud_init2rtr",
+      "summary": "GSI(UD)の QP を INIT から RTR へ移すコマンド(`INIT2RTR_QP`。opt_param_mask は PKEY・QKEY)を待たずに進める。QPC には pd・mtu(1024)と log_msg_max(20)・ポート番号(1)・Q_Key(`MLX5_QP1_QKEY`)を入れる。",
       "args": {
         "d": "デバイスの状態",
+        "j": "このコマンドの進み具合(`mlx5_cmd_run()` に渡す)",
         "qp": "GSI の QP(INIT にあること)"
       },
-      "ret": "`BFM_OK`: RTS になった。そのほか `mlx5_cmd()` の戻り値。",
+      "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS` なら同じ `j` と引数で呼び直す)。",
       "pre": "`mlx5_qp_rst2init()`(`ud` = 1)が成功していること。",
-      "notes": "相手の情報は送る WQE に載せるので、ここでは入れない。INIT2RTR が失敗したら RTR2RTS は出さない。",
+      "notes": "相手の情報は送る WQE に載せるので、ここでは入れない。",
       "flow": [
         {"call": "qp_in_header(in, MLX5_CMD_INIT2RTR_QP, qp->qpn, OPT_PKEY OR OPT_QKEY) を呼ぶ"},
         {"do": "QPC の pd、mtu と log_msg_max、vhca_port_num = 1、q_key = MLX5_QP1_QKEY を書く"},
-        {"call": "rc = mlx5_cmd(d, in, QP_IN_SIZE, out, 16, \"INIT2RTR_QP(GSI)\") を呼ぶ"},
-        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"call": "mlx5_cmd_run(d, j, in, QP_IN_SIZE, out, 16, \"INIT2RTR_QP(GSI)\") を呼ぶ"},
+        {"return": "mlx5_cmd_run() の戻り値"}
+      ]
+    },
+    {
+      "func": "mlx5_qp_ud_rtr2rts",
+      "summary": "GSI(UD)の QP を RTR から RTS へ移すコマンド(`RTR2RTS_QP`)を待たずに進める。QPC の next_send_psn に自分の開始 PSN(`qp->local_psn`)を入れる。",
+      "args": {
+        "d": "デバイスの状態",
+        "j": "このコマンドの進み具合(`mlx5_cmd_run()` に渡す)",
+        "qp": "GSI の QP(RTR にあること)"
+      },
+      "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS` なら同じ `j` と引数で呼び直す)。",
+      "pre": "`mlx5_qp_ud_init2rtr()` が成功していること。",
+      "notes": "特になし。",
+      "flow": [
         {"call": "qp_in_header(in, MLX5_CMD_RTR2RTS_QP, qp->qpn, 0) を呼ぶ"},
         {"do": "QPC の next_send_psn = qp->local_psn を書く"},
-        {"call": "mlx5_cmd(d, in, QP_IN_SIZE, out, 16, \"RTR2RTS_QP(GSI)\") を呼ぶ"},
-        {"return": "mlx5_cmd() の戻り値"}
+        {"call": "mlx5_cmd_run(d, j, in, QP_IN_SIZE, out, 16, \"RTR2RTS_QP(GSI)\") を呼ぶ"},
+        {"return": "mlx5_cmd_run() の戻り値"}
       ]
     },
     {
@@ -139,34 +152,37 @@
     },
     {
       "func": "mlx5_qp_init2rtr_rc",
-      "summary": "RC の QP を INIT から RTR へ移す(`INIT2RTR_QP`。opt_param_mask は RRE・RAE・RWE・PKEY)。QPC には pd・経路 MTU と log_msg_max(20)・相手の QPN・log_rra_max・min_rnr_nak(12)・next_rcv_psn(自分が名乗った PSN)を入れ、アドレスパスには GID の 0 番・hop_limit(64)・相手の GID・UDP の送信元ポート(`mlx5_udp_sport()`)・ポート番号(1)・相手の MAC を入れる。",
+      "summary": "RC の QP を INIT から RTR へ移すコマンド(`INIT2RTR_QP`。opt_param_mask は RRE・RAE・RWE・PKEY)を待たずに進める。QPC には pd・経路 MTU と log_msg_max(20)・相手の QPN・log_rra_max・min_rnr_nak(12)・next_rcv_psn(自分が名乗った PSN)を入れ、アドレスパスには GID の 0 番・hop_limit(64)・相手の GID・UDP の送信元ポート(`mlx5_udp_sport()`)・ポート番号(1)・相手の MAC を入れる。",
       "args": {
         "d": "デバイスの状態",
+        "j": "このコマンドの進み具合(`mlx5_cmd_run()` に渡す)",
         "qp": "RC の QP(INIT にあること)",
         "c": "接続(`path_mtu` / `peer_qpn` / `peer_gid` / `peer_mac` を使う)"
       },
-      "ret": "`mlx5_cmd()` の戻り値。",
+      "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS` なら同じ `j` と引数で呼び直す)。",
       "pre": "`mlx5_qp_rst2init()` が成功し、`c` に相手の情報が入っていること。",
       "notes": "log_rra_max(responder として受け付ける read / atomic の数)はここで入れる。RTR2RTS で書いても FW は保持しない。",
       "flow": [
         {"call": "qp_in_header(in, MLX5_CMD_INIT2RTR_QP, qp->qpn, OPT_RRE OR OPT_RAE OR OPT_RWE OR OPT_PKEY) を呼ぶ"},
         {"call": "QPC の pd、mtu = c->path_mtu と log_msg_max = 20、remote_qpn = c->peer_qpn、log_rra_max = log_rra(d)、min_rnr_nak = 12、next_rcv_psn = qp->local_psn を書く"},
         {"call": "アドレスパスの src_addr_index = 0、hop_limit = 64、rgid = c->peer_gid、udp_sport = mlx5_udp_sport(qp->qpn, c->peer_qpn)、vhca_port_num = 1、rmac = c->peer_mac を書く"},
-        {"call": "mlx5_cmd(d, in, QP_IN_SIZE, out, 16, \"INIT2RTR_QP\") を呼ぶ"},
-        {"return": "mlx5_cmd() の戻り値"}
+        {"call": "mlx5_cmd_run(d, j, in, QP_IN_SIZE, out, 16, \"INIT2RTR_QP\") を呼ぶ"},
+        {"return": "mlx5_cmd_run() の戻り値"}
       ]
     },
     {
       "func": "mlx5_qp_rtr2rts_rc",
-      "summary": "RC の QP を RTR から RTS へ移す(`RTR2RTS_QP`。opt_param_mask は RRE・RAE・RWE・PM_STATE・RNR_TIMEOUT)。\n\n* requester として出せる read / atomic の数(log_sra_max)を、自分の能力(上限 4)と相手が受け付ける数 `c->peer_rr` の小さいほうにし、その数を `c->max_rd` に入れる。\n* QPC には pm_state(MIGRATED)・ack_timeout(`g_bfm_ack_timeout`)・ポート番号・log_sra_max と retry_count(`g_bfm_retry_count`)・rnr_retry(7 = 無限)・next_send_psn(相手が名乗った PSN)・log_rra_max と atomic_mode・rre と rwe(atomic_mode が 0 でなければ rae も)を入れる。\n* atomic_mode を付けて断られたら、atomic_mode = 0 でもう一度試す(相手からの atomic は受けない)。",
+      "summary": "RC の QP を RTR から RTS へ移すコマンド(`RTR2RTS_QP`。opt_param_mask は RRE・RAE・RWE・PM_STATE・RNR_TIMEOUT)を待たずに進める。\n\n* requester として出せる read / atomic の数(log_sra_max)を、自分の能力(上限 4)と相手が受け付ける数 `c->peer_rr` の小さいほうにし、その数を `c->max_rd` に入れる。\n* QPC には pm_state(MIGRATED)・ack_timeout(`g_bfm_ack_timeout`)・ポート番号・log_sra_max と retry_count(`g_bfm_retry_count`)・rnr_retry(7 = 無限)・next_send_psn(相手が名乗った PSN)・log_rra_max と atomic_mode(`amode`)・rre と rwe(`amode` が 0 でなければ rae も)を入れる。",
       "args": {
         "d": "デバイスの状態",
+        "j": "このコマンドの進み具合(`mlx5_cmd_run()` に渡す)",
         "qp": "RC の QP(RTR にあること)",
-        "c": "接続(`peer_rr` / `peer_psn` を使い、`max_rd` を書く)"
+        "c": "接続(`peer_rr` / `peer_psn` を使い、`max_rd` を書く)",
+        "amode": "QPC の atomic_mode(下位 4 ビット。0 なら相手からの atomic は受けない)"
       },
-      "ret": "`BFM_OK`: RTS になった。そのほか `mlx5_cmd()` の戻り値(atomic_mode = 0 で失敗したとき)。",
-      "pre": "`mlx5_qp_init2rtr_rc()` が成功していること。HCA の能力(`log_max_ra_req_qp` / `log_max_ra_res_qp` / `atomic_mode`)を読んであること。",
-      "notes": "* 試すのは多くて 2 回(1 回目は `d->atomic_mode`、2 回目は 0)。2 回目で成功したときは、atomic_mode が断られたことを表示する。\n* `d->atomic_mode` が 0 なら 1 回目の失敗でそのまま戻る。",
+      "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS` なら同じ `j` と引数で呼び直す)。",
+      "pre": "`mlx5_qp_init2rtr_rc()` が成功していること。HCA の能力(`log_max_ra_req_qp` / `log_max_ra_res_qp`)を読んであること。",
+      "notes": "* `amode` を付けて断られたら、呼び出し側が `amode` = 0 でもう一度呼ぶ(`conn_step()`)。ここではやり直さない。\n* `c->max_rd` は呼ぶたびに計算し直して書く。",
       "flow": [
         {"do": "sra_cap = log_max_ra_req_qp と 4 の小さいほう"},
         {"if": "c->peer_rr != 0 ?", "then": [
@@ -176,40 +192,35 @@
         ]},
         {"if": "sra > sra_cap ?", "then": [{"do": "sra = sra_cap"}]},
         {"do": "c->max_rd = 1 << sra"},
-        {"do": "amode = d->atomic_mode"},
-        {"loop": "成功するか amode = 0 で失敗するまで", "body": [
-          {"call": "qp_in_header(in, MLX5_CMD_RTR2RTS_QP, qp->qpn, OPT_RRE OR OPT_RAE OR OPT_RWE OR OPT_PM_STATE OR OPT_RNR_TIMEOUT) を呼ぶ"},
-          {"call": "QPC の pm_state、ack_timeout、vhca_port_num = 1、log_sra_max = sra と retry_count、rnr_retry = 7、next_send_psn = c->peer_psn、log_rra_max = log_rra(d) と atomic_mode = amode、rre と rwe(amode が 0 でなければ rae も)を書く"},
-          {"call": "rc = mlx5_cmd(d, in, QP_IN_SIZE, out, 16, \"RTR2RTS_QP\") を呼ぶ"},
-          {"if": "rc == BFM_OK ?", "then": [
-            {"if": "amode != d->atomic_mode ?", "then": [
-              {"do": "BFM_LOG で atomic_mode が断られたことを表示"}
-            ]},
-            {"return": "BFM_OK"}
-          ]},
-          {"if": "amode == 0 ?", "then": [{"return": "rc"}]},
-          {"do": "amode = 0(atomic_mode を付けずにもう一度)"}
-        ]}
+        {"call": "qp_in_header(in, MLX5_CMD_RTR2RTS_QP, qp->qpn, OPT_RRE OR OPT_RAE OR OPT_RWE OR OPT_PM_STATE OR OPT_RNR_TIMEOUT) を呼ぶ"},
+        {"call": "QPC の pm_state、ack_timeout、vhca_port_num = 1、log_sra_max = sra と retry_count、rnr_retry = 7、next_send_psn = c->peer_psn、log_rra_max = log_rra(d) と atomic_mode = amode、rre と rwe(amode が 0 でなければ rae も)を書く"},
+        {"call": "mlx5_cmd_run(d, j, in, QP_IN_SIZE, out, 16, \"RTR2RTS_QP\") を呼ぶ"},
+        {"return": "mlx5_cmd_run() の戻り値"}
       ]
     },
     {
       "func": "mlx5_qp_destroy",
-      "summary": "QP と CQ を壊す。作ってあるもの(`has_qp` / `has_cq`)だけに `DESTROY_QP` / `DESTROY_CQ` を出し、両方の印を 0 にする。",
+      "summary": "QP と CQ を壊すコマンドを待たずに進める。作ってあるもの(`has_qp` / `has_cq`)だけに、QP、CQ の順に `DESTROY_QP` / `DESTROY_CQ` を出し、完了したら(失敗でも)その印を 0 にする。",
       "args": {
         "d": "デバイスの状態",
+        "j": "このコマンドの進み具合(`mlx5_destroy_obj()` に渡す。QP と CQ で同じものを使う)",
         "qp": "壊す QP"
       },
-      "ret": "なし",
+      "ret": "`BFM_INPROGRESS`: まだ(同じ `j` と引数で呼び直す)。`BFM_OK`: 済んだ。",
       "pre": "特になし。",
-      "notes": "* コマンドの失敗は無視する。\n* UAR は返さない(呼び出し側が返す)。WQ などの DMA 領域も返さない。",
+      "notes": "* コマンドの失敗は無視する。失敗しても作ったものとしては扱わない(作り直さず、`TEARDOWN_HCA` で消える)。\n* UAR は返さない(呼び出し側が返す)。WQ などの DMA 領域も返さない。",
       "flow": [
         {"if": "qp->has_qp ?", "then": [
-          {"call": "mlx5_destroy_obj(d, MLX5_CMD_DESTROY_QP, qp->qpn, \"DESTROY_QP\") を呼ぶ"}
+          {"call": "mlx5_destroy_obj(d, j, MLX5_CMD_DESTROY_QP, qp->qpn, \"DESTROY_QP\") を呼ぶ"},
+          {"if": "BFM_INPROGRESS だった?", "then": [{"return": "BFM_INPROGRESS"}]},
+          {"do": "qp->has_qp = 0"}
         ]},
         {"if": "qp->has_cq ?", "then": [
-          {"call": "mlx5_destroy_obj(d, MLX5_CMD_DESTROY_CQ, qp->cqn, \"DESTROY_CQ\") を呼ぶ"}
+          {"call": "mlx5_destroy_obj(d, j, MLX5_CMD_DESTROY_CQ, qp->cqn, \"DESTROY_CQ\") を呼ぶ"},
+          {"if": "BFM_INPROGRESS だった?", "then": [{"return": "BFM_INPROGRESS"}]},
+          {"do": "qp->has_cq = 0"}
         ]},
-        {"do": "qp->has_qp = 0、qp->has_cq = 0"}
+        {"return": "BFM_OK"}
       ]
     }
   ]

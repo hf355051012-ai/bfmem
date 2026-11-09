@@ -98,6 +98,73 @@
       ]
     },
     {
+      "func": "idle",
+      "summary": "待ちを返す関数(`BFM_INPROGRESS`)を呼び直すまでの合間。50us 眠る。",
+      "args": {},
+      "ret": "なし",
+      "pre": "特になし。",
+      "notes": "本番ではここでほかの仕事をする(ソースのコメント)。",
+      "flow": [
+        {"do": "usleep(50)"}
+      ]
+    },
+    {
+      "func": "do_init",
+      "summary": "`bfm_init()` を `BFM_INPROGRESS` でなくなるまで呼び続け(合間に `idle()`)、最後の戻り値を返す。",
+      "args": {},
+      "ret": "`bfm_init()` の最後の戻り値(`BFM_OK` か失敗)。",
+      "pre": "設定の変数を決め終えていること(`main()`)。",
+      "notes": "特になし。",
+      "flow": [
+        {"while": "(rc = bfm_init()) == BFM_INPROGRESS ?", "body": [
+          {"call": "idle() を呼ぶ"}
+        ]},
+        {"return": "rc"}
+      ]
+    },
+    {
+      "func": "do_shutdown",
+      "summary": "`bfm_shutdown()` を `BFM_INPROGRESS` でなくなるまで呼び続ける(合間に `idle()`)。",
+      "args": {},
+      "ret": "なし",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"while": "bfm_shutdown() == BFM_INPROGRESS ?", "body": [
+          {"call": "idle() を呼ぶ"}
+        ]}
+      ]
+    },
+    {
+      "func": "do_connect",
+      "summary": "相手へ接続する。`c = NULL` から `bfm_connect(&c, ...)` を `BFM_INPROGRESS` でなくなるまで呼び続ける(合間に `idle()`)。",
+      "args": {"ip": "相手の IPv4 アドレス", "mac": "相手の MAC アドレス(全部 0 なら自動)", "port": "接続の番号", "ms": "接続の時間の上限(ミリ秒。0 なら `bfm_connect()` の既定)"},
+      "ret": "接続。失敗なら NULL(理由は bfmem が表示する)。",
+      "pre": "`bfm_init()` が済んでいること。",
+      "notes": "特になし。",
+      "flow": [
+        {"do": "c = NULL"},
+        {"while": "(rc = bfm_connect(&c, ip, mac, port, ms)) == BFM_INPROGRESS ?", "body": [
+          {"call": "idle() を呼ぶ"}
+        ]},
+        {"return": "rc == BFM_OK なら c、そうでなければ NULL"}
+      ]
+    },
+    {
+      "func": "do_disconnect",
+      "summary": "`bfm_disconnect(c)` を `BFM_INPROGRESS` でなくなるまで呼び続け(合間に `idle()`)、最後の戻り値を返す。",
+      "args": {"c": "畳む接続"},
+      "ret": "`bfm_disconnect()` の最後の戻り値。",
+      "pre": "`c` が `bfm_connect()` / `bfm_accept()` で得た接続(確立の途中も含む)であること。",
+      "notes": "戻った後は `c` を使わない。",
+      "flow": [
+        {"while": "(rc = bfm_disconnect(c)) == BFM_INPROGRESS ?", "body": [
+          {"call": "idle() を呼ぶ"}
+        ]},
+        {"return": "rc"}
+      ]
+    },
+    {
       "func": "fill_area",
       "summary": "自分の公開メモリ(`g_bfm_mr_base`)のデータ領域 64KiB を `pattern()` の値で埋め、その後ろの atomic 語 512 個(4KiB)を 0 で埋める。",
       "args": {},
@@ -140,34 +207,39 @@
     },
     {
       "func": "run_server",
-      "summary": "受け側の本体。公開メモリを埋め、接続を同時にいくつでも(接続の枠の数まで)受ける。`bfm_accept()` を短く区切って呼び(接続が無ければ 200ms、あれば 1ms)、受けた接続を表に足し、`bfm_poll()` を呼び、使えなくなった接続を `bfm_disconnect()` で返す。全部の接続が切れたら hash を表示し、埋め直して待つ。`g_stop` が立つまで繰り返す。`g_dump` が立てば hash を表示する。",
+      "summary": "受け側の本体。公開メモリを埋め、接続を同時にいくつでも(接続の枠の数まで)受ける。受け付けの途中の枠 `pending` を 1 つ持ち、回るたびに `bfm_accept(&pending, port, 0)` で進め、接続ができたら表に足して次の枠を取らせる。あわせて `bfm_poll()` を呼び、使えなくなった接続を `do_disconnect()` で返す。全部の接続が切れたら hash を表示し、埋め直して待つ。`g_stop` が立つまで繰り返す。`g_dump` が立てば hash を表示する。",
       "args": {"port": "待つ接続の番号"},
       "ret": "0: `g_stop` で終わった。1: 公開メモリが `AREA_BYTES` より小さい。",
       "pre": "`bfm_init()` が済んでいること。",
-      "notes": "* 枠が一杯のときは `bfm_accept()` を呼ばず、1ms 眠る。\n* 終わるときは、残っている接続を全部返す。\n* hash を出すのは、接続が 1 本以上あって全部切れたときだけ(1 本の client の試験と同じ動き)。",
+      "notes": "* `bfm_accept()` の時間の上限は 0(待ち続ける)。待たずに戻るので、1 回の繰り返しで少しずつ進む。\n* 枠が一杯(`n == g_bfm.nconn`)のときは `bfm_accept()` を呼ばない。繰り返しの最後に、枠が一杯なら 1ms、そうでなければ 50us 眠る。\n* 終わるときは、受け付けの途中の枠と残っている接続を全部返す。\n* hash を出すのは、接続が 1 本以上あって全部切れたときだけ(1 本の client の試験と同じ動き)。",
       "flow": [
         {"if": "g_bfm_mr_size < AREA_BYTES ?", "then": [
           {"do": "「公開メモリが小さすぎる」を表示"},
           {"return": "1"}
         ]},
-        {"do": "n = 0"},
+        {"do": "pending = NULL、n = 0"},
         {"call": "fill_area() を呼ぶ"},
         {"do": "待つことを表示"},
         {"while": "!g_stop ?", "body": [
-          {"if": "n < g_bfm.nconn ?", "then": [{"call": "c = bfm_accept(port, n ? 1 : 200) を呼ぶ"}], "else": [{"do": "c = NULL"}]},
-          {"if": "c != NULL ?", "then": [{"do": "conns[n++] = c"}]},
+          {"if": "n < g_bfm.nconn ?", "then": [
+            {"call": "rc = bfm_accept(&pending, port, 0) を呼ぶ"},
+            {"if": "rc == BFM_OK ?", "then": [
+              {"do": "conns[n++] = pending、pending = NULL"}
+            ]}
+          ]},
           {"call": "bfm_poll() を呼ぶ"},
           {"if": "g_dump ?", "then": [
             {"do": "g_dump = 0"},
             {"call": "dump_area(\"要求\") を呼ぶ"}
           ]},
-          {"do": "k = 0、closed = 0"},
-          {"while": "i < n ?(i は 0 から)", "body": [
+          {"do": "k = 0、closed = 0、i = 0"},
+          {"while": "i < n ?", "body": [
             {"call": "bfm_is_up(conns[i]) を呼ぶ"},
             {"if": "使える?", "then": [{"do": "conns[k++] = conns[i]"}], "else": [
-              {"call": "bfm_disconnect(conns[i]) を呼ぶ"},
+              {"call": "do_disconnect(conns[i]) を呼ぶ"},
               {"do": "closed = 1"}
-            ]}
+            ]},
+            {"do": "i++"}
           ]},
           {"do": "n = k"},
           {"if": "closed && n == 0 ?", "then": [
@@ -175,9 +247,14 @@
             {"call": "fill_area() を呼ぶ"},
             {"do": "待つことを表示"}
           ]},
-          {"if": "n == g_bfm.nconn ?", "then": [{"do": "usleep(1000)"}]}
+          {"do": "usleep(n == g_bfm.nconn ? 1000 : 50)"}
         ]},
-        {"while": "i < n ?(i は 0 から)", "body": [{"call": "bfm_disconnect(conns[i]) を呼ぶ"}]},
+        {"if": "pending != NULL ?", "then": [{"call": "do_disconnect(pending) を呼ぶ"}]},
+        {"do": "i = 0"},
+        {"while": "i < n ?", "body": [
+          {"call": "do_disconnect(conns[i]) を呼ぶ"},
+          {"do": "i++"}
+        ]},
         {"return": "0"}
       ]
     },
@@ -347,13 +424,13 @@
       "pre": "`bfm_init()` が済んでいること。相手が server で、公開メモリを取り決めどおりに埋めていること。",
       "notes": "* [7] は接続の構造体の `rlen` を一時的に書き換えて手元の範囲検査をすり抜ける。相手が断ると接続はエラーになる。\n* [4] で相手の atomic 語 0・1 を、[4b] で語 2 を書き換える。[6] の測定はデータ領域の 64 か所と atomic 語 100〜163・200〜263(8 バイト)、300〜331・400〜431(4 バイトの語として)に触る。\n* 検査が NG でも次の検査へ進む([6] だけは飛ばす)。",
       "flow": [
-        {"call": "c = bfm_connect(ip, mac, port, 0) を呼ぶ"},
+        {"call": "c = do_connect(ip, mac, port, 0) を呼ぶ"},
         {"if": "c == NULL ?", "then": [{"return": "1"}]},
         {"if": "bfm_bf_active(c) ?", "then": [{"do": "BlueFlame の表示を「あり」にする"}], "else": [{"do": "BlueFlame の表示を「なし」にする"}]},
         {"call": "bfm_remote_size(c) と bfm_inline_max() を呼び、相手の公開メモリの大きさ・BlueFlame・inline の上限を表示"},
         {"if": "bfm_remote_size(c) < AREA_BYTES ?", "then": [
           {"do": "「相手の公開メモリが小さすぎる」を表示"},
-          {"call": "bfm_disconnect(c) を呼ぶ"},
+          {"call": "do_disconnect(c) を呼ぶ"},
           {"return": "1"}
         ]},
         {"do": "i = 0"},
@@ -561,7 +638,7 @@
           {"call": "check(\"[7] ...\", rc == BFM_E_REMOTE) を呼ぶ"}
         ]},
         {"if": "g_ng ?", "then": [{"do": "結果「NG」と g_ng を表示"}], "else": [{"do": "結果「OK」と g_ng を表示"}]},
-        {"call": "bfm_disconnect(c) を呼ぶ"},
+        {"call": "do_disconnect(c) を呼ぶ"},
         {"if": "g_ng ?", "then": [{"return": "1"}], "else": [{"return": "0"}]}
       ]
     },
@@ -890,7 +967,7 @@
     },
     {
       "func": "mt_worker",
-      "summary": "mt のスレッド 1 本。CPU に固定し、全スレッドがそろってから同時に `bfm_connect()` で自分の接続を作る。スレッド 0 が共有の語を 0 にした後、[1][2](`mt_check()`)、[3] 共有の語への FAA を `g_mt_n` 回、[4](`mt_dif()`)を行う。スレッド 0 が共有の語を読んだ後、全スレッドで同時に 8 バイトの write / read / FAA(自分の語)を `g_mt_n` 回ずつ打って時間を測り、最後に全スレッドで同時に切断する。",
+      "summary": "mt のスレッド 1 本。CPU に固定し、全スレッドがそろってから同時に `do_connect()` で自分の接続を作る。スレッド 0 が共有の語を 0 にした後、[1][2](`mt_check()`)、[3] 共有の語への FAA を `g_mt_n` 回、[4](`mt_dif()`)を行う。スレッド 0 が共有の語を読んだ後、全スレッドで同時に 8 バイトの write / read / FAA(自分の語)を `g_mt_n` 回ずつ打って時間を測り、最後に全スレッドで同時に切断する。",
       "args": {"p": "スレッドの情報(`struct mt_arg`)"},
       "ret": "NULL",
       "pre": "`g_mt_bar` がスレッドの数で初期化してあること。",
@@ -899,7 +976,7 @@
       "flow": [
         {"call": "sysconf(_SC_NPROCESSORS_ONLN) を呼び、pthread_setaffinity_np() で CPU(番号 % CPU の数)に固定する"},
         {"call": "pthread_barrier_wait(&g_mt_bar) を呼ぶ"},
-        {"call": "a->c = bfm_connect(ip, mac, port, 20000) を呼ぶ"},
+        {"call": "a->c = do_connect(a->ip, a->mac, a->port, 20000) を呼ぶ"},
         {"if": "a->c == NULL ?", "then": [{"call": "mt_fail(a, \"接続できない\", 0) を呼ぶ"}]},
         {"call": "pthread_barrier_wait(&g_mt_bar) を呼ぶ"},
         {"if": "番号 == 0 かつ a->c ?", "then": [
@@ -935,8 +1012,8 @@
         ]},
         {"call": "pthread_barrier_wait(&g_mt_bar) を呼ぶ"},
         {"if": "a->c ?", "then": [
-          {"call": "bfm_disconnect(a->c) を呼ぶ"},
-          {"if": "bfm_disconnect() != BFM_OK ?", "then": [{"call": "mt_fail(a, \"切断\", 0) を呼ぶ"}]}
+          {"call": "do_disconnect(a->c) を呼ぶ"},
+          {"if": "do_disconnect() != BFM_OK ?", "then": [{"call": "mt_fail(a, \"切断\", 0) を呼ぶ"}]}
         ]},
         {"return": "NULL"}
       ]
@@ -1057,7 +1134,7 @@
       "pre": "`bfm_init()` が済んでいて、`g_bfm_stage_size` が `BENCH_QD_MAX * BENCH_SIZE_MAX` であること(`main()` が設定する)。",
       "notes": "* `bench_one()` が 1 回でも失敗したら残りの組を流さずに接続を返す。\n* 埋め込み(inline)でない write は中継バッファから送るので、流す前に中継バッファ全体を `0x5a ^ i` で埋めておく(内部の構造体の `stage` / `stage_size` を直接使う)。",
       "flow": [
-        {"call": "c = bfm_connect(ip, mac, port, 0) を呼ぶ"},
+        {"call": "c = do_connect(ip, mac, port, 0) を呼ぶ"},
         {"if": "c == NULL ?", "then": [{"return": "1"}]},
         {"call": "tsc_calibrate() を呼ぶ"},
         {"do": "i = 0"},
@@ -1087,7 +1164,7 @@
           ]},
           {"do": "is_read++"}
         ]},
-        {"call": "bfm_disconnect(c) を呼ぶ"},
+        {"call": "do_disconnect(c) を呼ぶ"},
         {"return": "ng"}
       ]
     },
@@ -1140,8 +1217,8 @@
           {"do": "g_bfm_stage_size = BENCH_QD_MAX * BENCH_SIZE_MAX"},
           {"do": "g_bfm_max_conn = 1"}
         ]},
-        {"call": "bfm_init() を呼ぶ"},
-        {"if": "bfm_init() != BFM_OK ?", "then": [{"return": "1"}]},
+        {"call": "do_init() を呼ぶ"},
+        {"if": "do_init() != BFM_OK ?", "then": [{"return": "1"}]},
         {"do": "ret = 0"},
         {"if": "mode が \"server\" ?", "then": [{"call": "ret = run_server(port) を呼ぶ"}], "else": [
           {"if": "(mode が \"client\" または bench または mt) && optind + 1 < argc ?", "then": [
@@ -1170,7 +1247,7 @@
             ]}
           ]}
         ]},
-        {"call": "bfm_shutdown() を呼ぶ"},
+        {"call": "do_shutdown() を呼ぶ"},
         {"return": "ret"}
       ]
     }

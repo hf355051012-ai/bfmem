@@ -790,6 +790,122 @@ def layout_call(f, extra_callers, extra_callees, entry_note):
 
 
 # ---------------------------------------------------------------------------
+# 状態遷移図の配置(記述の "states")
+#
+#   "states": {
+#     "start": "最初の呼び出し",                         開始の箱の文字
+#     "list": [
+#       {"id": "H_START", "text": "説明", "wait": "待つもの",   wait があれば左に輪(BFM_INPROGRESS を返して留まる)
+#        "next": [{"to": "H_X", "label": "条件"}, ...]},       省略すると次の状態へ 1 本。"to" は状態か "END"
+#       ...],
+#     "end": "BFM_OK を返す",                            終わりの箱の文字
+#     "note": "失敗したとき…"                              右上の注記(省略可)
+#   }
+# 状態は list の順に縦に並べる。すぐ下の状態への遷移はまっすぐ下へ、それ以外(飛ばす・戻る・終わりへ)は
+# 右の通路を通す。
+# ---------------------------------------------------------------------------
+
+ST_W = 330
+
+
+class StateError(Exception):
+    pass
+
+
+def layout_states(st):
+    lay = Layout()
+    items = st.get("list", [])
+    if not items:
+        raise StateError("list が空")
+    ids = [s["id"] for s in items]
+    if len(set(ids)) != len(ids):
+        raise StateError("id が重なっている")
+    index = {sid: i for i, sid in enumerate(ids)}
+    x = 60
+    y = 20
+    start = {"id": "s_start", "kind": "start", "text": "", "lines": wrap(st.get("start", "開始"), ST_W - 40),
+             "x": x + 40, "y": y, "w": ST_W - 80}
+    start["h"] = len(start["lines"]) * LINE_H + 14
+    lay.nodes.append(start)
+    y += start["h"] + 30
+    boxes = []
+    for i, s in enumerate(items):
+        lines = [s["id"]] + wrap(s.get("text", ""), ST_W - 20)
+        if s.get("wait"):
+            lines += wrap("待つ: " + s["wait"], ST_W - 20)
+        nd = {"id": "s%d" % i, "kind": "statew" if s.get("wait") else "state", "text": "", "lines": lines,
+              "x": x, "y": y, "w": ST_W, "h": len(lines) * LINE_H + 12, "head": True}
+        lay.nodes.append(nd)
+        boxes.append(nd)
+        y += nd["h"] + 34
+    end = {"id": "s_end", "kind": "end", "text": "", "lines": wrap(st.get("end", "終わり"), ST_W - 40),
+           "x": x + 40, "y": y, "w": ST_W - 80}
+    end["h"] = len(end["lines"]) * LINE_H + 14
+    lay.nodes.append(end)
+    # 開始 -> 最初の状態
+    cx = x + ST_W / 2
+    lay.edges.append({"src": "s_start", "dst": "s0", "label": "", "pts": [(cx, start["y"] + start["h"]), (cx, boxes[0]["y"])]})
+    # 遷移を集める
+    trans = []
+    for i, s in enumerate(items):
+        nxt = s.get("next")
+        if nxt is None:
+            nxt = [{"to": ids[i + 1] if i + 1 < len(ids) else "END"}]
+        for t in nxt:
+            to = t.get("to")
+            if to != "END" and to not in index:
+                raise StateError("%s の行き先 %s が無い" % (s["id"], to))
+            trans.append((i, len(items) if to == "END" else index[to], t.get("label", "")))
+    down = [(a, b, lab) for a, b, lab in trans if b == a + 1]
+    side = [(a, b, lab) for a, b, lab in trans if b != a + 1]
+    for a, b, lab in down:
+        src = boxes[a]
+        dst = boxes[b] if b < len(boxes) else end
+        lay.edges.append({"src": src["id"], "dst": dst["id"], "label": "",
+                          "pts": [(cx, src["y"] + src["h"]), (cx, dst["y"])]})
+        if lab:
+            lay.edges[-1]["label"] = lab
+            lay.edges[-1]["lpos"] = (cx + 6, src["y"] + src["h"] + 14)
+    # 右の通路: 各箱の右辺に、出る線と入る線の点を均等に配る
+    ports = {}
+    for k, (a, b, lab) in enumerate(side):
+        ports.setdefault(a, []).append(("out", k))
+        ports.setdefault(b, []).append(("in", k))
+    py = {}
+    for n, lst in ports.items():
+        nd = boxes[n] if n < len(boxes) else end
+        for j, key in enumerate(lst):
+            py[key] = nd["y"] + nd["h"] * (j + 1) / (len(lst) + 1)
+    lane0 = x + ST_W + 28
+    # 長い遷移ほど外側の通路にする(線が交わりにくい)
+    order = sorted(range(len(side)), key=lambda k: abs(side[k][1] - side[k][0]))
+    for rank, k in enumerate(order):
+        a, b, lab = side[k]
+        src = boxes[a]
+        dst = boxes[b] if b < len(boxes) else end
+        lane = lane0 + rank * 16
+        y0, y1 = py[("out", k)], py[("in", k)]
+        e = {"src": src["id"], "dst": dst["id"], "label": lab,
+             "pts": [(src["x"] + src["w"], y0), (lane, y0), (lane, y1), (dst["x"] + dst["w"], y1)]}
+        if lab:
+            e["lpos"] = (src["x"] + src["w"] + 4, y0 - 4)
+        lay.edges.append(e)
+    # 待つ状態の輪(左)
+    for nd in boxes:
+        if nd["kind"] == "statew":
+            cy = nd["y"] + nd["h"] / 2
+            lay.edges.append({"src": nd["id"], "dst": nd["id"], "label": "",
+                              "pts": [(x, cy - 7), (x - 24, cy - 7), (x - 24, cy + 7), (x, cy + 7)]})
+    lane_end = lane0 + len(side) * 16
+    if st.get("note"):
+        lines = wrap(st["note"], 260)
+        lay.nodes.append({"id": "s_note", "kind": "note", "text": "", "lines": lines, "align": "left",
+                          "x": lane_end + 30, "y": boxes[0]["y"], "w": 280, "h": len(lines) * LINE_H + 14})
+    lay.max_x = lane_end
+    return lay
+
+
+# ---------------------------------------------------------------------------
 # SVG と draw.io の XML
 # ---------------------------------------------------------------------------
 
@@ -816,16 +932,19 @@ STYLE = {
     # ラダーチャート: life = 縦の線(登場するものの時間軸)、phase = 段階の見出しの帯
     "life": "shape=line;direction=south;html=1;dashed=1;strokeColor=#999999;",
     "phase": "rounded=0;whiteSpace=wrap;html=1;fillColor=#eeeeee;strokeColor=none;align=left;spacingLeft=8;fontStyle=1;",
+    # 状態遷移図: state = 状態、statew = 待つことのある状態
+    "state": "rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;",
+    "statew": "rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;",
 }
 FILL = {"start": "#dae8fc", "end": "#dae8fc", "return": "#dae8fc", "do": "#ffffff", "call": "#fff2cc",
         "if": "#f5f5f5", "loop": "#e1d5e7", "label": "#d5e8d4", "center": "#dae8fc", "func": "#ffffff",
         "ext": "#f5f5f5", "note": "#ffffff",
         "grp": "#fafafa", "sw": "#dae8fc", "mem": "#d5e8d4", "pub": "#ffe6cc", "reg": "#fff2cc", "hw": "#f8cecc",
-        "life": "none", "phase": "#eeeeee"}
+        "life": "none", "phase": "#eeeeee", "state": "#ffffff", "statew": "#fff2cc"}
 STROKE = {"start": "#6c8ebf", "end": "#6c8ebf", "return": "#6c8ebf", "call": "#d6b656", "loop": "#9673a6",
           "label": "#82b366", "center": "#6c8ebf", "ext": "#999999", "note": "#999999",
           "grp": "#999999", "sw": "#6c8ebf", "mem": "#82b366", "pub": "#d79b00", "reg": "#d6b656", "hw": "#b85450",
-          "life": "#999999", "phase": "none"}
+          "life": "#999999", "phase": "none", "state": "#6c8ebf", "statew": "#d6b656"}
 
 
 def svg_shape(nd):
@@ -853,7 +972,7 @@ def svg_shape(nd):
         s = ('<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" %s/>' % (x, y, w, h, a) +
              '<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s"/>' % (x + d, y, x + d, y + h, stroke) +
              '<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s"/>' % (x + w - d, y, x + w - d, y + h, stroke))
-    elif k in ("center", "func", "ext", "sw", "hw"):
+    elif k in ("center", "func", "ext", "sw", "hw", "state", "statew"):
         s = '<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" rx="6" %s/>' % (x, y, w, h, a)
     else:
         s = '<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" %s/>' % (x, y, w, h, a)
@@ -882,7 +1001,7 @@ def svg_edge(e):
     if e.get("label") and e.get("lpos"):
         lx, ly = e["lpos"]
         for i, ln in enumerate(str(e["label"]).split("\n")):
-            s += '<text x="%.1f" y="%.1f" font-size="%d" text-anchor="start" fill="#333333">%s</text>' % (
+            s += '<text x="%.1f" y="%.1f" font-size="%d" text-anchor="start" fill="#333333" stroke="#ffffff" stroke-width="3" paint-order="stroke">%s</text>' % (
                 lx, ly + i * (LINE_H - 1), FONT - 1, xesc(ln))
     elif e.get("label"):
         (x0, y0), (x1, y1) = pts[0], pts[1]
@@ -890,7 +1009,7 @@ def svg_edge(e):
             lx, ly, anc = x0 + 5, y0 + 11, "start"
         else:                    # 横へ出る
             lx, ly, anc = x0 + (6 if x1 > x0 else -6), y0 - 5, "start" if x1 > x0 else "end"
-        s += '<text x="%.1f" y="%.1f" font-size="%d" text-anchor="%s" fill="#333333">%s</text>' % (
+        s += '<text x="%.1f" y="%.1f" font-size="%d" text-anchor="%s" fill="#333333" stroke="#ffffff" stroke-width="3" paint-order="stroke">%s</text>' % (
             lx, ly, FONT - 1, anc, xesc(e["label"]))
     return s
 
@@ -1017,7 +1136,7 @@ def check(allf, descs, partial=False):
             if miss:
                 errs.append("%s:%s: 項目が足りない %s" % (rel, e.get("func"), miss))
                 continue
-            extra = set(e) - set(REQUIRED) - {"indirect", "entry_note"}
+            extra = set(e) - set(REQUIRED) - {"indirect", "entry_note", "states"}
             if extra:
                 errs.append("%s:%s: 使えない項目 %s" % (rel, e["func"], sorted(extra)))
             got[e["func"]] = e
@@ -1040,6 +1159,11 @@ def check(allf, descs, partial=False):
                 layout_flow(nm, e["flow"])
             except FlowError as ex:
                 errs.append("%s:%s: フロー: %s" % (rel, nm, ex))
+            if "states" in e:
+                try:
+                    layout_states(e["states"])
+                except (StateError, KeyError) as ex:
+                    errs.append("%s:%s: 状態遷移図: %s" % (rel, nm, ex))
             for ind in e.get("indirect", []):
                 if not any(f["name"] == ind for f in allf):
                     errs.append("%s:%s: indirect の %s がソースに無い" % (rel, nm, ind))
@@ -1238,6 +1362,12 @@ bfmem(ConnectX の BlueFlame でノード間のメモリへ write / read / atomi
 ** switch と else if の連なりは梯子の形に描く: 判断のひし形を縦に並べ、*当てはまれば右(「はい」)* へ進んで
    その処理、当てはまらなければ下(「いいえ」)の判断へ。各処理の終わりは右端の線でまとまって下へ続く。
    どれにも当てはまらないときの処理(switch の default・最後の else)は、左の列のいちばん下。
+* *状態遷移図* は、待たずに進める関数(呼ぶたびに先へ進み、待つところで `BFM_INPROGRESS` を返すもの)にだけ置く。
+  呼び出しをまたいで覚えている状態と、その移り方を描いたもの(`doc/spec/desc/*.json` の `states` から作る。ソースとの突き合わせは人が行う)。
+** 箱が 1 つの状態(上の太字がソースの名前)。下へ並んだ順が普通の進み方で、すぐ下の状態へはまっすぐ下へ、
+   それ以外(飛ばす・戻る・終わりへ)は右の線で移る。線の横の字は移る条件。
+** 黄色の箱と左の輪 = 待つことのある状態。待つものがそろうまで、呼ばれるたびに `BFM_INPROGRESS` を返してその状態に留まる。
+** 1 回の呼び出しで、待つところに当たるまでは状態を続けて進める。
 * *関係図* は、左がこの関数を呼ぶ関数、右がこの関数が呼ぶ関数。ソースを解析して作った。
 ** 白 = このソースの関数(下の小さい字は定義しているファイル)、灰色 = 外部の関数(C の標準ライブラリ・OS・コンパイラ組み込み)・マクロ・アセンブラの関数、
    破線 = 関数ポインタ経由・OS から呼ばれるもの。
@@ -1276,6 +1406,9 @@ bfmem(ConnectX の BlueFlame でノード間のメモリへ write / read / atomi
             out.append("|注意事項 a|%s\n" % e["notes"].strip())
             out.append("|使用関数 a|%s\n" % used_functions(f, e))
             out.append("|===\n")
+            if "states" in e:
+                out.append("\n.%s() の状態遷移図\nimage::state_%s.drawio.svg[%s() の状態遷移図]\n" % (
+                    f["name"], sl, f["name"]))
             out.append("\n.%s() のフロー図\nimage::flow_%s.drawio.svg[%s() のフロー図]\n" % (f["name"], sl, f["name"]))
             out.append("\n.%s() の関係図\nimage::call_%s.drawio.svg[%s() の関係図]\n" % (f["name"], sl, f["name"]))
     with open(os.path.join(SPEC, "bfmem_spec.adoc"), "w", encoding="utf-8") as fp:
@@ -1318,6 +1451,7 @@ def main():
     for fn in os.listdir(IMG):
         if fn.endswith(".drawio.svg"):
             os.remove(os.path.join(IMG, fn))
+    nstate = 0
     for f in allf:
         if f["file"] not in descs:
             continue
@@ -1325,13 +1459,18 @@ def main():
         sl = fslug(f)
         write_drawio_svg(layout_flow(f["name"], e["flow"]), os.path.join(IMG, "flow_%s.drawio.svg" % sl),
                          "%s フロー" % f["name"])
+        if "states" in e:
+            nstate += 1
+            write_drawio_svg(layout_states(e["states"]), os.path.join(IMG, "state_%s.drawio.svg" % sl),
+                             "%s 状態遷移" % f["name"])
         ex_callers = [(c, "indirect") for c, _ in extra_callers.get(f["id"], [])]
         write_drawio_svg(layout_call(f, ex_callers, e.get("indirect", []), e.get("entry_note")),
                          os.path.join(IMG, "call_%s.drawio.svg" % sl), "%s 関係" % f["name"])
     for name, (lay, title) in figs.items():
         write_drawio_svg(lay, os.path.join(IMG, "hw_%s.drawio.svg" % name), title)
     write_adoc(allf, descs)
-    print("OK: %d 関数、図 %d 枚(ConnectX の章 %d 枚)" % (len(allf), 2 * len(allf) + len(figs), len(figs)))
+    print("OK: %d 関数、図 %d 枚(状態遷移図 %d 枚、ConnectX の章 %d 枚)" % (
+        len(allf), 2 * len(allf) + nstate + len(figs), nstate, len(figs)))
     write_html()
 
 

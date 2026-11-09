@@ -168,6 +168,29 @@ extern bfm_lock_t g_bfm_ctl_lock;
 #define MLX5_EVT_SRQ_RQ_LIMIT      0x14u
 
 /* ---------------------------------------------------------------------
+ * FW のコマンド(待たずに進める。mlx5_cmd.c)
+ * ------------------------------------------------------------------- */
+
+/* コマンド 1 つぶんの進み具合。出してから完了を受け取るまで、呼び出しをまたいで持つ。
+ * 使う手順ごとに 1 つ持ち、最初は 0 で埋めておく。 */
+typedef struct {
+    uint8_t  posted;                 /* 出して、まだ完了を受け取っていない */
+    uint16_t opcode;                 /* 出したコマンドの番号(表示用)*/
+    uint32_t outlen;                 /* 出したときの出力の長さ */
+    uint64_t t0;                     /* 出した時刻(ns。答えない FW を見つける)*/
+    const char *what;                /* 出したコマンドの名前(表示用)*/
+} bfm_cmd_t;
+
+/* FW へページを渡す手順(MANAGE_PAGES を 512 ページずつ出す)。 */
+typedef struct {
+    bfm_cmd_t cmd;                   /* 出している MANAGE_PAGES */
+    uint16_t func;                   /* 渡す先の function(QUERY_PAGES・ページ要求の値)*/
+    uint32_t left;                   /* まだ渡していないページの数 */
+    uint32_t n;                      /* 出している MANAGE_PAGES で渡すページの数 */
+    uint8_t  cant;                   /* 渡す代わりに CANT_GIVE を伝える */
+} bfm_pages_t;
+
+/* ---------------------------------------------------------------------
  * 装置
  * ------------------------------------------------------------------- */
 typedef struct {
@@ -183,6 +206,8 @@ typedef struct {
     volatile uint8_t *cmdq;          /* FW へのコマンドキュー(DMA 領域の 1 ページ。入口 1 つだけ使う)*/
     volatile uint8_t *mbox_in;       /* 入力のメールボックスの鎖(BFM_MBOX_BLOCKS 個 x BFM_MBOX_STRIDE)*/
     volatile uint8_t *mbox_out;      /* 出力のメールボックスの鎖(同上)*/
+    bfm_cmd_t *cmd_owner;            /* entry に出しているコマンドの持ち主(NULL = 空き)*/
+    int cmd_dead;                    /* FW がコマンドに答えなくなった(もう出さない)*/
     int hca_enabled;                 /* ENABLE_HCA が通り、まだ TEARDOWN していない */
 
     /* FW に渡すページ */
@@ -209,9 +234,11 @@ typedef struct {
     uint32_t eq_cc;                  /* EQ の消費の数(次に読む EQE の位置と、所有の印の向きを決める)*/
     uint64_t eq_mask;                /* EQ で受けるイベントの種類(bit n = イベントの型 n)*/
     volatile uint8_t *eq_buf;        /* EQ のリング(DMA 領域)*/
+    int eq_ready;                    /* EQ を作った(mlx5_eq_poll() が読んでよい)*/
     uint32_t pdn;                    /* 保護ドメインの番号(MKey・QP が属する)*/
     uint32_t lkey;                   /* 自分のメモリ全部(PA、ローカルの読み書き)*/
     uint32_t rkey;                   /* 公開メモリ(PA、[mr_base, mr_base + mr_size))*/
+    uint8_t  rkey_key8;              /* 公開メモリの鍵の下位 8 ビット(作るときの時刻から決める)*/
 
     /* ポート */
     uint8_t  mac[6];                 /* 自分の MAC(g_bfm_local_mac。全部 0 なら装置から読む)*/
@@ -304,10 +331,19 @@ struct __attribute__((aligned(64))) bfm_conn {
     uint8_t  path_mtu;               /* 経路 MTU(IB の符号。自分と相手の小さいほう)*/
     uint8_t  peer_rr;                /* 相手が受け付ける同時 read / atomic の数 */
 
-    /* 接続の確立(bfm_cm.c)*/
+    /* 接続の確立と切断(bfm_cm.c の状態機械)*/
     uint32_t local_id, peer_id;      /* 接続を見分ける乱数(0 = まだ無い)*/
     uint16_t port;                   /* 待ち受けの番号 */
     uint8_t  got_rep;                /* 掛け側: REP を受け取った */
+    uint8_t  step;                   /* 状態機械の今の手順(bfm_cm.c の K_*)*/
+    uint8_t  role;                   /* 1 = 掛け側(bfm_connect())、2 = 受け側(bfm_accept())*/
+    uint8_t  abort;                  /* 畳む(bfm_disconnect() か確立の失敗)*/
+    uint8_t  amode;                  /* RTR2RTS に付ける atomic_mode(断られたら 0 にして出し直す)*/
+    int      result;                 /* 畳み終えたときに返す値 */
+    uint32_t timeout_ms;             /* 掛け側: 確立の上限。受け側: REQ を待つ上限(0 = 待ち続ける)*/
+    uint64_t t0;                     /* 確立を始めた時刻 */
+    uint64_t t_sent;                 /* 掛け側: REQ を最後に送った時刻。畳む: BYE を出し始めた時刻 */
+    bfm_cmd_t cmd;                   /* この接続が出している FW のコマンド */
 };
 
 extern struct bfm_conn g_bfm_conn[BFM_MAX_CONN];
@@ -321,41 +357,52 @@ void  bfm_mem_reset(void);
 void *bfm_mem_alloc(uint64_t size, uint64_t align);
 uint64_t bfm_mem_used(void);
 
+/* 以下、戻り値が int で「待たずに進める」関数は、BFM_INPROGRESS の間は同じ引数で呼び直す。 */
+
 /* bfm_pci.c */
-int  bfm_pci_setup(bfm_dev_t *d);
+void bfm_pci_setup_reset(void);
+int  bfm_pci_setup_step(bfm_dev_t *d);
 void bfm_pci_bus_master(int on);
 
 /* mlx5_cmd.c */
 int  mlx5_cmd_init(bfm_dev_t *d);
-int  mlx5_cmd(bfm_dev_t *d, const uint8_t *in, uint32_t inlen, uint8_t *out, uint32_t outlen,
-              const char *what);
-int  mlx5_give_pages(bfm_dev_t *d, uint16_t func, int32_t npages);
-int  mlx5_eq_create(bfm_dev_t *d);
+int  mlx5_cmd_run(bfm_dev_t *d, bfm_cmd_t *j, const uint8_t *in, uint32_t inlen, uint8_t *out,
+                  uint32_t outlen, const char *what);
+int  mlx5_cmd_drain(bfm_dev_t *d);
+int  mlx5_destroy_obj(bfm_dev_t *d, bfm_cmd_t *j, uint16_t opcode, uint32_t id, const char *what);
+int  mlx5_pages_start(bfm_dev_t *d, bfm_pages_t *p, uint16_t func, int32_t npages);
+int  mlx5_pages_step(bfm_dev_t *d, bfm_pages_t *p);
+void mlx5_eq_reset(void);
+int  mlx5_eq_prepare(bfm_dev_t *d);
+int  mlx5_eq_create(bfm_dev_t *d, bfm_cmd_t *j);
 int  mlx5_eq_poll(bfm_dev_t *d);
-int  mlx5_destroy_obj(bfm_dev_t *d, uint16_t opcode, uint32_t id, const char *what);
+int  mlx5_eq_busy(void);
 
 /* mlx5_hca.c */
-int  mlx5_hca_init(bfm_dev_t *d);
-void mlx5_hca_teardown(bfm_dev_t *d);
-int  mlx5_alloc_uar(bfm_dev_t *d, uint32_t *uarn);
-int  mlx5_cq_create(bfm_dev_t *d, uint32_t uarn, volatile uint8_t *buf, uint32_t log_n,
+void mlx5_hca_init_reset(void);
+int  mlx5_hca_init_step(bfm_dev_t *d);
+int  mlx5_hca_teardown(bfm_dev_t *d);
+int  mlx5_alloc_uar(bfm_dev_t *d, bfm_cmd_t *j, uint32_t *uarn);
+int  mlx5_cq_create(bfm_dev_t *d, bfm_cmd_t *j, uint32_t uarn, volatile uint8_t *buf, uint32_t log_n,
                     volatile uint32_t *dbr, uint32_t *cqn);
-int  mlx5_create_psv2(bfm_dev_t *d, uint32_t psv[2]);
-int  mlx5_create_sig_mkey(bfm_dev_t *d, uint8_t key8, uint32_t *mkey);
+int  mlx5_create_psv2(bfm_dev_t *d, bfm_cmd_t *j, uint32_t psv[2]);
+int  mlx5_create_sig_mkey(bfm_dev_t *d, bfm_cmd_t *j, uint8_t key8, uint32_t *mkey);
 
 /* mlx5_qp.c */
-int  mlx5_qp_create(bfm_dev_t *d, bfm_qp_t *qp, uint8_t st, uint8_t cs_req);
-int  mlx5_qp_rst2init(bfm_dev_t *d, bfm_qp_t *qp, int ud);
-int  mlx5_qp_init2rtr_rc(bfm_dev_t *d, bfm_qp_t *qp, struct bfm_conn *c);
-int  mlx5_qp_rtr2rts_rc(bfm_dev_t *d, bfm_qp_t *qp, struct bfm_conn *c);
-int  mlx5_qp_ud_to_rts(bfm_dev_t *d, bfm_qp_t *qp);
-void mlx5_qp_destroy(bfm_dev_t *d, bfm_qp_t *qp);
+int  mlx5_qp_create(bfm_dev_t *d, bfm_cmd_t *j, bfm_qp_t *qp, uint8_t st, uint8_t cs_req);
+int  mlx5_qp_rst2init(bfm_dev_t *d, bfm_cmd_t *j, bfm_qp_t *qp, int ud);
+int  mlx5_qp_init2rtr_rc(bfm_dev_t *d, bfm_cmd_t *j, bfm_qp_t *qp, struct bfm_conn *c);
+int  mlx5_qp_rtr2rts_rc(bfm_dev_t *d, bfm_cmd_t *j, bfm_qp_t *qp, struct bfm_conn *c, uint8_t amode);
+int  mlx5_qp_ud_init2rtr(bfm_dev_t *d, bfm_cmd_t *j, bfm_qp_t *qp);
+int  mlx5_qp_ud_rtr2rts(bfm_dev_t *d, bfm_cmd_t *j, bfm_qp_t *qp);
+int  mlx5_qp_destroy(bfm_dev_t *d, bfm_cmd_t *j, bfm_qp_t *qp);
 uint16_t mlx5_udp_sport(uint32_t lqpn, uint32_t rqpn);
 void mlx5_gid_from_ipv4(uint32_t ip, uint8_t gid[16]);
 
 /* bfm_cm.c */
-int  bfm_cm_init(void);
-void bfm_cm_fini(void);
+void bfm_cm_reset(void);
+int  bfm_cm_init_step(void);
+int  bfm_cm_fini_step(void);
 int  bfm_cm_poll(void);
 
 /* bfm_ops.c */
@@ -376,7 +423,8 @@ void bfm_ops_build_rdma(struct bfm_conn *c, uint64_t *w, int is_read, uint64_t o
                         uint64_t addr, uint32_t len, uint8_t fence);
 
 /* bfm_dif.c */
-int  bfm_dif_init(void);
+void bfm_dif_init_reset(void);
+int  bfm_dif_init_step(void);
 void bfm_dif_attach(struct bfm_conn *c);   /* 接続ができたとき(bfm_ops_attach() から)*/
 
 #endif /* BFM_INTERNAL_H */

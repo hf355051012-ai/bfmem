@@ -413,3 +413,17 @@ sudo build/bfmem_test -d 0000:b3:00.0 -i 192.168.101.21 -n 10000 bench 192.168.1
 - `mt -t 4`(MAC なし): 4 本とも同時に接続、[1]〜[4] OK、FAA の合計 400,000、速さは前と同じ(write 2.82 / read 2.26 / FAA 2.26 Mops)。
 - Precision → OptiPlex の client: MAC なし・MAC を渡す形の両方で NG 0 件、hash 一致。
 - 終わった後、両方とも mlx5_core に戻した(Precision の `ens1f0np0` は始める前から IP が付いていなかったので、付けていない)。
+
+記録(2026-11-09、立ち上げ・接続・切断・停止を待たない形(状態機械)にした後): **合格。**
+- `bfm_init()` / `bfm_connect()` / `bfm_accept()` / `bfm_disconnect()` / `bfm_shutdown()` は待つところで `BFM_INPROGRESS` を返す。
+  bfmem_test は 50µs おきに呼び直す(`do_init()` など)。FW のコマンドも出して完了を見るだけにした(`mlx5_cmd_run()`)。
+- OptiPlex → Precision の client(通常・`-x`): NG 0 件、hash は両側で `e92cdeb4e6b0c81d`。遅延は前と同じ
+  (write 8B 中央値 1,336ns、read 8B 1,649ns、FAA 1,637ns)。`-x` の [7] は REMOTE_ACCESS で断られた。
+- 宛先でない IP へ: 5 秒で「接続できない(REP が来ない)」、作りかけの QP / CQ を消して戻り値 1。
+- `mt -t 4`(OptiPlex → Precision)と `mt -t 16`(Precision → OptiPlex): 全部の接続が同時に張れ、[1]〜[4] OK。
+  速さも前と同じ(16 本: write 10.93 / read 8.56 / FAA 2.55 Mops)。FW のコマンドの入口を 16 本の確立で取り合っても進んだ。
+- Precision → OptiPlex の client: NG 0 件、hash 一致。
+- **最初の版では Precision の FW に渡すページが 7,841 → 5,680 に減った。** ページ要求に答えている間に来た 2 つめの要求
+  (2,161 ページ)を受け流していた(FW は出し直さない)。答え終えてから答えるようにして 7,841 に戻した
+  (その後 FW は 2,161 ページの返却を申し出る。前の版も同じ量を渡していた)。OptiPlex は 3,951(立ち上げの後の要求で 5,106)。
+- 終わった後、両方とも mlx5_core に戻した。

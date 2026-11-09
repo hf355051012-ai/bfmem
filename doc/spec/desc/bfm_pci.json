@@ -1,6 +1,6 @@
 {
   "file": "src/bfm_pci.c",
-  "summary": "PCIe の設定空間を自分で設定する(VxWorks では OS もドライバも設定しないため)。`bfm_pci_setup()` が次の順に行う。\n\n. 装置の確認(Mellanox の ConnectX-4〜7 の PF か)\n. FLR(`g_bfm_pcie_flr`。前回の実行で動いたままの NIC を止める)\n. BAR0 の大きさを測り、`g_bfm_bar0_addr` を書き込む(0 なら今の値を使う)\n. Memory Space / Bus Master を有効にし、INTx を止める(割り込みは使わない)\n. Max Read Request Size(`g_bfm_pcie_mrrs`)\n\n設定空間の読み書きは移植層(`bfm_port_pci_read32()` / `bfm_port_pci_write32()`)を通す。Linux では VFIO の設定空間を通るので、BAR への書き込みは VFIO の中だけで効く(実際の BAR はカーネルが割り当てたまま)。そのため Linux では `g_bfm_bar0_addr` を 0 にしておく。",
+  "summary": "PCIe の設定空間を自分で設定する(VxWorks では OS もドライバも設定しないため)。`bfm_pci_setup_step()` が次の順に行う。\n\n. 装置の確認(Mellanox の ConnectX-4〜7 の PF か。`pci_probe()`)\n. FLR(`g_bfm_pcie_flr`。前回の実行で動いたままの NIC を止める)\n. BAR0 の大きさを測り、`g_bfm_bar0_addr` を書き込む(0 なら今の値を使う)\n. Memory Space / Bus Master を有効にし、INTx を止める(割り込みは使わない)\n. Max Read Request Size(`g_bfm_pcie_mrrs`)\n\n`bfm_pci_setup_step()` は状態機械(`s_pci.step`。`P_PROBE` → `P_TRPND` → `P_FLR_WAIT` → `P_PRESENT` → `P_BAR` → `P_DONE`)で、FLR の待ち(保留中の DMA、FLR から 100ms、設定空間が読めるまで)では待たずに `BFM_INPROGRESS` を返す。`bfm_init()` が `bfm_pci_setup_reset()` で状態を最初に戻し、`BFM_INPROGRESS` でなくなるまで呼び続ける。BAR0・MRRS・Command の設定は `pci_setup()` が行う。\n\n設定空間の読み書きは移植層(`bfm_port_pci_read32()` / `bfm_port_pci_write32()`)を通す。Linux では VFIO の設定空間を通るので、BAR への書き込みは VFIO の中だけで効く(実際の BAR はカーネルが割り当てたまま)。そのため Linux では `g_bfm_bar0_addr` を 0 にしておく。",
   "functions": [
     {
       "func": "pci_cmd_read",
@@ -47,55 +47,15 @@
       ]
     },
     {
-      "func": "pci_wait_present",
-      "summary": "設定空間の Vendor ID が Mellanox(`MLX5_VENDOR_ID`)として読めるようになるまで、1ms ごとに読み直して待つ。",
-      "args": {"ms": "待つ時間の上限(ミリ秒)"},
-      "ret": "0: 読めた。-1: 時間切れ。",
+      "func": "ms_since",
+      "summary": "時刻 `t0` からの経過時間をミリ秒で返す。",
+      "args": {"t0": "起点の時刻(`bfm_port_time_ns()` の値。ナノ秒)"},
+      "ret": "`t0` からの経過時間(ミリ秒。切り捨て)。",
       "pre": "移植層が初期化されていること(`bfm_port_init()`)。",
-      "notes": "FLR の後に使う。時間は `bfm_port_time_ns()` で測る。",
+      "notes": "`bfm_pci_setup_step()` が、時間で待つ状態(`P_TRPND`・`P_FLR_WAIT`・`P_PRESENT`)の経過を測るのに使う。",
       "flow": [
-        {"call": "t0 = bfm_port_time_ns() を呼ぶ"},
-        {"while": "bfm_port_pci_read32(PCI_ID) の下位 16bit != MLX5_VENDOR_ID ?", "body": [
-          {"if": "bfm_port_time_ns() - t0 > ms ミリ秒 ?", "then": [{"return": "-1"}]},
-          {"call": "bfm_port_delay_us(1000) を呼ぶ"}
-        ]},
-        {"return": "0"}
-      ]
-    },
-    {
-      "func": "pci_flr",
-      "summary": "FLR(Function Level Reset)をかける。Bus Master を落とし、保留中の DMA(Transactions Pending)が終わるのを最大およそ 100ms 待ってから FLR を出し、100ms 待つ(PCIe 基本仕様の決まり)。その後、設定空間が読めるようになるまで最大 1 秒待つ。",
-      "args": {"pcie": "PCI Express の capability の位置(`pci_find_pcie_cap()` の戻り値)"},
-      "ret": "0: FLR をかけた、または装置が FLR に対応していない。-1: FLR の後、設定空間が読めない。",
-      "pre": "移植層が初期化されていること(`bfm_port_init()`)。`pcie` が 0 でないこと。",
-      "notes": "* 装置が FLR に対応していなければ、表示してリセットせずに 0 を返す。\n* 保留中の DMA が 100 回(1ms ごと)見ても終わらなくても、注意を表示してそのまま FLR を出す。\n* FLR をかけると装置の設定空間の値(BAR0・Command など)は初期値に戻る。",
-      "flow": [
-        {"call": "bfm_port_pci_read32(pcie + PCIE_DEVCAP) を呼ぶ"},
-        {"if": "Device Capabilities の FLR ビットが 0 ?", "then": [
-          {"do": "BFM_LOG で「FLR に対応していない」を表示"},
-          {"return": "0"}
-        ]},
-        {"call": "pci_cmd_write(pci_cmd_read() から Bus Master を落とした値) を呼ぶ"},
-        {"do": "i = 0"},
-        {"while": "i < 100 ?", "body": [
-          {"call": "bfm_port_pci_read32(pcie + PCIE_DEVCTL) で Device Status を読む"},
-          {"if": "Transactions Pending ビットが 0 ?", "then": [{"break": true}]},
-          {"call": "bfm_port_delay_us(1000) を呼ぶ"},
-          {"do": "i++"}
-        ]},
-        {"if": "i == 100(Transactions Pending が消えなかった)?", "then": [
-          {"do": "BFM_LOG で「100ms 待っても Transactions Pending が消えない。このまま FLR をかける」を表示"}
-        ]},
-        {"call": "ctl = bfm_port_pci_read32(pcie + PCIE_DEVCTL) の下位 16bit"},
-        {"call": "bfm_port_pci_write32(pcie + PCIE_DEVCTL, ctl OR PCIE_DEVCTL_FLR) で FLR を出す"},
-        {"call": "bfm_port_delay_us(100000) を呼ぶ"},
-        {"call": "pci_wait_present(1000) を呼ぶ"},
-        {"if": "pci_wait_present() != 0 ?", "then": [
-          {"do": "BFM_LOG で「FLR の後、設定空間が読めない」を表示"},
-          {"return": "-1"}
-        ]},
-        {"do": "BFM_DBG で「FLR をかけた」を表示"},
-        {"return": "0"}
+        {"call": "bfm_port_time_ns() を呼ぶ"},
+        {"return": "(bfm_port_time_ns() - t0) / 1000000"}
       ]
     },
     {
@@ -144,12 +104,12 @@
       ]
     },
     {
-      "func": "bfm_pci_setup",
-      "summary": "PCIe の設定一式を行う。装置の確認(Mellanox の ConnectX-4〜7 の PF か)→ PCI Express の capability を探す → FLR(`g_bfm_pcie_flr` が 0 でなければ)→ BAR0 の設定(`pci_setup_bar0()`)→ Max Read Request Size(`g_bfm_pcie_mrrs` が 0 でなければ)→ Memory Space・Bus Master を有効にし INTx を止める、の順に行い、装置の名前・BAR0・リンクの速さと幅・MRRS を表示する。`d` の `vendor` / `device` / `name` / `bar0_phys` / `bar0_size` を埋める。",
-      "args": {"d": "装置の状態(`g_bfm`)。`vendor` / `device` / `name` / `bar0_phys` / `bar0_size` を埋める"},
-      "ret": "0: 成功。-1: 対応していない装置、PCI Express の capability が無い、FLR の後に設定空間が読めない、BAR0 の設定に失敗した。",
-      "pre": "移植層が初期化されていること(`bfm_port_init()`)。`g_bfm_pcie_flr` / `g_bfm_bar0_addr` / `g_bfm_pcie_mrrs` を設定してあること。",
-      "notes": "* `g_bfm_pcie_mrrs` は 128・256・512・1024・2048・4096 のうち、その値以上で最も小さいものにする(4096 より大きければ 4096)。\n* 失敗したときも、それまでに行った設定(FLR など)は戻さない。後片付けは呼び出し側(`bfm_init()` の `cleanup()`)が行う。\n* 装置の ID が表に無いとき(VF など)は `d->name` が `NULL` のまま -1 を返す。",
+      "func": "pci_probe",
+      "summary": "装置を確かめる(Mellanox の ConnectX-4〜7 の PF か)。設定空間の ID を読んで `d` の `vendor` / `device` を埋め、対応する ConnectX の表(`s_ids`)から `name` を引く。続けて PCI Express の capability を探し、その位置を `s_pci.pcie` に入れる。",
+      "args": {"d": "装置の状態(`g_bfm`)。`vendor` / `device` / `name` を埋める"},
+      "ret": "0: 対応する装置。-1: 対応していない装置(ベンダ ID が違う、デバイス ID が表に無い)、または PCI Express の capability が無い。",
+      "pre": "移植層が初期化されていること(`bfm_port_init()`)。",
+      "notes": "* 装置の ID が表に無いとき(VF など)は `d->name` が `NULL` のまま -1 を返す。\n* 失敗したときは理由を表示する。",
       "flow": [
         {"call": "id = bfm_port_pci_read32(PCI_ID) を呼ぶ"},
         {"do": "d->vendor = id の下位 16bit、d->device = id の上位 16bit、d->name = NULL"},
@@ -162,15 +122,115 @@
           {"do": "BFM_LOG で「対応していない装置」と vendor・device を表示"},
           {"return": "-1"}
         ]},
-        {"call": "pcie = pci_find_pcie_cap() を呼ぶ"},
-        {"if": "pcie == 0 ?", "then": [
+        {"call": "s_pci.pcie = pci_find_pcie_cap() を呼ぶ"},
+        {"if": "s_pci.pcie == 0 ?", "then": [
           {"do": "BFM_LOG で「PCI Express の capability が見つからない」を表示"},
           {"return": "-1"}
         ]},
-        {"if": "g_bfm_pcie_flr != 0 ?", "then": [
-          {"call": "pci_flr(pcie) を呼ぶ"},
-          {"if": "pci_flr() != 0 ?", "then": [{"return": "-1"}]}
-        ]},
+        {"return": "0"}
+      ]
+    },
+    {
+      "func": "bfm_pci_setup_reset",
+      "summary": "PCIe の設定の状態を最初に戻す(`s_pci.step = P_PROBE`、capability の位置と時刻の起点を 0)。",
+      "args": {},
+      "ret": "なし",
+      "pre": "特になし。",
+      "notes": "`bfm_init()` が立ち上げを始めるとき(`I_IDLE`)に呼ぶ。",
+      "flow": [
+        {"do": "s_pci.step = P_PROBE、s_pci.pcie = 0、s_pci.t0 = 0"}
+      ]
+    },
+    {
+      "func": "bfm_pci_setup_step",
+      "summary": "PCIe の設定一式を、待つところまで進める(状態は `s_pci.step`)。装置の確認(`pci_probe()`)→ FLR(`g_bfm_pcie_flr` が 0 でなく、装置が対応していれば。Bus Master を落とし、保留中の DMA(Transactions Pending)が消えるのを最大 100ms 待ってから FLR を出し、100ms 待ち(PCIe 基本仕様の決まり)、設定空間が読めるようになるまで最大 1 秒待つ)→ BAR0・MRRS・Command の設定(`pci_setup()`)の順に行う。`d` の `vendor` / `device` / `name` / `bar0_phys` / `bar0_size` を埋める。",
+      "args": {"d": "装置の状態(`g_bfm`)。`vendor` / `device` / `name` / `bar0_phys` / `bar0_size` を埋める"},
+      "ret": "`BFM_INPROGRESS`: 途中(もう一度呼ぶと先へ進む)。`BFM_OK`: 済んだ。`BFM_E_HW`: 対応していない装置、PCI Express の capability が無い、FLR の後に設定空間が読めない、BAR0 の設定に失敗した。",
+      "pre": "移植層が初期化されていること(`bfm_port_init()`)。`bfm_pci_setup_reset()` で状態を最初に戻してあること。`g_bfm_pcie_flr` / `g_bfm_bar0_addr` / `g_bfm_pcie_mrrs` を設定してあること。",
+      "notes": "* 待つところ(`P_TRPND`・`P_FLR_WAIT`・`P_PRESENT`)では `BFM_INPROGRESS` を返す。時間は `ms_since()` で測る。\n* 装置が FLR に対応していなければ、表示してリセットせずに進む。\n* 100ms 待っても Transactions Pending が消えなければ、注意を表示してそのまま FLR を出す。\n* FLR をかけると装置の設定空間の値(BAR0・Command など)は初期値に戻る。\n* 失敗したときも、それまでに行った設定(FLR など)は戻さない。後片付けは呼び出し側(`bfm_init()` の停止の手順 `stop_step()`)が行う。済んだ後に呼んでも `BFM_OK` を返す。",
+      "flow": [
+        {"loop": "for (;;)", "body": [
+          {"switch": "s_pci.step", "cases": [
+            {"case": "P_PROBE", "body": [
+              {"call": "pci_probe(d) を呼ぶ"},
+              {"if": "pci_probe() != 0 ?", "then": [{"return": "BFM_E_HW"}]},
+              {"if": "!g_bfm_pcie_flr ?", "then": [
+                {"do": "s_pci.step = P_BAR"}
+              ], "else": [
+                {"if": "bfm_port_pci_read32(s_pci.pcie + PCIE_DEVCAP) の FLR ビットが 0 ?", "then": [
+                  {"do": "BFM_LOG で「FLR に対応していない。リセットせずに進む」を表示"},
+                  {"do": "s_pci.step = P_BAR"}
+                ], "else": [
+                  {"call": "pci_cmd_write(pci_cmd_read() から Bus Master を落とした値) を呼ぶ"},
+                  {"call": "s_pci.t0 = bfm_port_time_ns() を呼ぶ"},
+                  {"do": "s_pci.step = P_TRPND"}
+                ]}
+              ]}
+            ]},
+            {"case": "P_TRPND", "body": [
+              {"call": "bfm_port_pci_read32(s_pci.pcie + PCIE_DEVCTL) で Device Status を読む"},
+              {"if": "Transactions Pending ビットが 1 ?", "then": [
+                {"call": "ms_since(s_pci.t0) を呼ぶ"},
+                {"if": "ms_since() < TRPND_WAIT_MS(100)?", "then": [{"return": "BFM_INPROGRESS"}]},
+                {"do": "BFM_LOG で「100ms 待っても Transactions Pending が消えない。このまま FLR をかける」を表示"}
+              ]},
+              {"call": "ctl = bfm_port_pci_read32(s_pci.pcie + PCIE_DEVCTL) の下位 16bit"},
+              {"call": "bfm_port_pci_write32(s_pci.pcie + PCIE_DEVCTL, ctl OR PCIE_DEVCTL_FLR) で FLR を出す"},
+              {"call": "s_pci.t0 = bfm_port_time_ns() を呼ぶ"},
+              {"do": "s_pci.step = P_FLR_WAIT"}
+            ]},
+            {"case": "P_FLR_WAIT", "body": [
+              {"call": "ms_since(s_pci.t0) を呼ぶ"},
+              {"if": "ms_since() < FLR_WAIT_MS(100)?", "then": [{"return": "BFM_INPROGRESS"}]},
+              {"call": "s_pci.t0 = bfm_port_time_ns() を呼ぶ"},
+              {"do": "s_pci.step = P_PRESENT"}
+            ]},
+            {"case": "P_PRESENT", "body": [
+              {"call": "bfm_port_pci_read32(PCI_ID) を呼ぶ"},
+              {"if": "読んだ値の下位 16bit != MLX5_VENDOR_ID ?", "then": [
+                {"call": "ms_since(s_pci.t0) を呼ぶ"},
+                {"if": "ms_since() <= PRESENT_WAIT_MS(1000)?", "then": [{"return": "BFM_INPROGRESS"}]},
+                {"do": "BFM_LOG で「FLR の後、設定空間が読めない」を表示"},
+                {"return": "BFM_E_HW"}
+              ]},
+              {"do": "BFM_DBG で「FLR をかけた」を表示"},
+              {"do": "s_pci.step = P_BAR"}
+            ]},
+            {"case": "P_BAR", "body": [
+              {"call": "pci_setup(d) を呼ぶ"},
+              {"if": "pci_setup() != 0 ?", "then": [{"return": "BFM_E_HW"}]},
+              {"do": "s_pci.step = P_DONE"}
+            ]},
+            {"default": true, "body": [
+              {"return": "BFM_OK"}
+            ]}
+          ]}
+        ]}
+      ],
+      "states": {
+        "start": "最初の呼び出し(bfm_pci_setup_reset() で s_pci.step = P_PROBE)",
+        "list": [
+          {"id": "P_PROBE", "text": "装置を確かめる(pci_probe())。FLR をかけるなら Bus Master を落とす",
+           "next": [{"to": "P_TRPND", "label": "FLR をかける"}, {"to": "P_BAR", "label": "g_bfm_pcie_flr == 0、または装置が FLR に対応していない"}]},
+          {"id": "P_TRPND", "text": "保留中の DMA(Transactions Pending)が消えたら FLR を出す", "wait": "Transactions Pending が消える(100ms まで。過ぎたら注意を表示して FLR を出す)"},
+          {"id": "P_FLR_WAIT", "text": "FLR の後の決まった待ち", "wait": "FLR から 100ms"},
+          {"id": "P_PRESENT", "text": "設定空間が読めるようになるのを待つ", "wait": "Vendor ID が MLX5_VENDOR_ID と読める(1 秒まで)"},
+          {"id": "P_BAR", "text": "BAR0・MRRS・Command を設定する(pci_setup())"},
+          {"id": "P_DONE", "text": "済んだ"}
+        ],
+        "end": "BFM_OK を返す",
+        "note": "待つ状態では BFM_INPROGRESS を返して留まる。P_PROBE(対応していない装置・capability が無い)、P_PRESENT(1 秒待っても読めない)、P_BAR(BAR0 の設定の失敗)では BFM_E_HW を返す(状態はそのまま。bfm_init() が停止の手順へ移す)。"
+      }
+    },
+    {
+      "func": "pci_setup",
+      "summary": "BAR0(`pci_setup_bar0()`。`g_bfm_bar0_addr`)→ Max Read Request Size(`g_bfm_pcie_mrrs` が 0 でなければ)→ Memory Space・Bus Master を有効にし INTx を止める、の順に設定し、装置の名前・ID・BAR0・リンクの速さと幅・MRRS を表示する。`d` の `bar0_phys` / `bar0_size` を埋める。",
+      "args": {"d": "装置の状態(`g_bfm`)。`name` / `vendor` / `device` を `pci_probe()` で埋めてあること。`bar0_phys` / `bar0_size` を埋める"},
+      "ret": "0: 成功。-1: BAR0 の設定に失敗した。",
+      "pre": "`pci_probe()` が済み、`s_pci.pcie` に PCI Express の capability の位置が入っていること。",
+      "notes": "* `g_bfm_pcie_mrrs` は 128・256・512・1024・2048・4096 のうち、その値以上で最も小さいものにする(4096 より大きければ 4096)。\n* `bfm_pci_setup_step()` の `P_BAR` から呼ばれる。",
+      "flow": [
+        {"do": "pcie = s_pci.pcie"},
         {"call": "pci_setup_bar0(g_bfm_bar0_addr, &d->bar0_phys, &d->bar0_size) を呼ぶ"},
         {"if": "pci_setup_bar0() != 0 ?", "then": [{"return": "-1"}]},
         {"if": "g_bfm_pcie_mrrs != 0 ?", "then": [
@@ -194,7 +254,7 @@
       "args": {"on": "0 以外なら入れる、0 なら落とす"},
       "ret": "なし",
       "pre": "移植層が初期化されていること(`bfm_port_init()`)。",
-      "notes": "落とすと NIC はメモリへ DMA しない。`bfm_core.c` の `cleanup()` が BAR0 を外す前に `bfm_pci_bus_master(0)` を呼ぶ。",
+      "notes": "落とすと NIC はメモリへ DMA しない。`bfm_core.c` の `stop_step()`(`S_BUS`)が BAR0 を外す前に `bfm_pci_bus_master(0)` を呼ぶ。",
       "flow": [
         {"call": "cmd = pci_cmd_read() を呼ぶ"},
         {"if": "on ?", "then": [

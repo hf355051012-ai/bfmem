@@ -7,9 +7,11 @@
  *
  * 使い方(どちらのノードも同じ):
  *
- *   bfm_init();                         // PCIe と HCA を立ち上げる
- *   c = bfm_accept(port, ms);           // 受け側: 相手からの接続を待つ
- *   c = bfm_connect(ip, mac, port, ms); // 掛け側: 相手へ接続する
+ *   while (bfm_init() == BFM_INPROGRESS) 別の仕事;   // PCIe と HCA を立ち上げる
+ *   c = NULL;                                       // 受け側: 相手からの接続を待つ
+ *   while ((rc = bfm_accept(&c, port, ms)) == BFM_INPROGRESS) 別の仕事;
+ *   c = NULL;                                       // 掛け側: 相手へ接続する
+ *   while ((rc = bfm_connect(&c, ip, mac, port, ms)) == BFM_INPROGRESS) 別の仕事;
  *   bfm_write(c, off, src, len);        // 相手の公開メモリ + off へ書く
  *   bfm_read(c, off, dst, len);
  *   bfm_cas(c, off, expect, desired, &old);
@@ -17,8 +19,15 @@
  *   bfm_cas32(c, off, expect, desired, &old32);   // 4 バイト(拡張 atomic)
  *   bfm_faa32(c, off, add, &old32);
  *   bfm_poll();                         // ときどき呼ぶ(相手からの切断と FW のページ要求に答える)
- *   bfm_disconnect(c);
- *   bfm_shutdown();
+ *   while (bfm_disconnect(c) == BFM_INPROGRESS) 別の仕事;
+ *   while (bfm_shutdown() == BFM_INPROGRESS) 別の仕事;
+ *
+ * **立ち上げ・接続・切断・停止は待たない。** bfm_init() / bfm_connect() / bfm_accept() /
+ * bfm_disconnect() / bfm_shutdown() は、待つところ(FW の初期化やコマンドの完了・リンク・
+ * 相手の返事)に来ると BFM_INPROGRESS を返す。BFM_INPROGRESS でなくなるまで、同じ関数を
+ * 定期的に呼び続けると最後まで進む(呼ばなければ進まない)。FW のコマンドの入口は 1 つなので、
+ * 途中の接続・切断を呼ぶのを止めると、ほかの接続の確立も進まなくなる。
+ * データ経路(write / read / atomic)は今までどおり、完了を待ってから戻る(T10-DIF は起動と完了確認を分けられる)。
  *
  * 1 本の接続(RC QP)で、両方のノードが互いのメモリを触れる。触れるのは
  * 相手が g_bfm_mr_base / g_bfm_mr_size で公開した範囲だけで、off はその先頭からの
@@ -53,16 +62,22 @@
 #define BFM_E_NOTSUP    (-10)  /* 装置が対応していない(T10-DIF のオフロードなど)*/
 #define BFM_E_BUSY      (-11)  /* その接続の前の T10-DIF の転送が、まだ終わっていない */
 
+/* 待ちの途中(正の値)。同じ関数を後でもう一度呼ぶと先へ進む。 */
+#define BFM_INPROGRESS    1
+
 typedef struct bfm_conn bfm_conn_t;
 
 /* ---- 立ち上げ ---- */
 
 /* PCIe の設定(FLR・BAR0・Bus Master)と HCA の立ち上げ、RoCE の準備
- * (GID の登録・GSI QP)までを行う。 */
+ * (GID の登録・GSI QP)までを行う。待つところで BFM_INPROGRESS を返すので、BFM_OK か
+ * 失敗が返るまで呼び続ける。済んだ後に呼んでも BFM_OK。途中で失敗したら、取ったものを返し終える
+ * まで BFM_INPROGRESS を返し、その後に失敗の理由を返す(次の呼び出しは最初からやり直す)。 */
 int  bfm_init(void);
 
-/* 全部の接続を畳み、FW を止め(TEARDOWN_HCA)、Bus Master を落とす。 */
-void bfm_shutdown(void);
+/* 全部の接続を畳み、FW を止め(TEARDOWN_HCA)、Bus Master を落とす。待つところで
+ * BFM_INPROGRESS を返すので、BFM_OK が返るまで呼び続ける。立ち上げの途中でも呼べる(そこで止める)。 */
+int  bfm_shutdown(void);
 
 /* 相手からの切断の知らせ(BYE)と FW の非同期イベント(ページ要求など)を処理する。
  * データの経路では呼ばれないので、アプリケーションがときどき呼ぶこと。
@@ -71,16 +86,22 @@ int  bfm_poll(void);
 
 /* ---- 接続 ---- */
 
-/* 相手へ接続する。peer_ip が 0 なら g_bfm_peer_ip を、peer_mac が NULL なら g_bfm_peer_mac を、
+/* 相手へ接続する。最初は *pc = NULL で呼ぶ(接続の枠を取って *pc に入れる)。BFM_INPROGRESS の間は
+ * 同じ pc で呼び続ける(2 回目からは pc 以外の引数を見ない)。BFM_OK なら *pc が使える。失敗なら
+ * *pc は NULL に戻る(理由は表示する。途中まで作ったものを消し終えるまでは BFM_INPROGRESS を返す)。
+ * peer_ip が 0 なら g_bfm_peer_ip を、peer_mac が NULL なら g_bfm_peer_mac を、
  * port が 0 なら g_bfm_cm_port を使う。相手の MAC が全部 0 なら、REQ を同報で送って
- * 相手の MAC を REP から取る(自動)。失敗なら NULL(理由は表示する)。 */
-bfm_conn_t *bfm_connect(uint32_t peer_ip, const uint8_t peer_mac[6], uint16_t port,
-                        uint32_t timeout_ms);
+ * 相手の MAC を REP から取る(自動)。timeout_ms は最初の呼び出しからの上限(0 なら 5 秒)。 */
+int  bfm_connect(bfm_conn_t **pc, uint32_t peer_ip, const uint8_t peer_mac[6], uint16_t port,
+                 uint32_t timeout_ms);
 
-/* port 宛ての接続要求を待って受ける(timeout_ms = 0 なら待ち続ける)。 */
-bfm_conn_t *bfm_accept(uint16_t port, uint32_t timeout_ms);
+/* port 宛ての接続要求を受ける。最初は *pc = NULL で呼ぶ(接続の枠を取って REQ を待つ)。
+ * BFM_INPROGRESS の間は同じ pc で呼び続ける。BFM_OK なら *pc が使える。失敗・時間切れなら *pc は NULL。
+ * timeout_ms は REQ を待つ上限(0 なら待ち続ける)。待つのをやめるときは bfm_disconnect(*pc)。 */
+int  bfm_accept(bfm_conn_t **pc, uint16_t port, uint32_t timeout_ms);
 
-/* 相手へ切断の知らせ(BYE)を送って畳み、QP などを返す。c はこの後使えない。 */
+/* 相手へ切断の知らせ(BYE)を送って畳み、QP などを返す。BFM_INPROGRESS の間は呼び続ける。
+ * BFM_OK が返ったら c はもう使えない。確立の途中の接続にも使える(そこでやめて畳む)。 */
 int  bfm_disconnect(bfm_conn_t *c);
 
 /* 1 = 使える。0 = エラーか相手から切断された(bfm_disconnect() で返すこと)。 */
@@ -177,7 +198,7 @@ typedef struct {
 } bfm_dif_err_t;
 
 /* bfm_dif_poll() の戻り値: まだ終わっていない。 */
-#define BFM_DIF_INPROGRESS 1
+#define BFM_DIF_INPROGRESS BFM_INPROGRESS
 
 /* src の nblocks ブロックを、形を変えて相手の公開メモリ + off へ書く(終わるまで待つ)。
  * src の形は入る側(CHECK・SWAP・DELETE は 520 バイトおき、INSERT は 512 バイトおき)。

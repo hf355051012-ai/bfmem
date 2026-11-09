@@ -22,12 +22,12 @@ WQE を UAR の BlueFlame の窓へ MMIO で書き込んで送る。相手の CP
 | `include/bfm_config.h` | **移植のときに設定する変数を全部ここに集めてある**(実体と既定値は `src/bfm_config.c`)|
 | `include/bfm.h` | アプリケーションが使う API |
 | `include/bfm_port.h` | 移植層の関数の宣言と、x86-64 のバリア・バイト順の道具 |
-| `src/bfm_core.c` | `bfm_init()` / `bfm_shutdown()` / `bfm_poll()` |
+| `src/bfm_core.c` | `bfm_init()` / `bfm_shutdown()`(全体の状態機械)/ `bfm_poll()` |
 | `src/bfm_pci.c` | PCIe の設定空間の設定(FLR・BAR0・Bus Master・MRRS)|
-| `src/mlx5_cmd.c` | コマンドキュー、FW へのページの受け渡し、EQ |
+| `src/mlx5_cmd.c` | コマンドキュー(待たずに出して完了を見る)、FW へのページの受け渡し、EQ |
 | `src/mlx5_hca.c` | HCA の立ち上げ、UAR・PD・MKey・CQ、ポート、RoCE のアドレス |
 | `src/mlx5_qp.c` | QP(RC と GSI)の作成と状態遷移 |
-| `src/bfm_cm.c` | 接続の確立と切断(GSI の上の bfmem だけの REQ / REP / BYE)|
+| `src/bfm_cm.c` | 接続の確立と切断(GSI の上の bfmem だけの REQ / REP / BYE。接続の枠ごとの状態機械)|
 | `src/bfm_ops.c` | データ経路(BlueFlame で WQE を送る、完了を拾う)|
 | `src/bfm_dif.c` | T10-DIF の読み書き(CPU で行う SW と、NIC の署名オフロードを使う HW)|
 | `src/bfm_mem.c` | DMA 領域からの静的な切り出し |
@@ -36,16 +36,19 @@ WQE を UAR の BlueFlame の窓へ MMIO で書き込んで送る。相手の CP
 | `port/x86/bfm_x86_asm.S` | x86-64 の命令の関数(`rdtsc`・`cpuid`・`rdmsr`・`wrmsr`・`pause`)。アセンブラ |
 | `port/x86/bfm_x86.c` | TSC の周波数を CPUID / MSR から求め、TSC で時刻と待ちを作る。CPU の周波数を MSR で読んで表示する |
 | `test/bfm_test.c` | 試験プログラム(server / client / bench / info)|
-| `doc/spec/bfmem_spec.adoc` | **関数仕様書**(全ソースの全関数。表・フロー図・関係図。図は `doc/spec/images/*.drawio.svg`)。`doc/spec/gen.py` で作る。HTML 版は `docs/spec.html`(図を埋め込んだ 1 ファイル。asciidoctor があれば gen.py が一緒に作る)。**Web で見られる: https://hf355051012-ai.github.io/bfmem/spec.html**(GitHub Pages、master の `docs/`)|
+| `doc/spec/bfmem_spec.adoc` | **関数仕様書**(全ソースの全関数。表・フロー図・関係図、待たずに進める関数には状態遷移図。図は `doc/spec/images/*.drawio.svg`)。`doc/spec/gen.py` で作る。HTML 版は `docs/spec.html`(図を埋め込んだ 1 ファイル。asciidoctor があれば gen.py が一緒に作る)。**Web で見られる: https://hf355051012-ai.github.io/bfmem/spec.html**(GitHub Pages、master の `docs/`)|
 
 ## API
 
 ```c
 #include "bfm.h"
 
-bfm_init();                                   /* PCIe・HCA・RoCE の準備 */
-bfm_conn_t *c = bfm_accept(0, 0);             /* 受け側(ポートは g_bfm_cm_port)*/
-bfm_conn_t *c = bfm_connect(ip, NULL, 0, 0);  /* 掛け側(相手の MAC は自動。知っていれば渡してもよい)*/
+/* 立ち上げ・接続・切断・停止は待たない(下の「待たない API」)。BFM_INPROGRESS の間は呼び続ける。 */
+while ((rc = bfm_init()) == BFM_INPROGRESS) { /* ほかの仕事 */ }   /* PCIe・HCA・RoCE の準備 */
+bfm_conn_t *c = NULL;
+while ((rc = bfm_accept(&c, 0, 0)) == BFM_INPROGRESS) { }        /* 受け側(ポートは g_bfm_cm_port)*/
+bfm_conn_t *c = NULL;
+while ((rc = bfm_connect(&c, ip, NULL, 0, 0)) == BFM_INPROGRESS) { }  /* 掛け側(相手の MAC は自動)*/
 
 bfm_write(c, off, src, len);                  /* 相手の公開メモリ + off へ。ACK まで待つ */
 bfm_write_post(c, off, src, len);             /* 待たない(inline に収まる長さだけ)*/
@@ -63,8 +66,8 @@ bfm_dif_write_start(c, off, src, nblocks, &d); /* 起動だけして戻る */
 while (bfm_dif_poll(c, &err) == BFM_DIF_INPROGRESS) { /* ほかの仕事 */ }   /* か bfm_dif_wait(c, &err) */
 
 bfm_poll();                                   /* ときどき呼ぶ(切断要求・FW のページ要求)*/
-bfm_disconnect(c);
-bfm_shutdown();
+while (bfm_disconnect(c) == BFM_INPROGRESS) { }
+while (bfm_shutdown() == BFM_INPROGRESS) { }
 ```
 
 - 1 本の接続で、**両方のノードが互いのメモリを触れる**(接続のときに両方向へ公開メモリの情報を渡す)。
@@ -72,6 +75,30 @@ bfm_shutdown();
   範囲の外は手元で断り(`BFM_E_PARAM`)、相手の NIC も MKey の範囲で断る。
 - `src` / `dst` はどこにあってもよい(NIC が直接読み書きするのは中継バッファで、CPU が写す)。
 - **複数のコアから同時に転送できる(64 コアまで)。** 下の「複数のコア」。
+
+### 待たない API(立ち上げ・接続・切断・停止)
+
+`bfm_init()`・`bfm_connect()`・`bfm_accept()`・`bfm_disconnect()`・`bfm_shutdown()` は、中で回って待たない。
+待つところに来ると `BFM_INPROGRESS`(正の値 1)を返すので、**`BFM_INPROGRESS` でなくなるまで同じ関数を定期的に呼び続ける**
+(呼ぶたびに先へ進み、呼ばなければ進まない)。間にほかの仕事をしてよい。
+
+| 関数 | 待つところ |
+|---|---|
+| `bfm_init()` | FLR の後の 100ms と設定空間が読めるまで、FW の初期化(最大 120 秒)、コマンドキューの登録の後の 10ms、FW のコマンド 1 つずつの完了、リンク(10ms おきに PAOS を読む)、`INIT_HCA` の後のページ要求(100ms 来なくなるまで、最大 2 秒)|
+| `bfm_connect(&c, …)` | FW のコマンド(CQ・QP を作る・状態を進める)の完了、REP(1 秒ごとに REQ を送り直す。`timeout_ms` で時間切れ)|
+| `bfm_accept(&c, …)` | REQ(`timeout_ms`、0 なら待ち続ける)、FW のコマンドの完了、REP を送る GSI の空き |
+| `bfm_disconnect(c)` | BYE を送る GSI の空き(100ms まで)、`DESTROY_QP` / `DESTROY_CQ` の完了 |
+| `bfm_shutdown()` | 全部の接続を畳む、GSI の送信が出ていく(100ms まで)、出したままのコマンドの完了、`TEARDOWN_HCA` の完了 |
+
+- `bfm_connect()` / `bfm_accept()` は、最初に `*pc = NULL` で呼ぶ(接続の枠を取って `*pc` に入れる)。2 回目からは同じ `pc` で呼ぶ
+  (`pc` 以外の引数は見ない)。`BFM_OK` なら `*pc` が使える。失敗なら `*pc` は `NULL` に戻る。
+- 途中で失敗したときも、作りかけたもの(QP・CQ、立ち上げなら HCA)を消し終えるまでは `BFM_INPROGRESS` を返し、その後に失敗の理由を返す。
+- 受け付けを待つのをやめるとき・確立の途中でやめるときは、`bfm_disconnect(*pc)` を `BFM_OK` まで呼ぶ。
+- **FW のコマンドの入口は 1 つ**なので、コマンドを出している途中の接続・切断を呼ばなくなると、ほかの接続の確立も進まない。
+  接続・切断は最後まで呼び続けること。FW のページ要求への答え(`MANAGE_PAGES`)も同じ入口を使い、`bfm_poll()` と
+  接続・切断の呼び出しの中で進む。
+- 各関数の状態と移り方は、関数仕様書の状態遷移図(`bfm_init()`・`mlx5_hca_init_step()`・`conn_step()` など)。
+- データ経路(write / read / atomic)は今までどおり、完了(ACK・応答)を待ってから戻る。T10-DIF は起動と完了確認を分けられる(下の「T10-DIF」)。
 
 ### 複数のコア
 
@@ -88,11 +115,11 @@ T10-DIF 用の中継バッファで、データ経路(write / read / atomic / T1
 - 接続の枠は `BFM_MAX_CONN`(既定 64)個まで。実際に用意する数は `g_bfm_max_conn`(既定 64)で減らせる。
   枠 1 つで DMA 領域を約 230KiB と UAR を 1 つ使う(64 個で約 14MiB)。
 - 鍵は接続管理(GSI の QP と、受けた REQ の待ち行列)・接続の枠の取り外し・FW のコマンド・EQ の処理を 1 つずつにする。
-  x86-64 の `xchg` で取り、取れなければ `pause` しながら回って待つ(OS の機能は使わない)。REP や REQ を待つ間は
-  1 回まわるごとに手放す。**回って待つので、同じ CPU の上で、鍵を持つタスクより優先度の高いタスクから
+  x86-64 の `xchg` で取り、取れなければ `pause` しながら回って待つ(OS の機能は使わない)。持つのは 1 回の呼び出しの間だけ
+  (REP や REQ を待つ間は持たない)。**回って待つので、同じ CPU の上で、鍵を持つタスクより優先度の高いタスクから
   接続・切断・`bfm_poll()` を呼ばないこと**(タスクはコアに 1 つずつ置くか、優先度をそろえる)。
 - 受け側は、受けた REQ を接続の枠の数まで取っておく(同じ掛け側の送り直しは 1 つにまとめる)。64 本が同時に
-  掛かってきても、`bfm_accept()` を呼ぶたびに古い順に受けられる。
+  掛かってきても、`bfm_accept()` で受けるたびに古い順に受けられる。受け付けを待つ間は接続の枠を 1 つ使う。
 - どの接続も相手の同じ公開メモリを触る。別の接続から同じ場所へ書いたときの順は決まらない
   (atomic はどの接続から打っても不可分。試験 `mt` の [3] で確かめた)。
 - 接続は CPU に縛られない。どのコアがどの接続を使うかはアプリケーションが決める
@@ -118,7 +145,7 @@ CPU の命令を 1 つずつ包んだ関数をアセンブラで持つ(`bfm_x86_
   CPUID 16h(基準の周波数)→ `MSR_PLATFORM_INFO`(基準の倍率 x 100MHz)の順。TSC が invariant
   (CPUID 8000_0007h)でなければ注意を表示する。
 - **時刻(ナノ秒)と待ち(空回り + `pause`)を TSC から作る。** VxWorks の `bfm_port_time_ns()` /
-  `bfm_port_delay_us()` はこれ。待ちは CPU を他のタスクに譲らない(待つのは立ち上げ・接続・切断の間だけ)。
+  `bfm_port_delay_us()` はこれ。待ちは CPU を他のタスクに譲らない(ライブラリの本体は使わない。待つのは `g_bfm_verbose` のときに周波数を測る 10ms だけ)。
 - **CPU の名前・TSC・周波数を表示する**(`g_bfm_verbose` のとき): 基準と最小(`MSR_PLATFORM_INFO`)、
   ターボの最大(`MSR_TURBO_RATIO_LIMIT`)、今の倍率(`IA32_PERF_STATUS`)、実効の周波数
   (10ms 空回りする間の `IA32_APERF` / `IA32_MPERF` の比)、パッケージ C-state の上限(`MSR_PKG_CST_CONFIG_CONTROL`)。

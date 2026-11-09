@@ -66,43 +66,32 @@ static uint32_t pci_find_pcie_cap(void)
     return 0;
 }
 
-static int pci_wait_present(uint32_t ms)
+#define TRPND_WAIT_MS   100u    /* 保留中の DMA(Transactions Pending)が消えるのを待つ上限 */
+#define FLR_WAIT_MS     100u    /* FLR をかけてから設定空間を読むまで(PCIe 基本仕様の決まり)*/
+#define PRESENT_WAIT_MS 1000u   /* FLR の後、設定空間が読めるようになるのを待つ上限 */
+
+static uint64_t ms_since(uint64_t t0)
 {
-    const uint64_t t0 = bfm_port_time_ns();
-    while ((bfm_port_pci_read32(PCI_ID) & 0xffffu) != MLX5_VENDOR_ID) {
-        if (bfm_port_time_ns() - t0 > (uint64_t)ms * 1000000u) return -1;
-        bfm_port_delay_us(1000u);
-    }
-    return 0;
+    return (bfm_port_time_ns() - t0) / 1000000u;
 }
 
-/*=================================================================
- * FLR をかける。保留中の DMA が終わるのを待ってから出し、100ms 待つ
- * (PCIe 基本仕様の決まり)。その後、設定空間が読めるようになるまで待つ。
- * ===============================================================*/
-static int pci_flr(uint32_t pcie)
-{
-    if (!(bfm_port_pci_read32(pcie + PCIE_DEVCAP) & PCIE_DEVCAP_FLR)) {
-        BFM_LOG("bfm: この装置は FLR に対応していない。リセットせずに進む\n");
-        return 0;
-    }
-    pci_cmd_write((uint16_t)(pci_cmd_read() & ~PCI_CMD_MASTER));
-    unsigned i;
-    for (i = 0; i < 100u; i++) {
-        if (!((bfm_port_pci_read32(pcie + PCIE_DEVCTL) >> 16) & PCIE_DEVSTA_TRPND)) break;
-        bfm_port_delay_us(1000u);
-    }
-    if (i == 100u) BFM_LOG("bfm: 注意: 100ms 待っても Transactions Pending が消えない。このまま FLR をかける\n");
-    const uint32_t ctl = bfm_port_pci_read32(pcie + PCIE_DEVCTL) & 0xffffu;
-    bfm_port_pci_write32(pcie + PCIE_DEVCTL, ctl | PCIE_DEVCTL_FLR);
-    bfm_port_delay_us(100000u);
-    if (pci_wait_present(1000u) != 0) {
-        BFM_LOG("bfm: FLR の後、設定空間が読めない\n");
-        return -1;
-    }
-    BFM_DBG("bfm: FLR をかけた\n");
-    return 0;
-}
+/* 設定の状態(bfm_pci_setup_step() が 1 つずつ進める)。 */
+enum {
+    P_PROBE = 0,      /* 装置を確かめ、FLR をかけるなら Bus Master を落とす */
+    P_TRPND,          /* 保留中の DMA が消えるのを待ってから FLR をかける */
+    P_FLR_WAIT,       /* FLR から 100ms 待つ */
+    P_PRESENT,        /* 設定空間が読めるようになるのを待つ */
+    P_BAR,            /* BAR0・MRRS・Command を設定する */
+    P_DONE            /* 済んだ */
+};
+
+static struct {
+    int step;                        /* 今の状態(P_*)*/
+    uint32_t pcie;                   /* PCI Express の capability の位置 */
+    uint64_t t0;                     /* 時間で待つ状態の起点 */
+} s_pci;
+
+static int pci_setup(bfm_dev_t *d);
 
 /*=================================================================
  * BAR0 の大きさを測り、addr が 0 でなければ書き込む。BAR0 の値(物理アドレス)と
@@ -144,10 +133,8 @@ static int pci_setup_bar0(uint64_t addr, uint64_t *out_phys, uint64_t *out_size)
     return 0;
 }
 
-/*=================================================================
- * PCIe の設定一式。d の vendor / device / name / bar0_phys / bar0_size を埋める。
- * ===============================================================*/
-int bfm_pci_setup(bfm_dev_t *d)
+/* 装置を確かめる(Mellanox の ConnectX-4〜7 の PF か)。d の vendor / device / name を埋める。 */
+static int pci_probe(bfm_dev_t *d)
 {
     const uint32_t id = bfm_port_pci_read32(PCI_ID);
     d->vendor = (uint16_t)id;
@@ -161,13 +148,88 @@ int bfm_pci_setup(bfm_dev_t *d)
                 "ConnectX-4〜7 の PF(VF ではないもの)を指定すること\n", d->vendor, d->device);
         return -1;
     }
-    const uint32_t pcie = pci_find_pcie_cap();
-    if (pcie == 0) {
+    s_pci.pcie = pci_find_pcie_cap();
+    if (s_pci.pcie == 0) {
         BFM_LOG("bfm: PCI Express の capability が見つからない\n");
         return -1;
     }
-    if (g_bfm_pcie_flr && pci_flr(pcie) != 0) return -1;
+    return 0;
+}
 
+/* 設定の状態を最初に戻す(bfm_init() が始めるときに呼ぶ)。 */
+void bfm_pci_setup_reset(void)
+{
+    s_pci.step = P_PROBE;
+    s_pci.pcie = 0;
+    s_pci.t0 = 0;
+}
+
+/*=================================================================
+ * PCIe の設定一式を、待つところまで進める。d の vendor / device / name / bar0_phys /
+ * bar0_size を埋める。FLR(g_bfm_pcie_flr)は、保留中の DMA が終わるのを待ってから出し、
+ * 100ms 待ち(PCIe 基本仕様の決まり)、設定空間が読めるようになるまで待つ。待つところでは
+ * BFM_INPROGRESS を返す。
+ * 戻り値: BFM_INPROGRESS = 途中。BFM_OK = 済んだ。BFM_E_HW = 失敗。
+ * ===============================================================*/
+int bfm_pci_setup_step(bfm_dev_t *d)
+{
+    for (;;) {
+        switch (s_pci.step) {
+        case P_PROBE:
+            if (pci_probe(d) != 0) return BFM_E_HW;
+            if (!g_bfm_pcie_flr) {
+                s_pci.step = P_BAR;
+            } else if (!(bfm_port_pci_read32(s_pci.pcie + PCIE_DEVCAP) & PCIE_DEVCAP_FLR)) {
+                BFM_LOG("bfm: この装置は FLR に対応していない。リセットせずに進む\n");
+                s_pci.step = P_BAR;
+            } else {
+                pci_cmd_write((uint16_t)(pci_cmd_read() & ~PCI_CMD_MASTER));
+                s_pci.t0 = bfm_port_time_ns();
+                s_pci.step = P_TRPND;
+            }
+            break;
+        case P_TRPND: {
+            if ((bfm_port_pci_read32(s_pci.pcie + PCIE_DEVCTL) >> 16) & PCIE_DEVSTA_TRPND) {
+                if (ms_since(s_pci.t0) < TRPND_WAIT_MS) return BFM_INPROGRESS;
+                BFM_LOG("bfm: 注意: 100ms 待っても Transactions Pending が消えない。このまま FLR をかける\n");
+            }
+            const uint32_t ctl = bfm_port_pci_read32(s_pci.pcie + PCIE_DEVCTL) & 0xffffu;
+            bfm_port_pci_write32(s_pci.pcie + PCIE_DEVCTL, ctl | PCIE_DEVCTL_FLR);
+            s_pci.t0 = bfm_port_time_ns();
+            s_pci.step = P_FLR_WAIT;
+            break;
+        }
+        case P_FLR_WAIT:
+            if (ms_since(s_pci.t0) < FLR_WAIT_MS) return BFM_INPROGRESS;
+            s_pci.t0 = bfm_port_time_ns();
+            s_pci.step = P_PRESENT;
+            break;
+        case P_PRESENT:
+            if ((bfm_port_pci_read32(PCI_ID) & 0xffffu) != MLX5_VENDOR_ID) {
+                if (ms_since(s_pci.t0) <= PRESENT_WAIT_MS) return BFM_INPROGRESS;
+                BFM_LOG("bfm: FLR の後、設定空間が読めない\n");
+                return BFM_E_HW;
+            }
+            BFM_DBG("bfm: FLR をかけた\n");
+            s_pci.step = P_BAR;
+            break;
+        case P_BAR:
+            if (pci_setup(d) != 0) return BFM_E_HW;
+            s_pci.step = P_DONE;
+            break;
+        default:   /* P_DONE */
+            return BFM_OK;
+        }
+    }
+}
+
+/*=================================================================
+ * BAR0(g_bfm_bar0_addr)・MRRS(g_bfm_pcie_mrrs)・Command(Memory Space・Bus Master・
+ * INTx を止める)を設定し、装置の情報を表示する。
+ * ===============================================================*/
+static int pci_setup(bfm_dev_t *d)
+{
+    const uint32_t pcie = s_pci.pcie;
     if (pci_setup_bar0(g_bfm_bar0_addr, &d->bar0_phys, &d->bar0_size) != 0) return -1;
 
     if (g_bfm_pcie_mrrs != 0) {

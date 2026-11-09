@@ -1,7 +1,11 @@
 /* mlx5 のコマンドキュー、FW へのページの受け渡し、EQ(非同期イベント)。
  *
- * コマンドキューは entry 0 だけを使い、1 つずつ同期で出す。ここでは排他を持たないので、
- * 複数のコアから使うときは呼び出し側が g_bfm_ctl_lock を取る(bfm_init() の間は 1 つのコアだけ)。 */
+ * コマンドキューは entry 0 だけを使う。コマンドは待たずに扱う: mlx5_cmd_run() は、まだ出していなければ
+ * 出し、出してあれば完了を 1 回だけ見て、終わっていなければ BFM_INPROGRESS を返す。呼び出し側は
+ * 同じ bfm_cmd_t と同じ引数で呼び直して完了を受け取る。entry は 1 つなので、出している間は
+ * その bfm_cmd_t が持ち主になり(d->cmd_owner)、ほかの bfm_cmd_t からの呼び出しは出さずに
+ * BFM_INPROGRESS を返す(持ち主が完了を受け取るまで待たされる)。
+ * ここでは排他を持たないので、複数のコアから使うときは呼び出し側が g_bfm_ctl_lock を取る。 */
 #include "bfm_internal.h"
 
 #include <string.h>
@@ -42,7 +46,8 @@ static volatile uint8_t *mbox_out(const bfm_dev_t *d, uint32_t i)
 
 /*=================================================================
  * コマンドキューを FW に登録する。entry の大きさが 64 バイトであることを確かめ、
- * 物理アドレスを Initialization Segment へ書く。
+ * 物理アドレスを Initialization Segment へ書く。FW が受け付けるまでの 10ms は
+ * 呼び出し側が待つ(mlx5_hca_init_step())。
  * ===============================================================*/
 int mlx5_cmd_init(bfm_dev_t *d)
 {
@@ -61,23 +66,12 @@ int mlx5_cmd_init(bfm_dev_t *d)
     bfm_mmio_wr32be(d->bar0, MLX5_ISEG_CMDQ_ADDR_H, (uint32_t)(pa >> 32));
     bfm_mmio_wr32be(d->bar0, MLX5_ISEG_CMDQ_ADDR_L_SZ, (uint32_t)pa);
     bfm_mb();
-    bfm_port_delay_us(10000u);
     return BFM_OK;
 }
 
-/*=================================================================
- * コマンドを 1 つ出して完了を待つ。入力の 16 バイトを超える分と、出力の 16 バイトを
- * 超える分はメールボックスの鎖で渡す。出力の status が 0 でなければ失敗にする
- * (what をつけて status と syndrome を表示する)。
- * ===============================================================*/
-int mlx5_cmd(bfm_dev_t *d, const uint8_t *in, uint32_t inlen, uint8_t *out, uint32_t outlen,
-             const char *what)
+/* entry とメールボックスに入力を写し、ドアベルを鳴らす。 */
+static void cmd_post(bfm_dev_t *d, const uint8_t *in, uint32_t inlen, uint32_t outlen)
 {
-    const uint32_t max = 16u + BFM_MBOX_BLOCKS * 512u;
-    if (inlen > max || outlen > max || inlen < 8u || outlen < 8u) {
-        BFM_LOG("bfm: %s: コマンドの長さが範囲外 (in=%u out=%u)\n", what, inlen, outlen);
-        return BFM_E_PARAM;
-    }
     volatile uint8_t *e = d->cmdq;
     for (unsigned i = 0; i < CMD_ENTRY_SIZE; i++) e[i] = 0;
     for (uint32_t i = 0; i < 16u && i < inlen; i++) e[CMD_IN + i] = in[i];
@@ -108,22 +102,20 @@ int mlx5_cmd(bfm_dev_t *d, const uint8_t *in, uint32_t inlen, uint8_t *out, uint
     e[CMD_STATUS_OWN] = 0x1u;        /* 持ち主を FW へ */
     bfm_mb();
     bfm_mmio_wr32be(d->bar0, MLX5_ISEG_CMD_DBELL, 1u);   /* entry 0 */
+}
 
-    const uint16_t opcode = (uint16_t)(((uint16_t)in[0] << 8) | in[1]);
-    const uint64_t t0 = bfm_port_time_ns();
-    for (;;) {
-        if (!(e[CMD_STATUS_OWN] & 0x1u)) break;
-        if (bfm_port_time_ns() - t0 > (uint64_t)CMD_TIMEOUT_MS * 1000000u) {
-            BFM_LOG("bfm: %s (opcode 0x%x): FW が %u ms 待っても答えない\n", what, opcode, CMD_TIMEOUT_MS);
-            return BFM_E_TIMEOUT;
-        }
-    }
+/* 完了した entry とメールボックスから出力を読み、status を見る。 */
+static int cmd_finish(bfm_dev_t *d, const bfm_cmd_t *j, uint8_t *out)
+{
+    volatile uint8_t *e = d->cmdq;
+    const uint32_t outlen = j->outlen;
     bfm_rmb();
     const uint8_t delivery = (uint8_t)(e[CMD_STATUS_OWN] >> 1);
     if (delivery != 0) {
-        BFM_LOG("bfm: %s (opcode 0x%x): 渡し方の誤り (delivery status 0x%02x)\n", what, opcode, delivery);
+        BFM_LOG("bfm: %s (opcode 0x%x): 渡し方の誤り (delivery status 0x%02x)\n", j->what, j->opcode, delivery);
         return BFM_E_HW;
     }
+    const uint32_t out_blocks = (outlen > 16u) ? (outlen - 16u + 511u) / 512u : 0u;
     for (uint32_t i = 0; i < 16u && i < outlen; i++) out[i] = e[CMD_OUT + i];
     for (uint32_t b = 0; b < out_blocks; b++) {
         volatile uint8_t *m = mbox_out(d, b);
@@ -132,20 +124,81 @@ int mlx5_cmd(bfm_dev_t *d, const uint8_t *in, uint32_t inlen, uint8_t *out, uint
         for (uint32_t i = 0; i < n; i++) out[from + i] = m[MBOX_DATA + i];
     }
     if (out[0] != 0) {
-        BFM_LOG("bfm: %s (opcode 0x%x): status 0x%02x syndrome 0x%08x\n", what, opcode, out[0],
+        BFM_LOG("bfm: %s (opcode 0x%x): status 0x%02x syndrome 0x%08x\n", j->what, j->opcode, out[0],
                 bfm_rd32be(&out[4]));
         return BFM_E_HW;
     }
     return BFM_OK;
 }
 
+/*=================================================================
+ * コマンドを 1 つ、待たずに進める。j がまだ出していなければ、entry が空いていれば出す
+ * (入力の 16 バイトを超える分と、出力の 16 バイトを超える分はメールボックスの鎖で渡す)。
+ * 出してあれば完了を 1 回だけ見る。完了していれば出力を out に写し、status が 0 でなければ
+ * 失敗にする(what をつけて status と syndrome を表示する)。
+ * 戻り値: BFM_INPROGRESS = まだ(同じ j と引数で呼び直す)。BFM_OK = 成功。負 = 失敗。
+ * 出した後の呼び出しでは in を見ない(出すときに写してある)。
+ * ===============================================================*/
+int mlx5_cmd_run(bfm_dev_t *d, bfm_cmd_t *j, const uint8_t *in, uint32_t inlen, uint8_t *out,
+                 uint32_t outlen, const char *what)
+{
+    if (!j->posted) {
+        const uint32_t max = 16u + BFM_MBOX_BLOCKS * 512u;
+        if (inlen > max || outlen > max || inlen < 8u || outlen < 8u) {
+            BFM_LOG("bfm: %s: コマンドの長さが範囲外 (in=%u out=%u)\n", what, inlen, outlen);
+            return BFM_E_PARAM;
+        }
+        if (d->cmd_dead) {
+            BFM_LOG("bfm: %s: FW が前のコマンドに答えなかったので出さない\n", what);
+            return BFM_E_HW;
+        }
+        if (d->cmd_owner != NULL) return BFM_INPROGRESS;   /* ほかの手順が entry を使っている */
+        cmd_post(d, in, inlen, outlen);
+        j->posted = 1;
+        j->opcode = (uint16_t)(((uint16_t)in[0] << 8) | in[1]);
+        j->outlen = outlen;
+        j->what = what;
+        j->t0 = bfm_port_time_ns();
+        d->cmd_owner = j;
+    }
+    if (d->cmdq[CMD_STATUS_OWN] & 0x1u) {
+        if (bfm_port_time_ns() - j->t0 <= (uint64_t)CMD_TIMEOUT_MS * 1000000u) return BFM_INPROGRESS;
+        BFM_LOG("bfm: %s (opcode 0x%x): FW が %u ms 待っても答えない\n", j->what, j->opcode, CMD_TIMEOUT_MS);
+        d->cmd_dead = 1;                          /* entry は FW が持ったまま。もう使わない */
+        j->posted = 0;
+        d->cmd_owner = NULL;
+        return BFM_E_TIMEOUT;
+    }
+    j->posted = 0;
+    d->cmd_owner = NULL;
+    return cmd_finish(d, j, out);
+}
+
+/*=================================================================
+ * 出したまま持ち主が受け取っていないコマンドを、完了を待って捨てる(止めるときに使う)。
+ * 戻り値: BFM_INPROGRESS = FW がまだ持っている。BFM_OK = entry は空いた。
+ * ===============================================================*/
+int mlx5_cmd_drain(bfm_dev_t *d)
+{
+    bfm_cmd_t *j = d->cmd_owner;
+    if (j == NULL) return BFM_OK;
+    if (d->cmdq[CMD_STATUS_OWN] & 0x1u) {
+        if (bfm_port_time_ns() - j->t0 <= (uint64_t)CMD_TIMEOUT_MS * 1000000u) return BFM_INPROGRESS;
+        BFM_LOG("bfm: %s (opcode 0x%x): FW が %u ms 待っても答えない\n", j->what, j->opcode, CMD_TIMEOUT_MS);
+        d->cmd_dead = 1;
+    }
+    j->posted = 0;
+    d->cmd_owner = NULL;
+    return BFM_OK;
+}
+
 /* 「16 バイトの入力で byte 9〜11 にオブジェクトの番号」の形の解放のコマンド。 */
-int mlx5_destroy_obj(bfm_dev_t *d, uint16_t opcode, uint32_t id, const char *what)
+int mlx5_destroy_obj(bfm_dev_t *d, bfm_cmd_t *j, uint16_t opcode, uint32_t id, const char *what)
 {
     uint8_t in[16] = {0}, out[16];
     bfm_wr16be(&in[0], opcode);
     bfm_wr24be(&in[9], id);
-    return mlx5_cmd(d, in, sizeof(in), out, sizeof(out), what);
+    return mlx5_cmd_run(d, j, in, sizeof(in), out, sizeof(out), what);
 }
 
 /* ---------------------------------------------------------------------
@@ -155,12 +208,13 @@ int mlx5_destroy_obj(bfm_dev_t *d, uint16_t opcode, uint32_t id, const char *wha
 #define PAGES_PER_CMD 512u   /* 16 + 512 x 8 = 4112 バイト(メールボックス 8 ブロック)*/
 
 /*=================================================================
- * MANAGE_PAGES(GIVE)で npages ページを渡す。ページは DMA 領域の中の FW 用の
- * 区画(g_bfm_fw_pages_max ページ)から順に出す。返してもらうことはしない。
+ * FW へ npages ページ渡す手順を始める(p に覚える)。渡すのは mlx5_pages_step()。
+ * 区画の残りが足りなければ BFM_E_NOMEM(何も渡さない)。npages <= 0 なら何もしない。
  * ===============================================================*/
-int mlx5_give_pages(bfm_dev_t *d, uint16_t func, int32_t npages)
+int mlx5_pages_start(bfm_dev_t *d, bfm_pages_t *p, uint16_t func, int32_t npages)
 {
-    static uint8_t in[16u + PAGES_PER_CMD * 8u];
+    memset(p, 0, sizeof(*p));
+    p->func = func;
     if (npages <= 0) return BFM_OK;
     if ((uint32_t)npages > g_bfm_fw_pages_max - d->fw_pages_used) {
         BFM_LOG("bfm: FW が %d ページ求めたが、残りは %u ページ。g_bfm_fw_pages_max(今 %u)を"
@@ -168,34 +222,49 @@ int mlx5_give_pages(bfm_dev_t *d, uint16_t func, int32_t npages)
                 g_bfm_fw_pages_max, d->fw_pages_used + (uint32_t)npages);
         return BFM_E_NOMEM;
     }
-    uint32_t left = (uint32_t)npages;
-    while (left > 0) {
-        const uint32_t n = (left > PAGES_PER_CMD) ? PAGES_PER_CMD : left;
-        uint8_t out[16];
-        memset(in, 0, 16);
-        bfm_wr16be(&in[0], MLX5_CMD_MANAGE_PAGES);
-        bfm_wr16be(&in[6], 1u);                       /* op_mod = GIVE */
-        bfm_wr16be(&in[10], func);
-        bfm_wr32be(&in[12], n);
-        for (uint32_t i = 0; i < n; i++) {
-            const uint64_t pa = bfm_dma_addr(d->fw_pages + (uint64_t)(d->fw_pages_used + i) * BFM_PAGE);
-            bfm_wr64be(&in[16u + i * 8u], pa);
-        }
-        const int rc = mlx5_cmd(d, in, 16u + n * 8u, out, sizeof(out), "MANAGE_PAGES(GIVE)");
-        if (rc != BFM_OK) return rc;
-        d->fw_pages_used += n;
-        left -= n;
-    }
+    p->left = (uint32_t)npages;
     return BFM_OK;
 }
 
-/* MANAGE_PAGES(CANT_GIVE)。渡せないと伝えないと FW は要求を出し直し続ける。 */
-static void mlx5_cant_give(bfm_dev_t *d, uint16_t func)
+/*=================================================================
+ * MANAGE_PAGES(GIVE)で、残りのページを 512 ページずつ渡す(待たずに進める)。
+ * ページは DMA 領域の中の FW 用の区画(g_bfm_fw_pages_max ページ)から順に出す。
+ * 返してもらうことはしない。p->cant が立っていれば、代わりに CANT_GIVE を 1 回伝える。
+ * 戻り値: BFM_INPROGRESS = まだ残りがある。BFM_OK = 渡し終えた。負 = 失敗。
+ * ===============================================================*/
+int mlx5_pages_step(bfm_dev_t *d, bfm_pages_t *p)
 {
-    uint8_t in[16] = {0}, out[16];
-    bfm_wr16be(&in[0], MLX5_CMD_MANAGE_PAGES);
-    bfm_wr16be(&in[10], func);
-    (void)mlx5_cmd(d, in, sizeof(in), out, sizeof(out), "MANAGE_PAGES(CANT_GIVE)");
+    static uint8_t in[16u + PAGES_PER_CMD * 8u];
+    uint8_t out[16];
+    if (p->cant) {
+        /* 渡せないと伝えないと FW は要求を出し直し続ける */
+        uint8_t cin[16] = {0};
+        bfm_wr16be(&cin[0], MLX5_CMD_MANAGE_PAGES);
+        bfm_wr16be(&cin[10], p->func);
+        const int rc = mlx5_cmd_run(d, &p->cmd, cin, sizeof(cin), out, sizeof(out), "MANAGE_PAGES(CANT_GIVE)");
+        if (rc == BFM_INPROGRESS) return rc;
+        p->cant = 0;
+        return rc;
+    }
+    while (p->left > 0) {
+        if (!p->cmd.posted) {
+            p->n = (p->left > PAGES_PER_CMD) ? PAGES_PER_CMD : p->left;
+            memset(in, 0, 16);
+            bfm_wr16be(&in[0], MLX5_CMD_MANAGE_PAGES);
+            bfm_wr16be(&in[6], 1u);                       /* op_mod = GIVE */
+            bfm_wr16be(&in[10], p->func);
+            bfm_wr32be(&in[12], p->n);
+            for (uint32_t i = 0; i < p->n; i++) {
+                const uint64_t pa = bfm_dma_addr(d->fw_pages + (uint64_t)(d->fw_pages_used + i) * BFM_PAGE);
+                bfm_wr64be(&in[16u + i * 8u], pa);
+            }
+        }
+        const int rc = mlx5_cmd_run(d, &p->cmd, in, 16u + p->n * 8u, out, sizeof(out), "MANAGE_PAGES(GIVE)");
+        if (rc != BFM_OK) return rc;
+        d->fw_pages_used += p->n;
+        p->left -= p->n;
+    }
+    return BFM_OK;
 }
 
 /* ---------------------------------------------------------------------
@@ -205,24 +274,45 @@ static void mlx5_cant_give(bfm_dev_t *d, uint16_t func)
 #define EQE_SIZE        64u
 #define EQ_DB_NOARM     0x48u    /* UAR ページの中の EQ のドアベル(arm しない)*/
 
+static bfm_pages_t s_eq_pages;   /* EQ で受けたページ要求に答えている途中の手順 */
+static int s_eq_pages_busy;      /* s_eq_pages が動いている */
+static struct {
+    int      valid;              /* 答えている間に次の要求が来た */
+    uint16_t func;               /* その要求の function */
+    int32_t  n;                  /* その要求のページの数 */
+} s_eq_next;                     /* 答え終えたら答える要求(来た中で最後のもの)*/
+
+/* EQ を作る前に、ページ要求に答える手順を空にする(mlx5_hca_init_step() から)。 */
+void mlx5_eq_reset(void)
+{
+    memset(&s_eq_pages, 0, sizeof(s_eq_pages));
+    memset(&s_eq_next, 0, sizeof(s_eq_next));
+    s_eq_pages_busy = 0;
+}
+
+/* ページ要求に答える手順を始める(区画が足りなければ CANT_GIVE を伝える手順にする)。 */
+static void eq_pages_begin(bfm_dev_t *d, uint16_t func, int32_t n)
+{
+    if (n > 0) {
+        if (mlx5_pages_start(d, &s_eq_pages, func, n) != BFM_OK) s_eq_pages.cant = 1;
+        s_eq_pages_busy = 1;
+    } else if (n < 0) {
+        BFM_DBG("bfm: FW がページの返却を申し出た(%d)。預けたままにする\n", (int)n);
+    }
+}
+
 /*=================================================================
- * EQ を 1 本作る。割り込みは使わない(arm しない)。購読するのは Linux の
- * MLX5_ASYNC_EVENT_MASK と同じ組 + ページ要求。中身は mlx5_eq_poll() で読む。
+ * EQ のリングを DMA 領域から切り出して所有の印を初期値にし、購読するイベントを決める
+ * (Linux の MLX5_ASYNC_EVENT_MASK と同じ組 + ページ要求)。コマンドは出さない。
  * ===============================================================*/
-int mlx5_eq_create(bfm_dev_t *d)
+int mlx5_eq_prepare(bfm_dev_t *d)
 {
     const uint32_t nent = 1u << BFM_EQ_LOG;
     const uint32_t bytes = nent * EQE_SIZE;
-    const uint32_t npages = (bytes + BFM_PAGE - 1u) / BFM_PAGE;
-    static uint8_t in[272 + 8 * 4];
-    if (npages > 4u) return BFM_E_PARAM;              /* in[] に載る PAS は 4 ページまで(BFM_EQ_LOG <= 8)*/
+    if ((bytes + BFM_PAGE - 1u) / BFM_PAGE > 4u) return BFM_E_PARAM;   /* CREATE_EQ に載る PAS は 4 ページまで */
     d->eq_buf = (volatile uint8_t *)bfm_mem_alloc(bytes, BFM_PAGE);
     if (d->eq_buf == NULL) return BFM_E_NOMEM;
     for (uint32_t i = 0; i < nent; i++) d->eq_buf[i * EQE_SIZE + EQE_SIZE - 1u] = 1u;  /* owner の初期値 */
-
-    int rc = mlx5_alloc_uar(d, &d->eq_uarn);
-    if (rc != BFM_OK) return rc;
-
     d->eq_mask = (1ull << MLX5_EVT_PATH_MIG) | (1ull << MLX5_EVT_COMM_EST) |
                  (1ull << MLX5_EVT_SQ_DRAINED) | (1ull << MLX5_EVT_CQ_ERROR) |
                  (1ull << MLX5_EVT_WQ_CATAS_ERROR) | (1ull << MLX5_EVT_PATH_MIG_FAILED) |
@@ -230,20 +320,34 @@ int mlx5_eq_create(bfm_dev_t *d)
                  (1ull << MLX5_EVT_PORT_CHANGE) | (1ull << MLX5_EVT_SRQ_CATAS_ERROR) |
                  (1ull << MLX5_EVT_SRQ_LAST_WQE) | (1ull << MLX5_EVT_SRQ_RQ_LIMIT);
     if (!d->page_request_disable) d->eq_mask |= 1ull << MLX5_EVT_PAGE_REQUEST;
+    return BFM_OK;
+}
 
+/*=================================================================
+ * EQ を 1 本作るコマンド(CREATE_EQ)を進める。割り込みは使わない(arm しない)。
+ * 中身は mlx5_eq_poll() で読む。EQ のリング(mlx5_eq_prepare())と UAR(d->eq_uarn)は
+ * 呼び出し側が先に用意する。
+ * ===============================================================*/
+int mlx5_eq_create(bfm_dev_t *d, bfm_cmd_t *j)
+{
+    static uint8_t in[272 + 8 * 4];
+    const uint32_t npages = ((1u << BFM_EQ_LOG) * EQE_SIZE + BFM_PAGE - 1u) / BFM_PAGE;
     uint8_t out[16];
-    memset(in, 0, sizeof(in));
-    bfm_wr16be(&in[0], MLX5_CMD_CREATE_EQ);
-    uint8_t *eqc = &in[16];
-    eqc[12] = (uint8_t)BFM_EQ_LOG;                    /* log_eq_size */
-    bfm_wr24be(&eqc[13], d->eq_uarn);                 /* uar_page */
-    eqc[24] = 0;                                      /* log_page_size = 4KiB */
-    bfm_wr64be(&in[88], d->eq_mask);                  /* event_bitmask[0] */
-    for (uint32_t p = 0; p < npages; p++) bfm_wr64be(&in[272 + p * 8u], bfm_dma_addr(d->eq_buf + p * BFM_PAGE));
-    rc = mlx5_cmd(d, in, 272u + npages * 8u, out, sizeof(out), "CREATE_EQ");
+    if (!j->posted) {
+        memset(in, 0, sizeof(in));
+        bfm_wr16be(&in[0], MLX5_CMD_CREATE_EQ);
+        uint8_t *eqc = &in[16];
+        eqc[12] = (uint8_t)BFM_EQ_LOG;                /* log_eq_size */
+        bfm_wr24be(&eqc[13], d->eq_uarn);             /* uar_page */
+        eqc[24] = 0;                                  /* log_page_size = 4KiB */
+        bfm_wr64be(&in[88], d->eq_mask);              /* event_bitmask[0] */
+        for (uint32_t p = 0; p < npages; p++) bfm_wr64be(&in[272 + p * 8u], bfm_dma_addr(d->eq_buf + p * BFM_PAGE));
+    }
+    const int rc = mlx5_cmd_run(d, j, in, 272u + npages * 8u, out, sizeof(out), "CREATE_EQ");
     if (rc != BFM_OK) return rc;
     d->eqn = out[11];
     d->eq_cc = 0;
+    d->eq_ready = 1;
     return BFM_OK;
 }
 
@@ -254,14 +358,15 @@ static void mlx5_eq_update_ci(bfm_dev_t *d)
 }
 
 /*=================================================================
- * EQ に溜まったイベントを読む。ページ要求は、1 回の読み取りの最後の要求にだけ
- * 答える(FW は答えが来るまで同じ要求を出し直すので、全部に答えると与えすぎる。
- * vfio_nvme で実機確認済み)。エラーのイベントは接続をエラーにする。
+ * EQ に溜まったイベントを読み、ページ要求に答える手順を進める。ページ要求は、1 回の
+ * 読み取りの最後の要求にだけ答える(FW は答えが来るまで同じ要求を出し直すので、全部に
+ * 答えると与えすぎる。vfio_nvme で実機確認済み)。答えている途中に来た要求は、来た中で
+ * 最後のものを覚えておき、答え終えてから答える。エラーのイベントは接続をエラーにする。
  * 戻り値: 読んだイベントの数。
  * ===============================================================*/
 int mlx5_eq_poll(bfm_dev_t *d)
 {
-    if (d->eq_buf == NULL) return 0;
+    if (!d->eq_ready) return 0;
     const uint32_t nent = 1u << BFM_EQ_LOG;
     int n = 0;
     int32_t page_n = 0;
@@ -303,14 +408,32 @@ int mlx5_eq_poll(bfm_dev_t *d)
     }
     if (n) mlx5_eq_update_ci(d);
     if (page_req) {
-        if (page_n > 0) {
-            if (mlx5_give_pages(d, page_func, page_n) == BFM_OK)
-                BFM_DBG("bfm: FW のページ要求に答えた(%d ページ、計 %u)\n", (int)page_n, d->fw_pages_used);
-            else
-                mlx5_cant_give(d, page_func);
-        } else if (page_n < 0) {
-            BFM_DBG("bfm: FW がページの返却を申し出た(%d)。預けたままにする\n", (int)page_n);
+        if (!s_eq_pages_busy) {
+            eq_pages_begin(d, page_func, page_n);
+        } else {
+            /* 答えている間に来た要求は、答え終えてから答える。受け流すと FW は出し直さず、渡すページが
+             * 前の版(読み取りごとに最後の要求に答えていた)より少なくなった(ConnectX-4 Lx で確認) */
+            s_eq_next.valid = 1;
+            s_eq_next.func = page_func;
+            s_eq_next.n = page_n;
+        }
+    }
+    if (s_eq_pages_busy) {
+        const int rc = mlx5_pages_step(d, &s_eq_pages);
+        if (rc != BFM_INPROGRESS) {
+            s_eq_pages_busy = 0;
+            if (rc == BFM_OK) BFM_DBG("bfm: FW のページ要求に答えた(計 %u ページ)\n", d->fw_pages_used);
+            if (s_eq_next.valid) {
+                s_eq_next.valid = 0;
+                eq_pages_begin(d, s_eq_next.func, s_eq_next.n);
+            }
         }
     }
     return n;
+}
+
+/* 1 = EQ で受けたページ要求に答えている途中。 */
+int mlx5_eq_busy(void)
+{
+    return s_eq_pages_busy;
 }

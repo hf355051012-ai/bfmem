@@ -21,8 +21,8 @@ image::hw_block.drawio.svg[ConnectX とホストのブロック図]
 [cols="1,3,3",options="header"]
 |===
 |経路 |中身 |bfmem の場所
-|① 設定空間 |装置の確認・FLR・BAR0 の割り当て・Memory Space / Bus Master・MRRS |`bfm_pci_setup()`(VxWorks は ECAM を直接、Linux は VFIO の設定空間)
-|② 初期化セグメント |FW の版の確認、FW の初期化の完了待ち、コマンドキューの登録、コマンドのドアベル |`mlx5_hca_init()`・`mlx5_cmd_init()`・`mlx5_cmd()`
+|① 設定空間 |装置の確認・FLR・BAR0 の割り当て・Memory Space / Bus Master・MRRS |`bfm_pci_setup_step()`(VxWorks は ECAM を直接、Linux は VFIO の設定空間)
+|② 初期化セグメント |FW の版の確認、FW の初期化の完了待ち、コマンドキューの登録、コマンドのドアベル |`mlx5_hca_init_step()`・`mlx5_cmd_init()`・`mlx5_cmd_run()`
 |③ UAR ページ |WQE のドアベル・BlueFlame(WQE そのものを MMIO で書く)、EQ のドアベル |`post()`・`gsi_send()`・`mlx5_eq_update_ci()`
 |④ DMA(DMA 領域) |NIC がコマンド・メールボックス・WQE・送るデータを読み、CQE・EQE・読んだデータ・コマンドの応答を書く。FW に渡したページも NIC が自分の作業域(ICM)として使う |`bfm_mem_alloc()` で切り出した領域
 |⑤ DMA(公開メモリ) |相手の bfmem からの write / read / atomic を、NIC が CPU を通さずに処理する |MKey(rkey)で範囲を決めるだけ
@@ -63,7 +63,7 @@ ConnectX は「FW が管理する資源(QP・CQ・EQ・MKey・PD・UAR)」と「
 * *MMIO 読み / 書き*: CPU が BAR0(初期化セグメント・UAR ページ)を直接読み書きする。BlueFlame の窓は WC、それ以外は UC。
 * *書く / 読む*(CPU → ホストのメモリ): CPU が普通にメモリを読み書きする。NIC はそれを DMA で読む / NIC が DMA で書いたものを CPU が読む。
 * *DMA 読み / 書き*(ConnectX → ホストのメモリ): NIC がバスマスタとしてホストのメモリを読み書きする。
-* *コマンド X*: 図の「コマンドを 1 つ出す」の段の手順(entry とメールボックスを書く → ドアベル → FW が処理 → 完了を待つ)をまとめて 1 本の矢印にしたもの。
+* *コマンド X*: 図の「コマンドを 1 つ出す」の段の手順(entry とメールボックスを書く → ドアベル → FW が処理 → 完了を受け取る。完了までは呼ばれるたびに 1 回ずつ見る)をまとめて 1 本の矢印にしたもの。
 * *RoCE v2*: ワイヤ上のパケット(UDP / IPv4 の上の IB の RC)。
 * 破線は応答。四角は、その者の中での処理。
 
@@ -173,13 +173,15 @@ NIC が DMA で読む、ホストのメモリの 64 バイト(QP・CQ ごと)。
 [[cx-boot]]
 === ファームウェアの起動
 
-`bfm_init()` の流れ(`bfm_pci_setup()` → BAR0 を張る → `mlx5_hca_init()` → `bfm_dif_init()` → `bfm_cm_init()`)。
+`bfm_init()` の流れ(`bfm_pci_setup_step()` → BAR0 を張る → `mlx5_hca_init_step()` → `bfm_dif_init_step()` → `bfm_cm_init_step()`)。
 両側に線のある箱は FW へのコマンド。手順は Linux の mlx5_core(`mlx5_function_enable()` / `mlx5_function_setup()`)と同じ順。
+どの段階も待たずに進める: 時間で待つところ(FLR の後の 100ms・FW の初期化・リンク・ページ要求)とコマンドの完了では
+`BFM_INPROGRESS` を返し、`bfm_init()` が呼ばれるたびに先へ進む(各関数の状態遷移図)。
 
 .立ち上げの手順
 image::hw_boot.drawio.svg[立ち上げの手順]
 
-* *FW の初期化待ち*: initializing(0x1fc の bit31)が 0 になるまで待つ。コマンドキューを登録する前と後の 2 回。
+* *FW の初期化待ち*: initializing(0x1fc の bit31)が 0 になるまで、呼ばれるたびに読む。コマンドキューを登録する前と後の 2 回(登録の後は 10ms おいてから)。
   ConnectX-7 は FW の起動に長くかかることがあるので、上限は 120 秒にしてある。
 * *ENABLE_HCA*(0x104): この PCI function の HCA を FW の中で有効にする。この後の手順はこれが通っている前提。止めるときの `TEARDOWN_HCA` と対になる。
 * *ISSI*: コマンドの形式の版。`QUERY_ISSI` の応答の byte 108〜111(bit n = 版 n に対応)で版 1 があれば `SET_ISSI` で 1 にする。
@@ -205,12 +207,14 @@ FW は QP などのコンテキストを置く作業域を、ホストのメモ�
 
 * ページは DMA 領域の FW 用の区画(`g_bfm_fw_pages_max` ページ。既定 16,384 = 64MiB)から先頭から順に渡し、返してもらわない。
 * *EQ でのページ要求は、1 回の読み取りの最後の要求にだけ答える*(FW は答えが来るまで同じ要求を出し直すので、全部に答えると与えすぎる)。
+  答えるのは待たずに進める手順で(`MANAGE_PAGES` を 1 つずつ出す)、答えている間に来た要求は、来た中で最後のものを覚えておき、答え終えてから答える
+  (受け流すと FW は出し直さず、渡すページが少なくなった。ConnectX-4 Lx)。
 * 返却の申し出(負の数)には答えず、預けたままにする。
 * 実測(ConnectX-4 Lx): FW 14.32 で計 3,951 ページ、FW 14.29 で計 7,841 ページ。ConnectX-7 はもっと多いはず。
 
 ==== 止め方
 
-`mlx5_hca_teardown()`: `TEARDOWN_HCA`(0x103)を、まず graceful(入力の [10..11] profile = 0)で、断られたら force(profile = 1)で出す。
+`mlx5_hca_teardown()`: `TEARDOWN_HCA`(0x103)を、まず graceful(入力の [10..11] profile = 0)で、断られたら force(profile = 1)で出す(待たずに進める)。
 force の応答の byte 15 の bit0 が 1 なら失敗とみなす。*この後は FW にコマンドを出さない*(`MANAGE_PAGES`・`DISABLE_HCA` が返らないことがある)。
 その後、呼び出し側が Bus Master を落とす。止めきれなかったときは、次の立ち上げの FLR で戻す。
 
@@ -218,12 +222,14 @@ force の応答の byte 15 の bit0 が 1 なら失敗とみなす。*この後�
 === コマンドとメールボックス
 
 FW へのコマンドは、ホストのメモリに置いたコマンドキュー(4KiB、64 バイトの entry の並び)で渡す。bfmem は entry 0 だけを使い、
-1 つずつ同期で出す(複数のコアからは `g_bfm_ctl_lock` の中で呼ぶ)。
+1 つずつ出す(複数のコアからは `g_bfm_ctl_lock` の中で呼ぶ)。完了は待たない: 出した呼び出しでは完了を 1 回だけ見て、
+終わっていなければ `BFM_INPROGRESS` を返し、次の呼び出しでまた見る。出してから完了を受け取るまでは、出した手順(`bfm_cmd_t`)が
+entry の持ち主になり、ほかの手順はコマンドを出せない(`BFM_INPROGRESS` を返して後で出し直す)。
 
 .コマンドとメールボックス
 image::hw_mailbox.drawio.svg[コマンドとメールボックス]
 
-==== 出し方(`mlx5_cmd()`)
+==== 出し方(`mlx5_cmd_run()`)
 
 . entry 0 を 0 で埋め、入力の先頭 16 バイト(オペコード [0..1]・op_mod [6..7] など)を entry の [16..31] に写す。
 . 入力が 16 バイトを超えるなら、残りを入力のメールボックスのブロックに 512 バイトずつ入れ、ブロックを next でつなぎ、ブロックの番号を書く。
@@ -231,7 +237,7 @@ image::hw_mailbox.drawio.svg[コマンドとメールボックス]
 . 出力も同じように、16 バイトを超える分のブロックを用意して [48..55] に書く。
 . 入力・出力の長さ([4..7]・[56..59])、type = 7(PCIe)を書き、最後に [63] の bit0(ownership)を 1(FW のもの)にする。
 . メモリの障壁(`mfence`)の後、初期化セグメントの 0x018 に 1(entry 0)を書く。
-. [63] の bit0 が 0 に戻るのを待つ(最大 10 秒)。
+. [63] の bit0 が 0 に戻るまで、呼ばれるたびに 1 回ずつ見る(戻っていなければ `BFM_INPROGRESS`。10 秒たっても戻らなければ失敗にし、その後はコマンドを出さない)。
 . [63] の bit7:1(delivery status)が 0 でなければ、渡し方の誤り。
 . 出力の先頭 16 バイトを entry の [32..47] から、残りをメールボックスから写す。*出力の [0](status)が 0 でなければ失敗*で、[4..7] が syndrome。
 

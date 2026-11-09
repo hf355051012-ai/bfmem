@@ -29,6 +29,10 @@ ConnectX(mlx5)の BlueFlame で、ノード間のメモリへ write / read / ato
   CPU は x86-64 だけ(リトルエンディアン・DMA はキャッシュと一貫・TSO。他の CPU の分岐やキャッシュ操作は持たない)、
   **相手は常に bfmem**(接続は bfmem だけの REQ / REP / BYE。IB CM・Linux の rdma_cm とは繋がらない)、
   VxWorks の設定空間は ECAM だけ、atomic は常にホスト順(できない装置は `bfm_init()` が断る)。
+- **立ち上げ・接続・切断・停止では回って待たない**(ユーザの指示)。待つところでは `BFM_INPROGRESS` を返し、呼び出し側が
+  同じ関数を呼び続けて進める(状態機械)。FW のコマンドは `mlx5_cmd_run()`(出したかを `bfm_cmd_t` が覚える。entry は 1 つで
+  持ち主がいる間はほかは出せない)。時間で待つところは `bfm_port_time_ns()` を見て `BFM_INPROGRESS` を返す。
+  `bfm_port_delay_us()` を本体に戻さない。データ経路(ACK を待つ write など)は同期のまま。
 - **データ経路(write / read / atomic / T10-DIF)に、接続をまたいで書き換えるものを持ち込まない**(複数のコアが
   別々の接続で同時に転送する)。接続をまたぐ状態(GSI・接続の枠・FW のコマンド・EQ)は `g_bfm_ctl_lock` の中で触る。
 - コードのコメントは日本語。
@@ -61,6 +65,8 @@ wsl.exe -d Ubuntu-22.04 -- bash -c "cd /mnt/c/Users/fukud/Documents/bfmem && pyt
 - ヘッダに `static inline` の関数を置いたら、そのヘッダを gen.py の `FILES` に入れて記述を書く
   (入れないと、呼ぶ側の使用関数で「外部」になる。今は `include/bfm_port.h` と `src/bfm_internal.h`)。
 - 関数ポインタ経由の呼び出しは解析で拾えないので、記述の `indirect` / `entry_note` で書く。
+- 状態機械の関数(`bfm_init()`・`mlx5_hca_init_step()`・`conn_step()` など)には、記述の `states` で状態遷移図を付ける
+  (書き方は `desc/README.md`)。状態の enum や遷移を変えたら直すこと(検査は行き先の名前だけ)。
 - アセンブラの関数は `.globl` から拾い、宣言と説明は `port/x86/bfm_x86.h` の宣言と直前のコメントから取る
   (`port/x86/bfm_x86.c` の章の表)。関数ポインタの変数(引数でないもの)は gen.py の `FUNC_PTR_VARS` に足す。
 
@@ -100,6 +106,10 @@ Precision は PF0(`0000:b3:00.0`)だけでよい。終わったら mlx5_core に
 - **r.sh で相手に常駐させるプロセスは `setsid nohup … < /dev/null &` でも ssh が返らないことがある。**
   呼び出しを `timeout` で包み、残ったプロセスは `pgrep -ax` で確かめる。`timeout` で切った ssh の先のプロセスは
   生き残る(段階 4 の前に止めたつもりの `bfm_peer -c` が残り、後から接続してきた)。
+
+- **FW のページ要求に答えている間(`MANAGE_PAGES` を 1 つずつ出す)に来た次の要求を受け流すと、FW は出し直さない。**
+  待たない形にした最初の版で、Precision の FW に渡すページが 7,841 → 5,680 に減った。答えている間に来た要求は
+  最後のものを覚えておき、答え終えてから答える(`mlx5_eq_poll()`)。直すと前と同じ 7,841(その後 FW は 2,161 の返却を申し出る)。
 
 ## vfio_nvme から引き継ぐ落とし穴
 

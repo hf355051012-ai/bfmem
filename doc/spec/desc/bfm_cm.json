@@ -1,6 +1,6 @@
 {
   "file": "src/bfm_cm.c",
-  "summary": "接続の確立と切断(bfmem どうし)。RC QP を繋ぐには、相手の QP 番号と開始 PSN、公開メモリのアドレスと rkey を交換する必要がある。IP のスタックを持たないので、交換は RoCE v2 の UD で、相手の QP1(GSI。番号が決まっている唯一の QP)へ送る。相手は常に bfmem なので、IB CM ではなく bfmem だけの次の 3 種類の短いメッセージ(`MSG_SIZE` = 64 バイト)を使う。\n\n* 掛け側 `bfm_connect()`: REQ を送り(REP が来るまで送り直す)、REP を受ける。\n* 受け側 `bfm_accept()`: REQ を受け、QP を RTS にしてから REP を送る。\n* 切断 `bfm_disconnect()`: BYE を送る(返事は待たない。相手は `bfm_poll()` で受けて閉じた扱いにする)。\n\n受け側は REP を送る前に RTS にするので、掛け側は REP を受けて RTS にすればすぐ使える(RTU は要らない)。REP が落ちたときは掛け側が REQ を送り直し、受け側は確立済みの接続への REQ に REP を送り直す。\n\nメッセージの中身(数はビッグエンディアン): [0..3] `'BFM2'`、[4] 種類、[5] 経路 MTU、[6..7] 待ち受けの番号、[8..11] 送り手の接続の id、[12..15] 受け手の接続の id(REQ では 0)、[16..19] QPN、[20..23] 開始 PSN、[24] 受け付ける read / atomic の数、[26..31] 送り手の MAC、[32..35] 送り手の IPv4、[36..39] 公開メモリの rkey、[40..47] 公開メモリの先頭、[48..55] 公開メモリの大きさ、[56..59] 宛先の IPv4。\n\nARP を使わない。掛け側が相手の MAC を知らなければ(引数も `g_bfm_peer_mac` も全部 0)、REQ を同報(宛先の MAC が ff:ff:ff:ff:ff:ff)で送り、REP に入った相手の MAC を使う。同報は宛先でない bfmem にも届くので、受け手は [56..59] が自分の IPv4 でないメッセージを捨てる。\n\n受け取ったメッセージは `gsi_pump()` が `handle_msg()` でその場で処理する(REP はその接続の枠へ写し、BYE は接続を閉じた扱いにし、REQ は `bfm_accept()` のために 1 つだけ `s_req` に取っておく)。接続の枠 `g_bfm_conn[BFM_MAX_CONN]` もこのファイルが持つ。\n\n複数のコアから呼べるように、GSI・接続の枠の取り外し・FW のコマンドは `g_bfm_ctl_lock` の中で行う(`bfm_connect()` / `bfm_accept()` / `bfm_disconnect()` が取り、`bfm_cm_poll()` は `bfm_poll()` が取った中で呼ばれる)。REP や REQ を待つ間は、1 回まわるごとに `ctl_yield()` で鍵を手放す。受けた REQ は、接続の枠の数まで `s_req[]` に取っておく(`req_put()` / `req_take()`)。",
+  "summary": "接続の確立と切断(bfmem どうし)。RC QP を繋ぐには、相手の QP 番号と開始 PSN、公開メモリのアドレスと rkey を交換する必要がある。IP のスタックを持たないので、交換は RoCE v2 の UD で、相手の QP1(GSI。番号が決まっている唯一の QP)へ送る。相手は常に bfmem なので、IB CM ではなく bfmem だけの次の 3 種類の短いメッセージ(`MSG_SIZE` = 64 バイト)を使う。\n\n* 掛け側 `bfm_connect()`: REQ を送り(REP が来るまで送り直す)、REP を受ける。\n* 受け側 `bfm_accept()`: REQ を受け、QP を RTS にしてから REP を送る。\n* 切断 `bfm_disconnect()`: BYE を送る(返事は待たない。相手は `bfm_poll()` で受けて閉じた扱いにする)。\n\n受け側は REP を送る前に RTS にするので、掛け側は REP を受けて RTS にすればすぐ使える(RTU は要らない)。REP が落ちたときは掛け側が REQ を送り直し、受け側は確立済みの接続への REQ に REP を送り直す。\n\nメッセージの中身(数はビッグエンディアン): [0..3] `'BFM2'`、[4] 種類、[5] 経路 MTU、[6..7] 待ち受けの番号、[8..11] 送り手の接続の id、[12..15] 受け手の接続の id(REQ では 0)、[16..19] QPN、[20..23] 開始 PSN、[24] 受け付ける read / atomic の数、[26..31] 送り手の MAC、[32..35] 送り手の IPv4、[36..39] 公開メモリの rkey、[40..47] 公開メモリの先頭、[48..55] 公開メモリの大きさ、[56..59] 宛先の IPv4。\n\nARP を使わない。掛け側が相手の MAC を知らなければ(引数も `g_bfm_peer_mac` も全部 0)、REQ を同報(宛先の MAC が ff:ff:ff:ff:ff:ff)で送り、REP に入った相手の MAC を使う。同報は宛先でない bfmem にも届くので、受け手は [56..59] が自分の IPv4 でないメッセージを捨てる。\n\n受け取ったメッセージは `gsi_pump()` が `handle_msg()` でその場で処理する(REP はその接続の枠へ写し、BYE は接続を閉じた扱いにし、REQ は `bfm_accept()` のために接続の枠の数まで `s_req[]` に取っておく。`req_put()` / `req_take()`)。接続の枠 `g_bfm_conn[BFM_MAX_CONN]` もこのファイルが持つ。\n\n接続の確立と切断は、接続の枠ごとの状態機械(`conn_step()`。手順は `struct bfm_conn` の `step` = `K_*`)で進める。待つところ(FW のコマンドの完了・REQ / REP の到着・GSI の送信の空き)では待たずに `BFM_INPROGRESS` を返し、`bfm_connect()` / `bfm_accept()` / `bfm_disconnect()` を呼び直すたびに先へ進む。FW のコマンドは枠ごとの `c->cmd` で出したかを覚える。確立に失敗したとき・時間切れ・切断のときは畳む印 `c->abort` を立て、`BFM_CS_UP` / `BFM_CS_ERROR` なら BYE を送ってから QP と CQ を消して枠を空ける。立ち上げ(`bfm_cm_init_step()`。状態は `G_*`)と停止(`bfm_cm_fini_step()`。状態は `F_*`)も同じように待たずに進め、`bfm_cm_reset()` で最初に戻す。\n\n複数のコアから呼べるように、GSI・接続の枠の取り外し・FW のコマンドは `g_bfm_ctl_lock` の中で行う(1 回の呼び出しの間だけ持つ。`bfm_connect()` / `bfm_accept()` / `bfm_disconnect()` / `bfm_cm_fini_step()` が取り、`bfm_cm_poll()` は `bfm_poll()` が取った中で呼ばれる)。",
   "functions": [
     {
       "func": "cm_rand32",
@@ -89,7 +89,7 @@
       "summary": "GSI の受信キューに受信の WQE を 1 つ出す。`rq_pc` の位置の WQE(16 バイト)に、受信枠の大きさ `BFM_GSI_RX_SLOT`・`g_bfm.lkey`・受信枠 `s_rx_ring + idx * BFM_GSI_RX_SLOT` の DMA アドレスを書き、`rq_pc` を進めてドアベルレコード(`dbr[0]`)を書き換える。",
       "args": {},
       "ret": "なし",
-      "pre": "`bfm_cm_init()` で GSI の WQ・ドアベルレコード・受信枠を切り出してあること。",
+      "pre": "`bfm_cm_init_step()` で GSI の WQ・ドアベルレコード・受信枠を切り出してあること。",
       "notes": "受信枠の位置は WQE の位置と同じ添字で決まる(`gsi_pump()` は CQE の `wqe_cnt` から枠を引く)。",
       "flow": [
         {"do": "idx = rq_pc を受信キューの大きさで割った余り"},
@@ -100,23 +100,19 @@
     },
     {
       "func": "gsi_send",
-      "summary": "メッセージ(`MSG_SIZE` バイト)を接続 `c` の相手の QP1 へ UD の SEND で送る。送信中の数が `BFM_GSI_TXBUFS` に達していれば `gsi_pump()` で空くのを待つ。メッセージを送信の置き場 `s_tx_buf`(順に使い回す)へ写し、ctrl(16)・datagram(48。Q_Key・宛先 QPN 1・UDP の送り元ポート・相手の MAC・hop limit 64・GRH・相手の GID)・data(16)の 2 WQEBB の WQE を作り、ドアベルレコードを書き換えて、WQE の先頭 8 バイトを GSI の UAR のドアベルへ書く。",
+      "summary": "メッセージ(`MSG_SIZE` バイト)を接続 `c` の相手の QP1 へ UD の SEND で送る。送信中の数が `BFM_GSI_TXBUFS` に達していれば `gsi_pump()` を 1 回呼び、それでも空かなければ待たずに `BFM_INPROGRESS` を返す。メッセージを送信の置き場 `s_tx_buf`(順に使い回す)へ写し、ctrl(16)・datagram(48。Q_Key・宛先 QPN 1・UDP の送り元ポート・相手の MAC・hop limit 64・GRH・相手の GID)・data(16)の 2 WQEBB の WQE を作り、ドアベルレコードを書き換えて、WQE の先頭 8 バイトを GSI の UAR のドアベルへ書く。",
       "args": {"msg": "送るメッセージ(`MSG_SIZE` バイト)", "c": "宛先の接続(`peer_mac`・`peer_gid` を使う)"},
-      "ret": "`BFM_OK`: 送信を出した(完了は待たない)。`BFM_E_CQE`: 送信の置き場が空くのを待つ間に GSI のエラー完了を見た。`BFM_E_TIMEOUT`: 送信の置き場が 1 秒空かなかった。",
-      "pre": "`bfm_cm_init()` で GSI を用意してあること。`c->peer_mac`・`c->peer_gid` が決まっていること。",
-      "notes": "* 完了を待たずに戻る。完了は後の `gsi_pump()` が数える。\n* 送信の置き場は `BFM_GSI_TXBUFS` 個を順に使い回すので、送信中の数がその数より少ない間だけ次を出す。\n* 待つ間の `gsi_pump()` で受けたメッセージは `handle_msg()` で処理される(`handle_msg()` から `gsi_send()` が呼ばれることもある)。",
+      "ret": "`BFM_OK`: 送信を出した(完了は待たない)。`BFM_INPROGRESS`: 送信の置き場が空いていない(出していない。呼び出し側が後で送り直す)。`BFM_E_CQE`: 置き場を空けるための `gsi_pump()` が GSI のエラー完了を見た。",
+      "pre": "`bfm_cm_init_step()` で GSI を用意してあること。`c->peer_mac`・`c->peer_gid` が決まっていること。`g_bfm_ctl_lock` を持っていること。",
+      "notes": "* 完了を待たずに戻る。完了は後の `gsi_pump()` が数える。\n* 送信の置き場は `BFM_GSI_TXBUFS` 個を順に使い回すので、送信中の数がその数より少ない間だけ次を出す。\n* 置き場を空けるための `gsi_pump()` で受けたメッセージは `handle_msg()` で処理される(`handle_msg()` から `gsi_send()` が呼ばれることもある)。",
       "flow": [
-        {"call": "t0 = bfm_port_time_ns() を呼ぶ"},
-        {"while": "s_tx_outstanding >= BFM_GSI_TXBUFS ?", "body": [
+        {"if": "s_tx_outstanding >= BFM_GSI_TXBUFS ?", "then": [
           {"call": "gsi_pump() を呼ぶ"},
           {"if": "gsi_pump() < 0 ?", "then": [
             {"do": "BFM_LOG で「GSI のエラーで送れない」を表示"},
             {"return": "BFM_E_CQE"}
           ]},
-          {"if": "ms_since(t0) > 1000 ?", "then": [
-            {"do": "BFM_LOG で「GSI の送信が詰まった」を表示"},
-            {"return": "BFM_E_TIMEOUT"}
-          ]}
+          {"if": "s_tx_outstanding >= BFM_GSI_TXBUFS ?", "then": [{"return": "BFM_INPROGRESS"}]}
         ]},
         {"do": "buf = s_tx_buf の (s_tx_next++ を BFM_GSI_TXBUFS で割った余り) 番目"},
         {"while": "i < MSG_SIZE ?(i は 0 から)", "body": [{"do": "buf[i] = msg[i]"}]},
@@ -163,7 +159,7 @@
       "summary": "取っておいた REQ のうち、待ち受けの番号が `port` のもので最も古いものを取り出して `msg` に写す。受けてから `REQ_STALE_MS`(2 秒)以上たったもの(掛け側があきらめた)は捨てる。",
       "args": {"port": "待ち受けの番号", "msg": "写す先(`MSG_SIZE` バイト)"},
       "ret": "1: 取り出した。0: 無い。",
-      "pre": "`g_bfm_ctl_lock` を持っていること(`bfm_accept()` から呼ばれる)。",
+      "pre": "`g_bfm_ctl_lock` を持っていること(`conn_step()` の `K_WAIT_REQ` から呼ばれる)。",
       "notes": "番号の違う REQ は残す(別の番号で待っている `bfm_accept()` のため)。",
       "flow": [
         {"do": "k = -1"},
@@ -183,20 +179,22 @@
     },
     {
       "func": "handle_msg",
-      "summary": "受け取ったメッセージ 1 つを処理する。宛先の IPv4(m[56..59])が自分の IPv4 でなければ捨てる(同報の REQ は同じ L2 の別の bfmem にも届く)。REQ なら、確立済み(`BFM_CS_UP`)の接続で相手の接続の id と IPv4 が同じものがあれば(REP が落ちたための送り直し)REP を送り直す。無ければ `bfm_accept()` のために `req_put()` で取っておく。REQ 以外は、受け手の接続の id が `local_id` と同じ最初の枠について、REP で枠が `BFM_CS_SETUP` かつまだ REP を受けていなければ相手の情報を写して `got_rep = 1` にし、BYE で相手の接続の id が同じかつ枠が `BFM_CS_UP` か `BFM_CS_ERROR` なら `BFM_CS_CLOSED` にする。",
+      "summary": "受け取ったメッセージ 1 つを処理する。宛先の IPv4(m[56..59])が自分の IPv4 でなければ捨てる(同報の REQ は同じ L2 の別の bfmem にも届く)。REQ なら、使っている枠(`BFM_CS_FREE` でない)で相手の接続の id と IPv4 が同じものがあれば(もう受けた掛け側からの送り直し)、その枠が確立済み(`BFM_CS_UP` かつ手順が `K_UP`)なら REP が落ちたので REP を送り直し、用意の途中なら捨てる。そのような枠が無ければ `bfm_accept()` のために `req_put()` で取っておく。REQ 以外は、受け手の接続の id が `local_id` と同じ最初の枠について、REP で枠の手順が `K_WAIT_REP` かつまだ REP を受けていなければ相手の情報を写して `got_rep = 1` にし、BYE で相手の接続の id が同じかつ枠が `BFM_CS_UP` か `BFM_CS_ERROR` なら `BFM_CS_CLOSED` にする。",
       "args": {"m": "受け取ったメッセージ(`MSG_SIZE` バイト。magic は確認済み)"},
       "ret": "なし",
       "pre": "`m` の magic が `MSG_MAGIC` であること(`gsi_pump()` が確かめてから呼ぶ)。`g_bfm_ctl_lock` を持っていること。",
-      "notes": "* 取っておける REQ は接続の枠の数まで(`req_put()`。一杯なら最も古いものを上書きする。掛け側が送り直すので失ってもよい)。\n* REP の送り直しの `gsi_send()` の失敗は無視する。\n* REQ 以外は `local_id` が合った最初の枠で処理を終える(条件に合わなければ何もしない)。どの枠にも合わなければ捨てる。\n* 相手が切った接続は `BFM_CS_CLOSED` にするだけで枠は返さない。アプリケーションが `bfm_disconnect()` で返すこと(表示もそう促す)。",
+      "notes": "* 取っておける REQ は接続の枠の数まで(`req_put()`。一杯なら最も古いものを上書きする。掛け側が送り直すので失ってもよい)。\n* 用意の途中の受け側の枠への REQ の送り直しを捨てるのは、REP をその枠の状態機械が用意ができたとき(`K_REP`)に送るため。\n* REP の送り直しの `gsi_send()` の失敗(`BFM_INPROGRESS` も)は無視する(掛け側がまた REQ を送り直す)。\n* REQ 以外は `local_id` が合った最初の枠で処理を終える(条件に合わなければ何もしない)。どの枠にも合わなければ捨てる。\n* 相手が切った接続は `BFM_CS_CLOSED` にするだけで枠は返さない。アプリケーションが `bfm_disconnect()` で返すこと(表示もそう促す)。",
       "flow": [
         {"do": "type = m[4]、src = m[8..11]、dst = m[12..15]"},
         {"if": "m[56..59] != g_bfm.ip ?", "then": [{"return": ""}]},
         {"if": "type == MSG_REQ ?", "then": [
           {"while": "i < g_bfm.nconn ?(i は 0 から)", "body": [
             {"do": "c = &g_bfm_conn[i]"},
-            {"if": "c->state == BFM_CS_UP かつ c->peer_id == src かつ c->peer_ip == m[32..35] ?", "then": [
-              {"call": "build_msg(rep, MSG_REP, c) を呼ぶ"},
-              {"call": "gsi_send(rep, c) を呼ぶ"},
+            {"if": "c->state != BFM_CS_FREE かつ c->peer_id == src かつ c->peer_ip == m[32..35] ?", "then": [
+              {"if": "c->state == BFM_CS_UP かつ c->step == K_UP ?", "then": [
+                {"call": "build_msg(rep, MSG_REP, c) を呼ぶ"},
+                {"call": "gsi_send(rep, c) を呼ぶ"}
+              ]},
               {"return": ""}
             ]}
           ]},
@@ -206,7 +204,7 @@
         {"while": "i < g_bfm.nconn ?(i は 0 から)", "body": [
           {"do": "c = &g_bfm_conn[i]"},
           {"if": "c->local_id != dst ?", "then": [{"continue": true}]},
-          {"if": "type == MSG_REP かつ c->state == BFM_CS_SETUP かつ !c->got_rep ?", "then": [
+          {"if": "type == MSG_REP かつ c->step == K_WAIT_REP かつ !c->got_rep ?", "then": [
             {"call": "take_peer(c, m) を呼ぶ"},
             {"do": "c->got_rep = 1"}
           ], "else": [
@@ -224,8 +222,8 @@
       "summary": "GSI の CQ を読み切る。送信の完了(`MLX5_CQE_REQ`)は送信中の数 `s_tx_outstanding` を減らすだけ。受信の完了(`MLX5_CQE_RESP_SEND`)は、受信枠の GRH(`MLX5_GRH_BYTES`)の後ろからメッセージを写して受信を出し直し、長さが足りて magic が `MSG_MAGIC` なら `handle_msg()` で処理して数える。それ以外の完了はエラーとして表示して -1 を返す。",
       "args": {},
       "ret": "受け取って `handle_msg()` で処理したメッセージの数。GSI のエラー完了を見たら -1。",
-      "pre": "`bfm_cm_init()` で GSI を用意してあること。",
-      "notes": "* 受信枠からメッセージを写してから受信を出し直し、その後で `handle_msg()` を呼ぶ。\n* 短すぎる受信や magic の違うものは捨てる(受信は出し直す)。\n* エラー完了を見たらその場で -1 を返し、残りの CQE は次の呼び出しで読む。送信のエラー(`MLX5_CQE_REQ_ERR`)は送信中の数を減らし、受信のエラー(`MLX5_CQE_RESP_ERR`)は受信を出し直す。\n* `handle_msg()` が `gsi_send()` を呼び、`gsi_send()` が送信の置き場を待つ間に `gsi_pump()` を呼ぶことがある(入れ子になる)。",
+      "pre": "`bfm_cm_init_step()` で GSI を用意してあること。",
+      "notes": "* 受信枠からメッセージを写してから受信を出し直し、その後で `handle_msg()` を呼ぶ。\n* 短すぎる受信や magic の違うものは捨てる(受信は出し直す)。\n* エラー完了を見たらその場で -1 を返し、残りの CQE は次の呼び出しで読む。送信のエラー(`MLX5_CQE_REQ_ERR`)は送信中の数を減らし、受信のエラー(`MLX5_CQE_RESP_ERR`)は受信を出し直す。\n* `handle_msg()` が `gsi_send()` を呼び、`gsi_send()` が送信の置き場が満杯のときに `gsi_pump()` を呼ぶことがある(入れ子になる)。",
       "flow": [
         {"do": "n = CQ の大きさ、got = 0"},
         {"loop": "CQ を読み切る", "body": [
@@ -257,11 +255,11 @@
     },
     {
       "func": "conn_open",
-      "summary": "接続の枠 `g_bfm_conn`(用意した `g_bfm.nconn` 個)から空き(`BFM_CS_FREE`)を 1 つ取り、`BFM_CS_SETUP` にして、待ち受けの番号・自分の接続の id(`cm_rand32()`)・path_mtu・scatter to CQE の設定を入れ、RC QP を作って INIT まで進める。",
-      "args": {"port": "待ち受けの番号"},
-      "ret": "取った枠。空きが無ければ NULL(理由を表示する)。QP の作成か INIT への遷移に失敗したら、QP を壊し枠を `BFM_CS_FREE` に戻して NULL。",
-      "pre": "`bfm_cm_init()` で枠を初期化してあること。`g_bfm_ctl_lock` を持っていること。",
-      "notes": "* `peer_id`・`got_rep` は 0 にする。\n* path_mtu は `g_bfm_path_mtu` が 1〜5 ならそれ、そうでなければ 3(1024 バイト)。\n* `g_bfm_scatter_cqe` が 0 でなければ scatter to CQE を有効にする(`cs_req = 0x11`)。\n* `mlx5_qp_create()` が失敗したら `mlx5_qp_rst2init()` は呼ばない。\n* 枠の資源(QP の WQ・CQ・UAR・中継バッファ)は `bfm_cm_init()` で切り出し済みのものを使い回す。",
+      "summary": "接続の枠 `g_bfm_conn`(用意した `g_bfm.nconn` 個)から空き(`BFM_CS_FREE`)を 1 つ取り、`BFM_CS_SETUP` にして、状態機械の最初の手順に置く(掛け側 `ROLE_CONNECT` は `K_CQ`、受け側 `ROLE_ACCEPT` は `K_WAIT_REQ`)。畳む印・結果・待ち受けの番号・自分の接続の id(`cm_rand32()`)・path_mtu・scatter to CQE の設定・始めた時刻を入れ、出しているコマンドの記録 `c->cmd` を 0 にする。FW のコマンドはまだ出さない。",
+      "args": {"port": "待ち受けの番号", "role": "`ROLE_CONNECT`(掛け側)か `ROLE_ACCEPT`(受け側)"},
+      "ret": "取った枠。空きが無ければ NULL(理由を表示する)。",
+      "pre": "`bfm_cm_init_step()` で枠を用意してあること。`g_bfm_ctl_lock` を持っていること。",
+      "notes": "* `abort` = 0、`result` = `BFM_OK`、`peer_id`・`peer_ip`・`got_rep`・`t_sent` は 0 にする。`timeout_ms` と相手の情報は呼び出し側が入れる。\n* path_mtu は `g_bfm_path_mtu` が 1〜5 ならそれ、そうでなければ 3(1024 バイト)。\n* `g_bfm_scatter_cqe` が 0 でなければ scatter to CQE を有効にする(`cs_req = 0x11`)。\n* `c->t0` は掛け側の確立の時間切れと、受け側の REQ を待つ時間切れの起点になる。\n* 枠の資源(QP の WQ・CQ・UAR・中継バッファ)は `bfm_cm_init_step()` で切り出し済みのものを使い回す。",
       "flow": [
         {"do": "c = NULL"},
         {"while": "i < g_bfm.nconn かつ c == NULL ?(i は 0 から)", "body": [
@@ -271,240 +269,455 @@
           {"do": "BFM_LOG で「接続の枠が足りない」を表示"},
           {"return": "NULL"}
         ]},
-        {"do": "c->state = BFM_CS_SETUP、c->port = port"},
+        {"do": "c->state = BFM_CS_SETUP、c->role = role"},
+        {"do": "c->step = role が ROLE_CONNECT なら K_CQ、そうでなければ K_WAIT_REQ"},
+        {"do": "c->abort = 0、c->result = BFM_OK、c->port = port"},
         {"call": "c->local_id = cm_rand32() を呼ぶ"},
-        {"do": "c->peer_id = 0、c->got_rep = 0"},
-        {"if": "g_bfm_path_mtu が 1 以上 5 以下?", "then": [{"do": "c->path_mtu = g_bfm_path_mtu"}], "else": [{"do": "c->path_mtu = 3"}]},
-        {"if": "g_bfm_scatter_cqe != 0 ?", "then": [{"do": "c->cs_req = 0x11"}], "else": [{"do": "c->cs_req = 0"}]},
-        {"call": "mlx5_qp_create(&g_bfm, &c->qp, MLX5_QP_ST_RC, c->cs_req) を呼ぶ"},
-        {"if": "mlx5_qp_create() != BFM_OK ?", "then": [
-          {"call": "mlx5_qp_destroy(&g_bfm, &c->qp) を呼ぶ"},
-          {"do": "c->state = BFM_CS_FREE"},
-          {"return": "NULL"}
-        ]},
-        {"call": "mlx5_qp_rst2init(&g_bfm, &c->qp, 0) を呼ぶ"},
-        {"if": "mlx5_qp_rst2init() != BFM_OK ?", "then": [
-          {"call": "mlx5_qp_destroy(&g_bfm, &c->qp) を呼ぶ"},
-          {"do": "c->state = BFM_CS_FREE"},
-          {"return": "NULL"}
-        ]},
+        {"do": "c->peer_id = 0、c->peer_ip = 0、c->got_rep = 0"},
+        {"do": "c->path_mtu = g_bfm_path_mtu が 1 以上 5 以下ならそれ、そうでなければ 3"},
+        {"do": "c->cs_req = g_bfm_scatter_cqe が 0 でなければ 0x11、そうでなければ 0"},
+        {"call": "c->t0 = bfm_port_time_ns() を呼ぶ"},
+        {"do": "c->t_sent = 0、c->cmd を 0 で埋める"},
         {"return": "c"}
       ]
     },
     {
-      "func": "conn_release",
-      "summary": "接続 `c` を返す。データ経路の状態を外し(`bfm_ops_detach()`)、RC QP を壊し(`mlx5_qp_destroy()`)、枠を `BFM_CS_FREE` に戻して、自分と相手の接続の id を 0 にする。",
-      "args": {"c": "接続"},
+      "func": "conn_fail",
+      "summary": "接続 `c` の確立に失敗したことを記録する。結果 `c->result` に `rc` を入れ、畳む印 `c->abort` を立てる。畳む手順への切り替えは、次に `conn_step()` のループの頭で行われる。",
+      "args": {"c": "接続", "rc": "畳み終えたときに返す値(失敗の理由)"},
       "ret": "なし",
-      "pre": "特になし。",
-      "notes": "相手へは何も送らない(BYE は `bfm_disconnect()` が送る)。枠ごとの資源(WQ・CQ・UAR・中継バッファ)は返さず、次の接続で使い回す。",
+      "pre": "`g_bfm_ctl_lock` を持っていること(`conn_step()` から呼ばれる)。",
+      "notes": "ここでは QP などを消さない(`conn_step()` の `K_DESTROY` が消す)。",
       "flow": [
-        {"call": "bfm_ops_detach(c) を呼ぶ"},
-        {"call": "mlx5_qp_destroy(&g_bfm, &c->qp) を呼ぶ"},
-        {"do": "c->state = BFM_CS_FREE"},
-        {"do": "c->local_id = c->peer_id = 0"}
+        {"do": "c->result = rc"},
+        {"do": "c->abort = 1"}
       ]
     },
     {
-      "func": "conn_up",
-      "summary": "接続 `c` の RC QP を INIT から RTR、RTS へ進め、データ経路を用意して(`bfm_ops_attach()`)、`BFM_CS_UP` にする。接続の内容(掛け側・受け側の別、自分と相手の QPN、相手の IP、相手の公開メモリの先頭・大きさ・rkey、MTU、同時の read / atomic の数、BlueFlame の有無)を表示する。",
-      "args": {"c": "接続(相手の情報が入っていること)", "how": "表示する「掛け側」「受け側」の文字列"},
-      "ret": "`BFM_OK`: 使える状態になった。そのほか `mlx5_qp_init2rtr_rc()` / `mlx5_qp_rtr2rts_rc()` / `bfm_ops_attach()` の戻り値。",
-      "pre": "`conn_open()` で INIT まで進めてあり、`c` に相手の情報(`peer_qpn`・`peer_psn`・`peer_gid`・`peer_mac`・`peer_rr`・`path_mtu`)が入っていること。",
-      "notes": "途中で失敗したら残りは行わず、`c->state` も変えない(後始末は呼び出し側が `conn_release()` で行う)。",
+      "func": "conn_step",
+      "summary": "接続の枠 `c` の状態機械を、待つところまで進める。最初に `mlx5_eq_poll()` で EQ を読み、その後は手順 `c->step` に従って進め続ける。確立は `[受け側 K_WAIT_REQ] -> K_CQ -> K_QP -> K_INIT -> [掛け側 K_WAIT_REP] -> K_RTR -> K_RTS -> [受け側 K_REP] -> K_UP`。畳む印 `c->abort` が立つと(確立の失敗・時間切れ・`bfm_disconnect()`・`bfm_cm_fini_step()`)、コマンドを出していなければ `BFM_CS_UP` / `BFM_CS_ERROR` なら `K_BYE`、それ以外なら `K_DESTROY` へ移り、QP と CQ を消して枠を空ける。各手順の中身は次のとおり。\n\n* `K_WAIT_REQ`(受け側): `gsi_pump()` を回し、`req_take()` で `c->port` 宛ての REQ を取る。取れたら相手の情報を写し(`take_peer()`)、REQ の経路 MTU([5])が 1 以上で自分のより小さければそれに合わせる。\n* `K_CQ` / `K_QP` / `K_INIT` / `K_RTR`: CREATE_CQ / CREATE_QP(RC)/ RST2INIT_QP / INIT2RTR_QP を出す(`c->cmd` で出したかを覚える)。\n* `K_WAIT_REP`(掛け側): `gsi_pump()` を回し、REP を受けていれば `K_RTR` へ。まだなら REQ を最初と `REQ_RETRY_MS`(1 秒)ごとに送る。\n* `K_RTS`: RTR2RTS_QP を `c->amode`(はじめは `g_bfm.atomic_mode`)で出す。失敗して `c->amode` が 0 でなければ、0 にして出し直す。成功したら `bfm_ops_attach()` でデータ経路に繋ぎ、`BFM_CS_UP` にして接続の内容を表示する。\n* `K_REP`(受け側): REP を送る。\n* `K_UP`: `BFM_OK` を返す。\n* `K_BYE`: BYE を送る。送信の置き場が空かなければ、`c->t_sent` から `TX_DRAIN_MS`(100 ミリ秒)まで送り直す。\n* `K_DESTROY`: `bfm_ops_detach()` の後、`mlx5_qp_destroy()` で QP と CQ を消し、枠を `BFM_CS_FREE` / `K_IDLE` に戻して `c->result` を返す。",
+      "args": {"c": "接続の枠"},
+      "ret": "`BFM_INPROGRESS`: 途中(コマンドの完了・REQ / REP・GSI の送信の空きを待っている)。`BFM_OK`: 使える(`K_UP`)。畳み終えたら `c->result`(`bfm_disconnect()` / `bfm_cm_fini_step()` で畳んだなら `BFM_OK`、確立の失敗ならその理由。時間切れは `BFM_E_TIMEOUT`)。`BFM_E_STATE`: 手順が `K_IDLE`(使っていない枠)。",
+      "pre": "`g_bfm_ctl_lock` を持っていること。`c` は `conn_open()` で取った枠であること。",
+      "notes": "* フローでは、case の途中の `break`(switch を抜けて `for (;;)` の頭へ戻る)を `continue` と書いた。case の終わりの `break` は書かない。\n* 掛け側の確立の時間切れ(`c->t0` から `c->timeout_ms`)は、ループの頭で、`BFM_CS_SETUP` の間かつコマンドを出していない(`!c->cmd.posted`)ときに見る。受け側は `K_WAIT_REQ` の間だけ時間切れを見る(`c->timeout_ms` が 0 なら待ち続ける)。\n* コマンドを出している間は畳む手順へ移らない。その手順の関数を呼んでコマンドの完了を受け取ってから(成功なら次の手順へ進めてから)移る。\n* `K_REP` で REP を送れなかったときは、`BFM_CS_UP` になっているので `K_BYE` を通る。\n* `K_RTS` の失敗のうち、atomic_mode を付けていたものは失敗にせず、付けずにもう一度出す。そのときは「atomic_mode は断られた」と表示する。\n* `K_DESTROY` は `mlx5_qp_destroy()` が `BFM_INPROGRESS` を返す間、呼ばれるたびに `bfm_ops_detach()` を呼び直す。\n* `K_UP` の間、相手の BYE(`handle_msg()`)で `BFM_CS_CLOSED` に、EQ の QP のエラーで `BFM_CS_ERROR` になることがある(手順は `K_UP` のまま)。",
       "flow": [
-        {"call": "rc = mlx5_qp_init2rtr_rc(&g_bfm, &c->qp, c) を呼ぶ"},
-        {"if": "rc == BFM_OK ?", "then": [{"call": "rc = mlx5_qp_rtr2rts_rc(&g_bfm, &c->qp, c) を呼ぶ"}]},
-        {"if": "rc == BFM_OK ?", "then": [{"call": "rc = bfm_ops_attach(c) を呼ぶ"}]},
-        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-        {"do": "c->state = BFM_CS_UP"},
-        {"do": "BFM_LOG で接続の内容を表示"},
+        {"call": "mlx5_eq_poll(&g_bfm) を呼ぶ"},
+        {"loop": "待つところまで進める", "body": [
+          {"if": "!c->abort かつ c->role == ROLE_CONNECT かつ c->state == BFM_CS_SETUP かつ !c->cmd.posted かつ ms_since(c->t0) > c->timeout_ms ?", "then": [
+            {"do": "BFM_LOG で「接続できない」を表示(c->step == K_WAIT_REP なら「REP が来ない」、そうでなければ「時間内に用意が済まない」)"},
+            {"call": "conn_fail(c, BFM_E_TIMEOUT) を呼ぶ"}
+          ]},
+          {"if": "c->abort かつ c->step < K_BYE かつ !c->cmd.posted ?", "then": [
+            {"do": "c->step = c->state が BFM_CS_UP か BFM_CS_ERROR なら K_BYE、そうでなければ K_DESTROY"},
+            {"call": "c->t_sent = bfm_port_time_ns() を呼ぶ"}
+          ]},
+          {"switch": "c->step", "cases": [
+            {"case": "K_WAIT_REQ", "body": [
+              {"call": "gsi_pump() を呼ぶ"},
+              {"call": "req_take(c->port, msg) を呼ぶ"},
+              {"if": "req_take() == 0 ?", "then": [
+                {"if": "c->timeout_ms != 0 かつ ms_since(c->t0) > c->timeout_ms ?", "then": [
+                  {"call": "conn_fail(c, BFM_E_TIMEOUT) を呼ぶ"},
+                  {"continue": true}
+                ]},
+                {"return": "BFM_INPROGRESS"}
+              ]},
+              {"call": "take_peer(c, msg) を呼ぶ"},
+              {"if": "msg[5] >= 1 かつ msg[5] < c->path_mtu ?", "then": [{"do": "c->path_mtu = msg[5]"}]},
+              {"do": "c->step = K_CQ"}
+            ]},
+            {"case": "K_CQ", "body": [
+              {"call": "rc = mlx5_cq_create(&g_bfm, &c->cmd, c->qp.uarn, c->qp.cq, c->qp.cq_log, c->qp.cq_dbr, &c->qp.cqn) を呼ぶ"},
+              {"if": "rc == BFM_INPROGRESS ?", "then": [{"return": "rc"}]},
+              {"if": "rc != BFM_OK ?", "then": [
+                {"call": "conn_fail(c, rc) を呼ぶ"},
+                {"continue": true}
+              ]},
+              {"do": "c->qp.has_cq = 1、c->qp.cq_cc = 0、c->step = K_QP"}
+            ]},
+            {"case": "K_QP", "body": [
+              {"call": "rc = mlx5_qp_create(&g_bfm, &c->cmd, &c->qp, MLX5_QP_ST_RC, c->cs_req) を呼ぶ"},
+              {"if": "rc == BFM_INPROGRESS ?", "then": [{"return": "rc"}]},
+              {"if": "rc != BFM_OK ?", "then": [
+                {"call": "conn_fail(c, rc) を呼ぶ"},
+                {"continue": true}
+              ]},
+              {"do": "c->step = K_INIT"}
+            ]},
+            {"case": "K_INIT", "body": [
+              {"call": "rc = mlx5_qp_rst2init(&g_bfm, &c->cmd, &c->qp, 0) を呼ぶ"},
+              {"if": "rc == BFM_INPROGRESS ?", "then": [{"return": "rc"}]},
+              {"if": "rc != BFM_OK ?", "then": [
+                {"call": "conn_fail(c, rc) を呼ぶ"},
+                {"continue": true}
+              ]},
+              {"do": "c->step = c->role が ROLE_CONNECT なら K_WAIT_REP、そうでなければ K_RTR"}
+            ]},
+            {"case": "K_WAIT_REP", "body": [
+              {"call": "gsi_pump() を呼ぶ"},
+              {"if": "c->got_rep ?", "then": [
+                {"do": "c->step = K_RTR"},
+                {"continue": true}
+              ]},
+              {"if": "c->t_sent == 0 または ms_since(c->t_sent) > REQ_RETRY_MS ?", "then": [
+                {"call": "build_msg(req, MSG_REQ, c) を呼ぶ"},
+                {"call": "rc = gsi_send(req, c) を呼ぶ"},
+                {"if": "rc == BFM_OK ?", "then": [
+                  {"call": "c->t_sent = bfm_port_time_ns() を呼ぶ"}
+                ], "else": [
+                  {"if": "rc != BFM_INPROGRESS ?", "then": [
+                    {"call": "conn_fail(c, rc) を呼ぶ"},
+                    {"continue": true}
+                  ]}
+                ]}
+              ]},
+              {"return": "BFM_INPROGRESS"}
+            ]},
+            {"case": "K_RTR", "body": [
+              {"call": "rc = mlx5_qp_init2rtr_rc(&g_bfm, &c->cmd, &c->qp, c) を呼ぶ"},
+              {"if": "rc == BFM_INPROGRESS ?", "then": [{"return": "rc"}]},
+              {"if": "rc != BFM_OK ?", "then": [
+                {"call": "conn_fail(c, rc) を呼ぶ"},
+                {"continue": true}
+              ]},
+              {"do": "c->amode = g_bfm.atomic_mode、c->step = K_RTS"}
+            ]},
+            {"case": "K_RTS", "body": [
+              {"call": "rc = mlx5_qp_rtr2rts_rc(&g_bfm, &c->cmd, &c->qp, c, c->amode) を呼ぶ"},
+              {"if": "rc == BFM_INPROGRESS ?", "then": [{"return": "rc"}]},
+              {"if": "rc != BFM_OK ?", "then": [
+                {"if": "c->amode != 0 ?", "then": [
+                  {"do": "c->amode = 0(atomic_mode を付けずにもう一度)"}
+                ], "else": [
+                  {"call": "conn_fail(c, rc) を呼ぶ"}
+                ]},
+                {"continue": true}
+              ]},
+              {"if": "c->amode != g_bfm.atomic_mode ?", "then": [{"do": "BFM_LOG で「atomic_mode は断られた」を表示"}]},
+              {"call": "rc = bfm_ops_attach(c) を呼ぶ"},
+              {"if": "rc != BFM_OK ?", "then": [
+                {"call": "conn_fail(c, rc) を呼ぶ"},
+                {"continue": true}
+              ]},
+              {"do": "c->state = BFM_CS_UP"},
+              {"do": "BFM_LOG で接続の内容を表示"},
+              {"do": "c->step = c->role が ROLE_ACCEPT なら K_REP、そうでなければ K_UP"}
+            ]},
+            {"case": "K_REP", "body": [
+              {"call": "build_msg(rep, MSG_REP, c) を呼ぶ"},
+              {"call": "rc = gsi_send(rep, c) を呼ぶ"},
+              {"if": "rc == BFM_INPROGRESS ?", "then": [{"return": "rc"}]},
+              {"if": "rc != BFM_OK ?", "then": [
+                {"call": "conn_fail(c, rc) を呼ぶ"},
+                {"continue": true}
+              ]},
+              {"do": "c->step = K_UP"}
+            ]},
+            {"case": "K_UP", "body": [
+              {"return": "BFM_OK"}
+            ]},
+            {"case": "K_BYE", "body": [
+              {"call": "build_msg(bye, MSG_BYE, c) を呼ぶ"},
+              {"call": "rc = gsi_send(bye, c) を呼ぶ"},
+              {"if": "rc == BFM_INPROGRESS かつ ms_since(c->t_sent) < TX_DRAIN_MS ?", "then": [{"return": "rc"}]},
+              {"do": "c->step = K_DESTROY"}
+            ]},
+            {"case": "K_DESTROY", "body": [
+              {"call": "bfm_ops_detach(c) を呼ぶ"},
+              {"call": "mlx5_qp_destroy(&g_bfm, &c->cmd, &c->qp) を呼ぶ"},
+              {"if": "mlx5_qp_destroy() == BFM_INPROGRESS ?", "then": [{"return": "BFM_INPROGRESS"}]},
+              {"do": "c->state = BFM_CS_FREE、c->step = K_IDLE、c->role = 0、c->abort = 0、c->local_id = c->peer_id = 0"},
+              {"do": "BFM_DBG で「枠を空けた」を表示"},
+              {"return": "c->result"}
+            ]},
+            {"default": true, "body": [
+              {"return": "BFM_E_STATE"}
+            ]}
+          ]}
+        ]}
+      ],
+      "states": {
+        "start": "bfm_connect() / bfm_accept() が枠を取った(conn_open())。受け側は K_WAIT_REQ、掛け側は K_CQ から始まる",
+        "list": [
+          {"id": "K_WAIT_REQ", "text": "受け側: 取っておいた REQ から port 宛てのものを取り、相手の情報を写す", "wait": "port 宛ての REQ(timeout_ms が 0 でなければ時間切れ)",
+           "next": [{"to": "K_CQ", "label": "REQ が来た"}, {"to": "K_DESTROY", "label": "時間切れ・畳む"}]},
+          {"id": "K_CQ", "text": "CREATE_CQ(掛け側はここから)", "wait": "コマンドの完了",
+           "next": [{"to": "K_QP", "label": "成功"}, {"to": "K_DESTROY", "label": "失敗・時間切れ・畳む"}]},
+          {"id": "K_QP", "text": "CREATE_QP(RC)", "wait": "コマンドの完了"},
+          {"id": "K_INIT", "text": "RST2INIT_QP", "wait": "コマンドの完了",
+           "next": [{"to": "K_WAIT_REP", "label": "掛け側"}, {"to": "K_RTR", "label": "受け側"}]},
+          {"id": "K_WAIT_REP", "text": "掛け側: REQ を送り、REQ_RETRY_MS ごとに送り直す", "wait": "REP・GSI の送信の空き(timeout_ms で時間切れ)",
+           "next": [{"to": "K_RTR", "label": "REP が来た"}, {"to": "K_DESTROY", "label": "時間切れ・送信の失敗・畳む"}]},
+          {"id": "K_RTR", "text": "INIT2RTR_QP", "wait": "コマンドの完了"},
+          {"id": "K_RTS", "text": "RTR2RTS_QP。断られて atomic_mode を付けていれば、外して K_RTS をやり直す。成功したら bfm_ops_attach() で BFM_CS_UP にする", "wait": "コマンドの完了",
+           "next": [{"to": "K_REP", "label": "受け側"}, {"to": "K_UP", "label": "掛け側"}, {"to": "K_DESTROY", "label": "失敗"}]},
+          {"id": "K_REP", "text": "受け側: REP を送る", "wait": "GSI の送信の空き",
+           "next": [{"to": "K_UP", "label": "送った"}, {"to": "K_BYE", "label": "送信の失敗・畳む(BFM_CS_UP)"}]},
+          {"id": "K_UP", "text": "使える(呼ぶと BFM_OK を返す)。相手の BYE で BFM_CS_CLOSED、QP のエラーで BFM_CS_ERROR になる",
+           "next": [{"to": "K_BYE", "label": "bfm_disconnect()(UP / ERROR)"}, {"to": "K_DESTROY", "label": "bfm_disconnect()(CLOSED)"}]},
+          {"id": "K_BYE", "text": "相手へ BYE を送る(返事は待たない)", "wait": "GSI の送信の空き(上限 TX_DRAIN_MS。過ぎたらあきらめる)"},
+          {"id": "K_DESTROY", "text": "bfm_ops_detach()、DESTROY_QP・DESTROY_CQ(作ったものだけ)、枠を BFM_CS_FREE に戻す", "wait": "コマンドの完了"}
+        ],
+        "end": "枠を空けて c->result を返す(bfm_disconnect() なら BFM_OK、失敗ならその理由)",
+        "note": "畳む(c->abort): 確立の失敗・掛け側の時間切れ・bfm_disconnect()・bfm_cm_fini_step() で立つ。コマンドを出していなければ(出していればその完了を受け取ってから)、次のループの頭で BFM_CS_UP / BFM_CS_ERROR なら K_BYE、それ以外は K_DESTROY へ移る。図の K_DESTROY への線は代表だけで、K_QP・K_INIT・K_RTR からも同じように移る。\n掛け側の時間切れ(c->t0 から timeout_ms)は BFM_CS_SETUP の間、どの状態でも見る。"
+      }
+    },
+    {
+      "func": "bfm_cm_reset",
+      "summary": "接続管理の立ち上げ・停止の状態(`s_ci`・`s_cf`)と、GSI の QP の状態 `s_gsi`・取っておいた REQ `s_req` を 0 で埋め、送信の通し番号と送信中の数を 0 に、`s_gsi_ready` を 0 にする。",
+      "args": {},
+      "ret": "なし",
+      "pre": "`bfm_init()` が立ち上げを始めるときに呼ぶ(`bfm_cm_init_step()` の前)。",
+      "notes": "`s_ci.step` = `G_START`、`s_cf.step` = `F_CONNS` になる。接続の枠 `g_bfm_conn` は 0 にしない(`bfm_init()` が埋め、`slot_alloc()` が枠ごとに埋める)。",
+      "flow": [
+        {"do": "s_ci・s_cf・s_gsi・s_req を 0 で埋める"},
+        {"do": "s_tx_next = s_tx_outstanding = 0、s_gsi_ready = 0"}
+      ]
+    },
+    {
+      "func": "slot_alloc",
+      "summary": "接続の枠 `i` を 0 で埋めて `index` を入れ、RC QP の WQ・ドアベルレコード・CQ・CQ のドアベルレコード・中継バッファ(`g_bfm_stage_size` を `BFM_PAGE` に切り上げた大きさ)・T10-DIF 用の中継バッファ(`BFM_DIF_SLOTS` 面。1 面 = `g_bfm_dif_buf_size / BFM_DIF_SLOTS` を `BFM_PAGE` に切り上げた大きさ)を DMA 領域から切り出す。",
+      "args": {"i": "接続の枠の番号"},
+      "ret": "`BFM_OK`: 切り出した。`BFM_E_NOMEM`: DMA 領域が足りない。",
+      "pre": "`bfm_mem_reset()` で DMA 領域の切り出しが初期化してあること。`i < g_bfm.nconn`。",
+      "notes": "* 0 で埋めるので、枠は `BFM_CS_FREE`・`K_IDLE` になる。\n* 途中で足りなくなっても、それまでに切り出したものは返さない。\n* `bfm_cm_init_step()` の `G_SLOT` が枠ごとに 1 度だけ呼ぶ(`s_ci.slot_mem` で覚える)。",
+      "flow": [
+        {"do": "c = &g_bfm_conn[i] を 0 で埋め、c->index = i、QP の rq_log・sq_log・cq_log を決める"},
+        {"call": "bfm_mem_alloc() で QP の WQ・dbr・CQ・cq_dbr を切り出す"},
+        {"do": "c->stage_size = g_bfm_stage_size を BFM_PAGE に切り上げた値"},
+        {"call": "c->stage = bfm_mem_alloc(c->stage_size, BFM_PAGE) を呼ぶ"},
+        {"do": "c->dif_slot_size = g_bfm_dif_buf_size / BFM_DIF_SLOTS を BFM_PAGE に切り上げた値"},
+        {"call": "c->dif_buf = bfm_mem_alloc(c->dif_slot_size × BFM_DIF_SLOTS, BFM_PAGE) を呼ぶ"},
+        {"if": "どれかが NULL ?", "then": [{"return": "BFM_E_NOMEM"}]},
         {"return": "BFM_OK"}
       ]
     },
     {
-      "func": "bfm_cm_init",
-      "summary": "接続管理を用意する(`bfm_init()` から呼ばれる)。GSI の状態と `s_req` を 0 で埋め、送信の数を 0 にし、GSI の WQ・ドアベルレコード・CQ・受信枠・送信の置き場を DMA 領域から切り出す。UAR を取って GSI(QP1)を作り、INIT・RTS へ進め、受信を `BFM_GSI_PREPOST` 個出す。続けて接続の枠ごとに(`g_bfm.nconn` 個)、0 で埋めて、RC QP の WQ・ドアベルレコード・CQ・CQ のドアベルレコード・中継バッファ(`g_bfm_stage_size` を `BFM_PAGE` に切り上げた大きさ)と T10-DIF 用の中継バッファ(2 面。1 面 = `g_bfm_dif_buf_size` の半分を `BFM_PAGE` に切り上げた大きさ)を切り出し、UAR を取ってドアベルの窓を決め、BlueFlame を使うなら UAR を write-combining でも張る。全部そろってから `s_gsi_ready = 1` にする。",
+      "func": "bfm_cm_init_step",
+      "summary": "接続管理(GSI と接続の枠)を、待つところまで用意する(`bfm_init()` から呼ばれる)。状態 `s_ci.step` に従い、GSI の WQ・ドアベルレコード・CQ・受信枠・送信の置き場を DMA 領域から切り出し(`G_START`)、UAR を取り(`G_UAR`)、CQ と GSI(QP1)を作って(`G_CQ`・`G_QP`)INIT・RTR・RTS へ進め(`G_INIT`・`G_RTR`・`G_RTS`)、受信を `BFM_GSI_PREPOST` 個出す。続けて接続の枠ごとに(`G_SLOT` を `g_bfm.nconn` 回)、メモリを切り出し(`slot_alloc()`)、UAR を取ってドアベルの窓を決め、BlueFlame を使うなら UAR を write-combining でも張る。全部そろってから `s_gsi_ready = 1` にする(`G_DONE`)。",
       "args": {},
-      "ret": "`BFM_OK`: 用意できた。`BFM_E_NOMEM`: DMA 領域が足りない。そのほか `mlx5_alloc_uar()` / `mlx5_qp_create()` / `mlx5_qp_rst2init()` / `mlx5_qp_ud_to_rts()` の戻り値。",
-      "pre": "HCA が立ち上がっていること(`mlx5_hca_init()` の後)。`bfm_mem_reset()` で DMA 領域の切り出しが初期化してあること。",
-      "notes": "* 途中で失敗しても DMA 領域・UAR・GSI は返さない。後始末は呼び出し側(`bfm_init()` の `cleanup()`。HCA を止める)に任せる。\n* 接続の枠の準備で失敗したとき(`fail`)は、それまでに write-combining で張った UAR の窓を `bfm_port_bar0_wc_release()` で返し、全部の枠の `c->bf` を NULL にしてから戻る。\n* `s_gsi_ready = 1` にするのは全部そろって成功するときだけなので、失敗したときは `s_gsi_ready` は 0 のまま(`bfm_connect()` などは NULL を返す)。\n* `g_bfm_bf_enable` と `g_bfm.bf_cap` が立っているのに WC で張れなかったときは、注意を表示して BlueFlame なしで動かす(`c->bf = NULL`)。",
+      "ret": "`BFM_INPROGRESS`: 途中(FW のコマンドの完了を待っている)。`BFM_OK`: 済んだ。`BFM_E_NOMEM`: DMA 領域が足りない。そのほか `mlx5_alloc_uar()` / `mlx5_cq_create()` / `mlx5_qp_create()` / `mlx5_qp_rst2init()` / `mlx5_qp_ud_init2rtr()` / `mlx5_qp_ud_rtr2rts()` / `slot_alloc()` の戻り値。",
+      "pre": "HCA が立ち上がっていること(`mlx5_hca_init_step()` が済んだ後)。`bfm_mem_reset()` で DMA 領域の切り出しが、`bfm_cm_reset()` で状態が初期化してあること。",
+      "notes": "* FW のコマンドは `s_ci.cmd` で出したかを覚える。コマンドを出す関数が `BFM_INPROGRESS` を返したときも `rc != BFM_OK` の分岐でそのまま返す(状態は変えない)。\n* 失敗しても状態はそのまま。DMA 領域・UAR・GSI はここでは返さず、`bfm_init()` が止める手順(`bfm_cm_fini_step()` が WC の窓を返し、HCA を止める)へ回す。\n* `G_SLOT` は、枠のメモリを切り出した後に UAR の取得で待っても切り出し直さないように、`s_ci.slot_mem` で覚える。\n* フローでは、case の途中の `break`(`G_SLOT` で次の枠へ進むところ)を `continue` と書いた。case の終わりの `break` は書かない。\n* `g_bfm_bf_enable` と `g_bfm.bf_cap` が立っているのに WC で張れなかったときは、注意を表示して BlueFlame なしで動かす(`c->bf = NULL`)。表示は枠 0 を見て決める。\n* `s_gsi_ready = 1` にするのは全部そろったときだけなので、途中では `bfm_connect()` などは `BFM_E_STATE` を返す。",
       "flow": [
-        {"do": "s_gsi と s_req[] を 0 で埋め、s_tx_next = s_tx_outstanding = 0"},
-        {"do": "GSI の rq_log・sq_log・cq_log を決める"},
-        {"call": "bfm_mem_alloc() で GSI の WQ・dbr・CQ・cq_dbr・受信枠・送信の置き場を切り出す"},
-        {"if": "どれかが NULL ?", "then": [{"return": "BFM_E_NOMEM"}]},
-        {"call": "rc = mlx5_alloc_uar(&g_bfm, &s_gsi.uarn) を呼ぶ"},
-        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-        {"do": "s_gsi.has_uar = 1、s_gsi_db = BAR0 + uarn * BFM_PAGE + MLX5_BF_OFFSET"},
-        {"call": "rc = mlx5_qp_create(&g_bfm, &s_gsi, MLX5_QP_ST_QP1, 0) を呼ぶ"},
-        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-        {"call": "rc = mlx5_qp_rst2init(&g_bfm, &s_gsi, 1) を呼ぶ"},
-        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-        {"call": "rc = mlx5_qp_ud_to_rts(&g_bfm, &s_gsi) を呼ぶ"},
-        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-        {"while": "i < BFM_GSI_PREPOST ?(i は 0 から)", "body": [{"call": "gsi_post_recv() を呼ぶ"}]},
-        {"while": "i < g_bfm.nconn ?(i は 0 から)", "body": [
-          {"do": "c = &g_bfm_conn[i] を 0 で埋め、index = i、QP の rq_log・sq_log・cq_log を決める"},
-          {"call": "bfm_mem_alloc() で QP の WQ・dbr・CQ・cq_dbr と中継バッファ・DIF 用の中継バッファ(dif_slot_size × 2)を切り出す"},
-          {"if": "どれかが NULL ?", "then": [
-            {"do": "rc = BFM_E_NOMEM"},
-            {"goto": "fail"}
+        {"loop": "待つところまで進める", "body": [
+          {"switch": "s_ci.step", "cases": [
+            {"case": "G_START", "body": [
+              {"do": "GSI の rq_log・sq_log・cq_log を決める"},
+              {"call": "bfm_mem_alloc() で GSI の WQ・dbr・CQ・cq_dbr・受信枠・送信の置き場を切り出す"},
+              {"if": "どれかが NULL ?", "then": [{"return": "BFM_E_NOMEM"}]},
+              {"do": "s_ci.step = G_UAR"}
+            ]},
+            {"case": "G_UAR", "body": [
+              {"call": "rc = mlx5_alloc_uar(&g_bfm, &s_ci.cmd, &s_gsi.uarn) を呼ぶ"},
+              {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+              {"do": "s_gsi.has_uar = 1、s_gsi_db = BAR0 + uarn * BFM_PAGE + MLX5_BF_OFFSET、s_ci.step = G_CQ"}
+            ]},
+            {"case": "G_CQ", "body": [
+              {"call": "rc = mlx5_cq_create(&g_bfm, &s_ci.cmd, s_gsi.uarn, s_gsi.cq, s_gsi.cq_log, s_gsi.cq_dbr, &s_gsi.cqn) を呼ぶ"},
+              {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+              {"do": "s_gsi.has_cq = 1、s_gsi.cq_cc = 0、s_ci.step = G_QP"}
+            ]},
+            {"case": "G_QP", "body": [
+              {"call": "rc = mlx5_qp_create(&g_bfm, &s_ci.cmd, &s_gsi, MLX5_QP_ST_QP1, 0) を呼ぶ"},
+              {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+              {"do": "s_ci.step = G_INIT"}
+            ]},
+            {"case": "G_INIT", "body": [
+              {"call": "rc = mlx5_qp_rst2init(&g_bfm, &s_ci.cmd, &s_gsi, 1) を呼ぶ"},
+              {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+              {"do": "s_ci.step = G_RTR"}
+            ]},
+            {"case": "G_RTR", "body": [
+              {"call": "rc = mlx5_qp_ud_init2rtr(&g_bfm, &s_ci.cmd, &s_gsi) を呼ぶ"},
+              {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+              {"do": "s_ci.step = G_RTS"}
+            ]},
+            {"case": "G_RTS", "body": [
+              {"call": "rc = mlx5_qp_ud_rtr2rts(&g_bfm, &s_ci.cmd, &s_gsi) を呼ぶ"},
+              {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+              {"while": "i < BFM_GSI_PREPOST ?(i は 0 から)", "body": [{"call": "gsi_post_recv() を呼ぶ"}]},
+              {"do": "s_ci.i = 0、s_ci.slot_mem = 0、s_ci.step = G_SLOT"}
+            ]},
+            {"case": "G_SLOT", "body": [
+              {"do": "c = &g_bfm_conn[s_ci.i]"},
+              {"if": "!s_ci.slot_mem ?", "then": [
+                {"call": "rc = slot_alloc(s_ci.i) を呼ぶ"},
+                {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+                {"do": "s_ci.slot_mem = 1"}
+              ]},
+              {"call": "rc = mlx5_alloc_uar(&g_bfm, &s_ci.cmd, &c->qp.uarn) を呼ぶ"},
+              {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+              {"do": "c->qp.has_uar = 1、c->db = BAR0 + uarn * BFM_PAGE + MLX5_BF_OFFSET、c->bf = NULL"},
+              {"if": "g_bfm_bf_enable かつ g_bfm.bf_cap ?", "then": [
+                {"call": "wc = bfm_port_bar0_wc(uarn * BFM_PAGE, BFM_PAGE) を呼ぶ"},
+                {"if": "wc != NULL ?", "then": [{"do": "c->bf = wc + MLX5_BF_OFFSET"}]}
+              ]},
+              {"do": "s_ci.slot_mem = 0"},
+              {"if": "++s_ci.i < g_bfm.nconn ?", "then": [{"continue": true}]},
+              {"if": "g_bfm_bf_enable かつ g_bfm.bf_cap かつ g_bfm_conn[0].bf == NULL ?", "then": [{"do": "BFM_LOG で「BlueFlame を使わずに動かす」を表示"}]},
+              {"do": "s_gsi_ready = 1、s_ci.step = G_DONE"}
+            ]},
+            {"default": true, "body": [
+              {"return": "BFM_OK"}
+            ]}
+          ]}
+        ]}
+      ],
+      "states": {
+        "start": "bfm_init() が bfm_cm_reset() の後に呼ぶ",
+        "list": [
+          {"id": "G_START", "text": "GSI の WQ・dbr・CQ・cq_dbr・受信枠・送信の置き場を切り出す"},
+          {"id": "G_UAR", "text": "ALLOC_UAR(GSI のドアベル)", "wait": "コマンドの完了"},
+          {"id": "G_CQ", "text": "CREATE_CQ(GSI)", "wait": "コマンドの完了"},
+          {"id": "G_QP", "text": "CREATE_QP(QP1)", "wait": "コマンドの完了"},
+          {"id": "G_INIT", "text": "RST2INIT_QP", "wait": "コマンドの完了"},
+          {"id": "G_RTR", "text": "INIT2RTR_QP(UD)", "wait": "コマンドの完了"},
+          {"id": "G_RTS", "text": "RTR2RTS_QP(UD)。受信を BFM_GSI_PREPOST 個出す", "wait": "コマンドの完了"},
+          {"id": "G_SLOT", "text": "接続の枠 s_ci.i のメモリを切り出し(slot_alloc())、ALLOC_UAR、WC の窓を張る。枠の数(g_bfm.nconn)だけ s_ci.i を進めて繰り返す", "wait": "コマンドの完了",
+           "next": [{"to": "G_DONE", "label": "全部の枠を用意した(s_gsi_ready = 1)"}]},
+          {"id": "G_DONE", "text": "済んだ(呼ぶと BFM_OK を返す)"}
+        ],
+        "end": "BFM_OK を返す",
+        "note": "どの状態でも失敗すれば(G_START は DMA 領域が足りないとき)、状態はそのままで失敗の値を返す。bfm_init() が止める手順へ回し、次の立ち上げは bfm_cm_reset() からやり直す。"
+      }
+    },
+    {
+      "func": "bfm_cm_fini_step",
+      "summary": "接続管理を、待つところまで畳む(`bfm_core.c` の止める手順 `stop_step()` から呼ばれる。`bfm_shutdown()` と、`bfm_init()` の立ち上げの失敗)。`g_bfm_ctl_lock` を取り、状態 `s_cf.step` に従って進める。`F_CONNS` では使っている接続の枠ごとに、畳む印が立っていなければ立てて(結果は `BFM_OK`)`conn_step()` で畳む手順を進める(UP なら BYE を送り、QP と CQ を消す)。全部の枠が畳み終わったら `F_DRAIN` へ移り、GSI の送信が出ていくのを最大 `TX_DRAIN_MS`(100 ミリ秒)待ってから、write-combining で張った UAR の窓を返し、`s_gsi_ready = 0` にする(`F_DONE`)。",
+      "args": {},
+      "ret": "`BFM_INPROGRESS`: 途中(接続の枠を畳んでいる、または GSI の送信が出ていくのを待っている)。`BFM_OK`: 済んだ。",
+      "pre": "`bfm_cm_reset()` の後であること(立ち上げの途中でもよい)。",
+      "notes": "* GSI の QP や UAR は壊さない(HCA の停止で消える)。\n* `conn_step()` が返す畳み終えたときの値(`c->result`)は見ない。\n* `F_DRAIN` の待ちは、`s_gsi_ready` が 0(GSI が用意されていない)なら行わない。待つ間に `gsi_pump()` が GSI のエラー完了を見たら待つのをやめる。\n* `F_DONE` の後は、`bfm_cm_reset()` まで何度呼んでも `BFM_OK` を返す。\n* 畳んだ枠を確立の途中で持っていた `bfm_connect()` / `bfm_accept()` の呼び出し側の `*pc` は、ここでは NULL にしない。",
+      "flow": [
+        {"call": "bfm_lock(&g_bfm_ctl_lock) を呼ぶ"},
+        {"if": "s_cf.step == F_CONNS ?", "then": [
+          {"do": "busy = 0"},
+          {"while": "i < g_bfm.nconn ?(i は 0 から)", "body": [
+            {"do": "c = &g_bfm_conn[i]"},
+            {"if": "c->state == BFM_CS_FREE ?", "then": [{"continue": true}]},
+            {"if": "!c->abort ?", "then": [{"do": "c->abort = 1、c->result = BFM_OK"}]},
+            {"call": "conn_step(c) を呼ぶ"},
+            {"if": "conn_step() == BFM_INPROGRESS ?", "then": [{"do": "busy = 1"}]}
           ]},
-          {"call": "rc = mlx5_alloc_uar(&g_bfm, &c->qp.uarn) を呼ぶ"},
-          {"if": "rc != BFM_OK ?", "then": [{"goto": "fail"}]},
-          {"do": "c->qp.has_uar = 1、c->db = BAR0 + uarn * BFM_PAGE + MLX5_BF_OFFSET、c->bf = NULL"},
-          {"if": "g_bfm_bf_enable かつ g_bfm.bf_cap ?", "then": [
-            {"call": "wc = bfm_port_bar0_wc(uarn * BFM_PAGE, BFM_PAGE) を呼ぶ"},
-            {"if": "wc != NULL ?", "then": [{"do": "c->bf = wc + MLX5_BF_OFFSET"}]}
+          {"if": "busy ?", "then": [
+            {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
+            {"return": "BFM_INPROGRESS"}
+          ]},
+          {"call": "s_cf.t0 = bfm_port_time_ns() を呼ぶ"},
+          {"do": "s_cf.step = F_DRAIN"}
+        ]},
+        {"if": "s_cf.step == F_DRAIN ?", "then": [
+          {"if": "s_gsi_ready かつ s_tx_outstanding > 0 かつ ms_since(s_cf.t0) < TX_DRAIN_MS ?", "then": [
+            {"call": "gsi_pump() を呼ぶ"},
+            {"if": "gsi_pump() >= 0 かつ s_tx_outstanding > 0 ?", "then": [
+              {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
+              {"return": "BFM_INPROGRESS"}
+            ]}
+          ]},
+          {"while": "i < g_bfm.nconn ?(i は 0 から)", "body": [
+            {"do": "c = &g_bfm_conn[i]"},
+            {"if": "c->bf != NULL ?", "then": [{"call": "bfm_port_bar0_wc_release(uarn * BFM_PAGE, BFM_PAGE) を呼ぶ"}]},
+            {"do": "c->bf = NULL"}
+          ]},
+          {"do": "s_gsi_ready = 0、s_cf.step = F_DONE"}
+        ]},
+        {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
+        {"return": "BFM_OK"}
+      ],
+      "states": {
+        "start": "stop_step()(bfm_shutdown()・bfm_init() の失敗)が呼ぶ。bfm_cm_reset() で F_CONNS",
+        "list": [
+          {"id": "F_CONNS", "text": "使っている接続の枠ごとに c->abort を立て(結果は BFM_OK)、conn_step() で畳む(UP / ERROR なら BYE、QP と CQ を消す)", "wait": "全部の枠の conn_step() が畳み終える"},
+          {"id": "F_DRAIN", "text": "GSI の送信が出ていくのを待ち、WC の窓を返して s_gsi_ready = 0", "wait": "GSI の送信の完了(上限 TX_DRAIN_MS。GSI が無い・エラー完了なら待たない)"},
+          {"id": "F_DONE", "text": "済んだ(呼ぶと BFM_OK を返す)"}
+        ],
+        "end": "BFM_OK を返す"
+      }
+    },
+    {
+      "func": "bfm_connect",
+      "summary": "相手へ接続を掛ける(掛け側)。待たずに、呼ばれるたびに接続の枠の状態機械(`conn_step()`)を待つところまで進める。`g_bfm_ctl_lock` を取り、最初の呼び出し(`*pc == NULL`)では相手の IP・MAC・待ち受けの番号を決め、接続の枠を取って(`conn_open()`、手順は `K_CQ` から)時間の上限・相手の IP・MAC・GID を入れ、`*pc` に入れる。相手の MAC が全部 0(知らない)なら ff:ff:ff:ff:ff:ff にして、REQ を同報で送る。2 回目からは `*pc` の枠を進める。状態機械は RC QP を作って INIT にし、REQ を送り(REP が来るまで `REQ_RETRY_MS` ごとに送り直す)、REP を受けたら RTR・RTS へ進めてデータ経路に繋ぎ、`BFM_CS_UP` にする。",
+      "args": {"pc": "接続を入れる場所。最初は `*pc = NULL` で呼び、`BFM_INPROGRESS` の間は同じ `pc` で呼び続ける", "peer_ip": "相手の IPv4 アドレス。0 なら `g_bfm_peer_ip`(最初の呼び出しだけ見る)", "peer_mac": "相手の MAC(6 バイト)。NULL なら `g_bfm_peer_mac`。全部 0 なら自動(REQ を同報で送り、REP から取る)(最初の呼び出しだけ見る)", "port": "相手の待ち受けの番号。0 なら `g_bfm_cm_port`(最初の呼び出しだけ見る)", "timeout_ms": "確立の上限(ミリ秒。枠を取ったときから)。0 なら `REQ_TIMEOUT_MS`(5 秒)(最初の呼び出しだけ見る)"},
+      "ret": "`BFM_INPROGRESS`: 途中(同じ `pc` で呼び続ける)。`BFM_OK`: 使える(`*pc`)。`BFM_E_PARAM`: `pc` が NULL、相手の IP が無い、`*pc` が受け側の枠。`BFM_E_STATE`: 接続管理が用意されていない。`BFM_E_NOMEM`: 接続の枠が無い。`BFM_E_TIMEOUT`: 時間内に確立できない。そのほか FW のコマンド・GSI の送信の失敗の理由。`BFM_INPROGRESS` と `BFM_OK` 以外では `*pc` を NULL に戻す。",
+      "pre": "`bfm_init()` の後であること。`peer_mac` が NULL でなければ 6 バイトを指すこと。どのコアから同時に呼んでもよい(`pc` は別々にする)。",
+      "notes": "* 確立に失敗したときは、途中まで作った QP と CQ を消し終えるまで `BFM_INPROGRESS` を返し、その後に理由を返す(BYE は送らない)。\n* 相手の MAC・IP は引数(または設定の値)のものを入れるが、REP を受けると `take_peer()` が REP の中身で上書きする。同報で送った場合も、RC QP と BYE には REP に入った相手の MAC を使う。\n* 同報が届かない網(L2 を越える経路)では、相手の MAC を渡すこと。\n* `BFM_OK` を返した後に呼んでも `BFM_OK` を返す(手順は `K_UP` のまま)。\n* `g_bfm_ctl_lock` は 1 回の呼び出しの間だけ持つ。",
+      "flow": [
+        {"if": "pc == NULL ?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"if": "!s_gsi_ready ?", "then": [{"return": "BFM_E_STATE"}]},
+        {"call": "bfm_lock(&g_bfm_ctl_lock) を呼ぶ"},
+        {"do": "c = *pc"},
+        {"if": "c == NULL ?", "then": [
+          {"if": "peer_ip == 0 ?", "then": [{"do": "peer_ip = g_bfm_peer_ip"}]},
+          {"if": "peer_mac == NULL ?", "then": [{"do": "peer_mac = g_bfm_peer_mac"}]},
+          {"if": "peer_ip == 0 ?", "then": [
+            {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
+            {"do": "BFM_LOG で「相手の IP が無い」を表示"},
+            {"return": "BFM_E_PARAM"}
+          ]},
+          {"if": "port == 0 ?", "then": [{"do": "port = g_bfm_cm_port"}]},
+          {"call": "c = conn_open(port, ROLE_CONNECT) を呼ぶ"},
+          {"if": "c == NULL ?", "then": [
+            {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
+            {"return": "BFM_E_NOMEM"}
+          ]},
+          {"do": "c->timeout_ms = timeout_ms が 0 でなければそれ、0 なら REQ_TIMEOUT_MS"},
+          {"do": "c->peer_ip = peer_ip、c->peer_mac = peer_mac"},
+          {"call": "mac_is_zero(c->peer_mac) を呼ぶ"},
+          {"if": "mac_is_zero() != 0 ?", "then": [{"do": "c->peer_mac = ff:ff:ff:ff:ff:ff(同報)"}]},
+          {"call": "mlx5_gid_from_ipv4(peer_ip, c->peer_gid) を呼ぶ"},
+          {"do": "*pc = c"}
+        ], "else": [
+          {"if": "c->role != ROLE_CONNECT ?", "then": [
+            {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
+            {"return": "BFM_E_PARAM"}
           ]}
         ]},
-        {"if": "g_bfm_bf_enable かつ g_bfm.bf_cap かつ g_bfm_conn[0].bf == NULL ?", "then": [{"do": "BFM_LOG で「BlueFlame を使わずに動かす」を表示"}]},
-        {"do": "s_gsi_ready = 1"},
-        {"return": "BFM_OK"},
-        {"label": "fail"},
-        {"while": "i < g_bfm.nconn ?(i は 0 から)", "body": [
-          {"if": "c->bf != NULL ?", "then": [{"call": "bfm_port_bar0_wc_release(uarn * BFM_PAGE, BFM_PAGE) を呼ぶ"}]},
-          {"do": "c->bf = NULL"}
-        ]},
+        {"call": "rc = conn_step(c) を呼ぶ"},
+        {"if": "rc != BFM_INPROGRESS かつ rc != BFM_OK ?", "then": [{"do": "*pc = NULL"}]},
+        {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
         {"return": "rc"}
       ]
     },
     {
-      "func": "bfm_cm_fini",
-      "summary": "接続管理を畳む(`bfm_shutdown()` から呼ばれる)。使っている接続の枠はすべて `bfm_disconnect()` で切断し、write-combining で張った UAR の窓を外して、`s_gsi_ready = 0` にする。",
-      "args": {},
-      "ret": "なし",
-      "pre": "`bfm_cm_init()` の後であること。",
-      "notes": "GSI の QP や UAR は壊さない(HCA の停止で消える)。切断する接続があれば、それぞれ BYE が出ていくのを最大 `TX_DRAIN_MS`(100 ミリ秒)待つ。",
-      "flow": [
-        {"while": "i < g_bfm.nconn ?(i は 0 から)", "body": [
-          {"if": "c->state != BFM_CS_FREE ?", "then": [{"call": "bfm_disconnect(c) を呼ぶ"}]},
-          {"if": "c->bf != NULL ?", "then": [{"call": "bfm_port_bar0_wc_release(uarn * BFM_PAGE, BFM_PAGE) を呼ぶ"}]},
-          {"do": "c->bf = NULL"}
-        ]},
-        {"do": "s_gsi_ready = 0"}
-      ]
-    },
-    {
-      "func": "ctl_yield",
-      "summary": "`g_bfm_ctl_lock` を手放し、`pause` を 64 回回ってから取り直す。REP や REQ を待つ間に、ほかのコアの接続・切断・`bfm_poll()` が鍵を取れるようにする。",
-      "args": {},
-      "ret": "なし",
-      "pre": "`g_bfm_ctl_lock` を持っていること。",
-      "notes": "戻ったときは鍵を持っている。手放している間に、ほかのコアが GSI を読んだり接続の枠を変えたりする。",
-      "flow": [
-        {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
-        {"do": "i = 0"},
-        {"while": "i < 64 ?", "body": [
-          {"call": "bfm_cpu_relax() を呼ぶ"},
-          {"do": "i++"}
-        ]},
-        {"call": "bfm_lock(&g_bfm_ctl_lock) を呼ぶ"}
-      ]
-    },
-    {
-      "func": "bfm_connect",
-      "summary": "相手へ接続を掛ける(掛け側)。接続の枠を取って RC QP を INIT まで作り(`conn_open()`)、相手の IP・MAC・GID を入れる。相手の MAC が全部 0(知らない)なら ff:ff:ff:ff:ff:ff にして、REQ を同報で送る。REQ を作り、REP を受けるまで `REQ_RETRY_MS`(1 秒)ごとに送り直しながら `gsi_pump()` を回す。REP を受けたら(`handle_msg()` が相手の情報を枠へ写す)QP を RTS へ進めてデータ経路に繋ぎ、`BFM_CS_UP` にする(`conn_up()`)。 接続の枠の取り外し・GSI・FW のコマンドは `g_bfm_ctl_lock` の中で行い、REP を待つ間は 1 回まわるごとに `ctl_yield()` で鍵を手放す。",
-      "args": {"peer_ip": "相手の IPv4 アドレス。0 なら `g_bfm_peer_ip`", "peer_mac": "相手の MAC(6 バイト)。NULL なら `g_bfm_peer_mac`。全部 0 なら自動(REQ を同報で送り、REP から取る)", "port": "相手の待ち受けの番号。0 なら `g_bfm_cm_port`", "timeout_ms": "REP を待つ時間の上限(ミリ秒)。0 なら `REQ_TIMEOUT_MS`(5 秒)"},
-      "ret": "接続(`bfm_conn_t *`)。失敗したら NULL(接続管理が用意されていない、相手の IP が無い、枠が無い、QP の失敗、REP が来ない、送信の失敗)。",
-      "pre": "`bfm_init()` の後であること。`peer_mac` が NULL でなければ 6 バイトを指すこと。どのコアから同時に呼んでもよい。",
-      "notes": "* REQ は最初に 1 度作り、送り直しでも同じものを送る。\n* 相手の MAC・IP は引数(または設定の値)のものを入れるが、REP を受けると `take_peer()` が REP の中身で上書きする。同報で送った場合も、RC QP と BYE には REP に入った相手の MAC を使う。\n* 同報が届かない網(L2 を越える経路)では、相手の MAC を渡すこと。\n* 失敗したときは相手へ何も送らずに(BYE も送らない)枠を返す(`conn_release()`)。\n* REP を待つ間の `gsi_pump()` の戻り値は見ない。",
-      "flow": [
-        {"if": "!s_gsi_ready ?", "then": [{"return": "NULL"}]},
-        {"if": "peer_ip == 0 ?", "then": [{"do": "peer_ip = g_bfm_peer_ip"}]},
-        {"if": "peer_mac == NULL ?", "then": [{"do": "peer_mac = g_bfm_peer_mac"}]},
-        {"if": "peer_ip == 0 ?", "then": [
-          {"do": "BFM_LOG で「相手の IP が無い」を表示"},
-          {"return": "NULL"}
-        ]},
-        {"if": "port == 0 ?", "then": [{"do": "port = g_bfm_cm_port"}]},
-        {"if": "timeout_ms == 0 ?", "then": [{"do": "timeout_ms = REQ_TIMEOUT_MS"}]},
-        {"call": "bfm_lock(&g_bfm_ctl_lock) を呼ぶ"},
-        {"call": "c = conn_open(port) を呼ぶ"},
-        {"if": "c == NULL ?", "then": [
-          {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
-          {"return": "NULL"}
-        ]},
-        {"do": "c->peer_ip = peer_ip、c->peer_mac = peer_mac"},
-        {"call": "mac_is_zero(c->peer_mac) を呼ぶ"},
-        {"if": "mac_is_zero() != 0 ?", "then": [{"do": "c->peer_mac = ff:ff:ff:ff:ff:ff(同報)"}]},
-        {"call": "mlx5_gid_from_ipv4(peer_ip, c->peer_gid) を呼ぶ"},
-        {"call": "build_msg(req, MSG_REQ, c) を呼ぶ"},
-        {"call": "t0 = bfm_port_time_ns() を呼ぶ"},
-        {"do": "t_sent = 0"},
-        {"while": "!c->got_rep ?", "body": [
-          {"if": "ms_since(t0) > timeout_ms ?", "then": [
-            {"do": "BFM_LOG で「接続できない(REP が来ない)」を表示"},
-            {"goto": "fail"}
-          ]},
-          {"if": "t_sent == 0 または ms_since(t_sent) > REQ_RETRY_MS ?", "then": [
-            {"call": "gsi_send(req, c) を呼ぶ"},
-            {"if": "gsi_send() != BFM_OK ?", "then": [{"goto": "fail"}]},
-            {"call": "t_sent = bfm_port_time_ns() を呼ぶ"}
-          ]},
-          {"call": "gsi_pump() を呼ぶ"},
-          {"if": "!c->got_rep ?", "then": [{"call": "ctl_yield() を呼ぶ"}]}
-        ]},
-        {"call": "conn_up(c, \"掛け側\") を呼ぶ"},
-        {"if": "conn_up() != BFM_OK ?", "then": [{"goto": "fail"}]},
-        {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
-        {"return": "c"},
-        {"label": "fail"},
-        {"call": "conn_release(c) を呼ぶ"},
-        {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
-        {"return": "NULL"}
-      ]
-    },
-    {
       "func": "bfm_accept",
-      "summary": "相手からの接続を受ける(受け側)。`g_bfm_ctl_lock` を取り、`gsi_pump()` を回しながら、`handle_msg()` が取っておいた REQ のうち待ち受けの番号が `port` のものを `req_take()` で待つ(1 回まわるごとに `ctl_yield()` で鍵を手放す)。REQ が来たら接続の枠を取って RC QP を INIT まで作り(`conn_open()`)、REQ から相手の情報を写し(`take_peer()`)、path_mtu を自分と相手の小さい方にする。QP を RTS へ進めてデータ経路に繋いで `BFM_CS_UP` にし(`conn_up()`)、REP を送ってから鍵を返す。",
-      "args": {"port": "待ち受けの番号。0 なら `g_bfm_cm_port`", "timeout_ms": "REQ を待つ時間の上限(ミリ秒)。0 なら無期限に待つ"},
-      "ret": "接続(`bfm_conn_t *`)。失敗したら NULL(接続管理が用意されていない、REQ が時間内に来ない、枠が無い、QP の失敗、REP の送信の失敗)。",
-      "pre": "`bfm_init()` の後であること。どのコアから同時に呼んでもよい(同じ番号で複数のコアが待てば、REQ は古い順に別々のコアへ渡る)。",
-      "notes": "* 番号の違う REQ は残し、古すぎる REQ は捨てる(`req_take()`)。\n* REQ の経路 MTU([5])が 1 以上で自分の path_mtu より小さければ、そちらに合わせる。\n* QP を RTS にしてから REP を送るので、掛け側は REP を受けてすぐ使える。REP が落ちたときは、掛け側の REQ の送り直しに `handle_msg()` が REP を送り直す。\n* 待つ間の `gsi_pump()` で、既存の接続への BYE や REQ の送り直しも処理される。",
+      "summary": "相手からの接続を受ける(受け側)。待たずに、呼ばれるたびに接続の枠の状態機械(`conn_step()`)を待つところまで進める。`g_bfm_ctl_lock` を取り、最初の呼び出し(`*pc == NULL`)では待ち受けの番号を決め、接続の枠を取って(`conn_open()`、手順は `K_WAIT_REQ` から)REQ を待つ上限を入れ、`*pc` に入れる。2 回目からは `*pc` の枠を進める。状態機械は、`handle_msg()` が取っておいた REQ のうち待ち受けの番号が `port` のものを `req_take()` で取り、相手の情報を写し(`take_peer()`)、path_mtu を自分と相手の小さい方にして、RC QP を作って RTS へ進め、データ経路に繋いで `BFM_CS_UP` にしてから REP を送る。",
+      "args": {"pc": "接続を入れる場所。最初は `*pc = NULL` で呼び、`BFM_INPROGRESS` の間は同じ `pc` で呼び続ける", "port": "待ち受けの番号。0 なら `g_bfm_cm_port`(最初の呼び出しだけ見る)", "timeout_ms": "REQ を待つ上限(ミリ秒。枠を取ったときから)。0 なら待ち続ける(最初の呼び出しだけ見る)"},
+      "ret": "`BFM_INPROGRESS`: 途中(同じ `pc` で呼び続ける)。`BFM_OK`: 使える(`*pc`)。`BFM_E_PARAM`: `pc` が NULL、`*pc` が掛け側の枠。`BFM_E_STATE`: 接続管理が用意されていない。`BFM_E_NOMEM`: 接続の枠が無い。`BFM_E_TIMEOUT`: REQ が時間内に来ない。そのほか FW のコマンド・REP の送信の失敗の理由。`BFM_INPROGRESS` と `BFM_OK` 以外では `*pc` を NULL に戻す。",
+      "pre": "`bfm_init()` の後であること。どのコアから同時に呼んでもよい(`pc` は別々にする。同じ番号で複数の枠が待てば、REQ は古い順に別々の枠へ渡る)。",
+      "notes": "* REQ を待つ間は枠を 1 つ使う。待つのをやめるときは `bfm_disconnect(*pc)`。\n* 番号の違う REQ は残し、古すぎる REQ は捨てる(`req_take()`)。\n* QP を RTS にしてから REP を送るので、掛け側は REP を受けてすぐ使える。REP が落ちたときは、掛け側の REQ の送り直しに `handle_msg()` が REP を送り直す。\n* REQ を受けた後は時間切れを見ない。\n* 失敗したときは、途中まで作った QP と CQ を消し終えるまで `BFM_INPROGRESS` を返し、その後に理由を返す(`BFM_CS_UP` になった後の REP の送信の失敗では BYE を送ってから消す)。\n* `g_bfm_ctl_lock` は 1 回の呼び出しの間だけ持つ。",
       "flow": [
-        {"if": "!s_gsi_ready ?", "then": [{"return": "NULL"}]},
-        {"if": "port == 0 ?", "then": [{"do": "port = g_bfm_cm_port"}]},
-        {"call": "t0 = bfm_port_time_ns() を呼ぶ"},
+        {"if": "pc == NULL ?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"if": "!s_gsi_ready ?", "then": [{"return": "BFM_E_STATE"}]},
         {"call": "bfm_lock(&g_bfm_ctl_lock) を呼ぶ"},
-        {"loop": "REQ が来るまで", "body": [
-          {"call": "gsi_pump() を呼ぶ"},
-          {"call": "req_take(port, msg) を呼ぶ"},
-          {"if": "req_take() が 1 ?", "then": [{"break": true}]},
-          {"if": "timeout_ms != 0 かつ ms_since(t0) > timeout_ms ?", "then": [
-            {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
-            {"return": "NULL"}
-          ]},
-          {"call": "ctl_yield() を呼ぶ"}
-        ]},
-        {"call": "c = conn_open(port) を呼ぶ"},
+        {"do": "c = *pc"},
         {"if": "c == NULL ?", "then": [
-          {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
-          {"return": "NULL"}
+          {"if": "port == 0 ?", "then": [{"do": "port = g_bfm_cm_port"}]},
+          {"call": "c = conn_open(port, ROLE_ACCEPT) を呼ぶ"},
+          {"if": "c == NULL ?", "then": [
+            {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
+            {"return": "BFM_E_NOMEM"}
+          ]},
+          {"do": "c->timeout_ms = timeout_ms、*pc = c"}
+        ], "else": [
+          {"if": "c->role != ROLE_ACCEPT ?", "then": [
+            {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
+            {"return": "BFM_E_PARAM"}
+          ]}
         ]},
-        {"call": "take_peer(c, msg) を呼ぶ"},
-        {"if": "msg[5] >= 1 かつ msg[5] < c->path_mtu ?", "then": [{"do": "c->path_mtu = msg[5]"}]},
-        {"call": "conn_up(c, \"受け側\") を呼ぶ"},
-        {"if": "conn_up() != BFM_OK ?", "then": [{"goto": "fail"}]},
-        {"call": "build_msg(rep, MSG_REP, c) を呼ぶ"},
-        {"call": "gsi_send(rep, c) を呼ぶ"},
-        {"if": "gsi_send() != BFM_OK ?", "then": [{"goto": "fail"}]},
+        {"call": "rc = conn_step(c) を呼ぶ"},
+        {"if": "rc != BFM_INPROGRESS かつ rc != BFM_OK ?", "then": [{"do": "*pc = NULL"}]},
         {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
-        {"return": "c"},
-        {"label": "fail"},
-        {"call": "conn_release(c) を呼ぶ"},
-        {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
-        {"return": "NULL"}
+        {"return": "rc"}
       ]
     },
     {
       "func": "bfm_disconnect",
-      "summary": "接続を切って枠を返す(`g_bfm_ctl_lock` の中で)。接続が `BFM_CS_UP` か `BFM_CS_ERROR` なら、相手へ BYE を送り、送信の完了を最大 `TX_DRAIN_MS`(100 ミリ秒)待つ(返事は待たない)。最後に `conn_release()` で QP を壊して枠を返す。",
+      "summary": "接続を切って枠を返す。待たずに、呼ばれるたびに接続の枠の状態機械(`conn_step()`)を畳む手順で進める。`g_bfm_ctl_lock` を取り、畳む印が立っていなければ立てて結果を `BFM_OK` にし、`conn_step()` を呼ぶ。接続が `BFM_CS_UP` か `BFM_CS_ERROR` なら相手へ BYE を送り(返事は待たない)、QP と CQ を消して枠を返す。確立の途中の接続にも使える(そこでやめて畳む)。",
       "args": {"c": "切る接続"},
-      "ret": "`BFM_OK`: 枠を返した(BYE を送れなくても)。`BFM_E_PARAM`: `c` が NULL か、既に空いている枠。",
-      "pre": "`c` は `bfm_connect()` / `bfm_accept()` が返した接続であること。その接続で転送しているコアと同時に呼ばないこと(別の接続なら、どのコアから同時に呼んでもよい)。",
-      "notes": "* 相手が先に切って `BFM_CS_CLOSED` になった接続は、BYE を送らずに枠だけ返す。\n* BYE の送信に失敗したら待たずに枠を返す。待つ間に GSI のエラー完了を見たら待つのをやめる。\n* 送信の完了は GSI 全体の送信中の数(`s_tx_outstanding`)が 0 になるまで待つ。\n* 呼んだ後 `c` は使えない。",
+      "ret": "`BFM_INPROGRESS`: 途中(呼び続ける)。`BFM_OK`: 枠を返した(BYE を送れなくても)。`BFM_E_PARAM`: `c` が NULL か、既に空いている枠。確立に失敗して畳んでいる途中の接続なら、その失敗の理由。",
+      "pre": "`c` は `bfm_connect()` / `bfm_accept()` が `*pc` に入れた接続であること。その接続で転送しているコアと同時に呼ばないこと(別の接続なら、どのコアから同時に呼んでもよい)。",
+      "notes": "* 相手が先に切って `BFM_CS_CLOSED` になった接続や、確立の途中の接続は、BYE を送らずに QP と CQ を消す。\n* BYE は、GSI の送信の置き場が空かなければ `TX_DRAIN_MS`(100 ミリ秒)まで出し直し、それでも出なければあきらめる。送信の完了は待たない。\n* コマンドを出している途中なら、その完了を受け取ってから畳む。\n* `BFM_OK` が返った後 `c` は使えない(枠は `BFM_CS_FREE` なので、もう一度呼ぶと `BFM_E_PARAM`)。",
       "flow": [
         {"if": "c == NULL ?", "then": [{"return": "BFM_E_PARAM"}]},
         {"call": "bfm_lock(&g_bfm_ctl_lock) を呼ぶ"},
@@ -512,21 +725,10 @@
           {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
           {"return": "BFM_E_PARAM"}
         ]},
-        {"if": "c->state == BFM_CS_UP または c->state == BFM_CS_ERROR ?", "then": [
-          {"call": "build_msg(bye, MSG_BYE, c) を呼ぶ"},
-          {"call": "gsi_send(bye, c) を呼ぶ"},
-          {"if": "gsi_send() == BFM_OK ?", "then": [
-            {"call": "t0 = bfm_port_time_ns() を呼ぶ"},
-            {"while": "s_tx_outstanding > 0 かつ ms_since(t0) < TX_DRAIN_MS ?", "body": [
-              {"call": "gsi_pump() を呼ぶ"},
-              {"if": "gsi_pump() < 0 ?", "then": [{"break": true}]}
-            ]}
-          ]}
-        ]},
-        {"call": "conn_release(c) を呼ぶ"},
+        {"if": "!c->abort ?", "then": [{"do": "c->abort = 1、c->result = BFM_OK"}]},
+        {"call": "rc = conn_step(c) を呼ぶ"},
         {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
-        {"do": "BFM_DBG で「切断した」を表示"},
-        {"return": "BFM_OK"}
+        {"return": "rc"}
       ]
     },
     {
