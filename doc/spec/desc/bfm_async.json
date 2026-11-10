@@ -1,0 +1,246 @@
+{
+  "file": "src/bfm_async.c",
+  "summary": "多重度つきの write / read。1 本の接続で、完了を待たずに最大 `g_bfm_qdepth`(既定 64。上限 `BFM_QD_MAX`)個の write / read を出しておき、後で確かめる。仕掛かり中の 1 個ごとに「枠」(`struct bfm_aslot`)を 1 つ使い、枠は送り元 / 着地点にする中継バッファ(`g_bfm_async_buf_size`。既定 4KiB)を 1 つずつ持つ(`slot_alloc()` が `c->abuf` として切り出す)。\n\n* `bfm_write_async()`: write を出す。`BFM_ACK` なら tag を返し、`bfm_test()` / `bfm_wait()` で 1 個ずつ確かめる。`BFM_NOACK` なら tag を返さず、`bfm_check()` で失敗と時間切れを見る。\n* `bfm_read_async()`: read を出して tag を返す。応答は、完了を刈り取ったときに `dst` へ写す。\n* `bfm_test()` / `bfm_wait()`: tag の操作が済んだか(待たない / 済むまで待つ)。\n* `bfm_check()`: 完了を刈り取り、仕掛かり中の数を返し、時間切れ・エラーを報告する。\n\n枠が全部仕掛かり中のときに出そうとすると、CQ から完了を刈り取って枠を空けてから出す(空いていれば待たずに出す)。空かなければ回って待ち、仕掛かり中のどれかが出してから `g_bfm_async_timeout_ms`(既定 100ms)を過ぎたら、または待ち始めてからその時間を過ぎたら、接続をエラーにして `BFM_E_TIMEOUT` を返す。\n\n完了の刈り取りはどの関数で行っても同じで、`poll_one()`(`bfm_ops.c`)が位置ごとの枠の番号(`c->wqe_slot[]`)を見て `bfm_async_done()` を呼ぶ。普通の `bfm_write()` などで完了を待つ間にも刈り取られる。刈り取った枠はすぐ空き、結果は次にその枠を使うまで残す。tag は「通し番号 << 6 OR 枠の番号」で、枠が次の操作に使われた後の古い tag は「済んで、成功した」とみなす(失敗すると接続がエラーになり次の操作を出せないので、枠が使い回されるのは成功の後だけ)。\n\n全部の WQE に完了通知を求める(ACK を確かめない write も。枠を空ける時と時間切れを知るため)。完了は出した順に来る(RC の SQ)。1 つの接続を複数のコアから同時に使わないこと(ほかのデータ経路の関数と同じ)。",
+  "functions": [
+    {
+      "func": "timeout_ns",
+      "summary": "非同期の操作の時間切れ(`g_bfm_async_timeout_ms`)をナノ秒にして返す。",
+      "args": {},
+      "ret": "時間切れ(ns)。",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"return": "g_bfm_async_timeout_ms x 1000000"}
+      ]
+    },
+    {
+      "func": "bfm_async_attach",
+      "summary": "接続ができたとき(張り直しを含む)に、多重度の枠を全部空ける。枠の表(`c->as[]`)と位置ごとの枠の番号(`c->wqe_slot[]`)を 0 にし、空きの印(`c->afree`)を枠の数(`c->aqd`)だけ立て、仕掛かり中の数とエラーを 0 にする。通し番号(`c->aseq`)は張り直しをまたいで続け、今の接続の最初の番号を `c->abase` に覚える。",
+      "args": {"c": "接続ができた接続"},
+      "ret": "なし",
+      "pre": "`slot_alloc()` で枠の数(`c->aqd`)と中継バッファ(`c->abuf`)が決めてあること。",
+      "notes": "* `bfm_ops_attach()` が呼ぶ(張り直しのたびに呼ばれるので、前の接続の `c->aerr` もここで消える)。\n* `c->abase` より前の通し番号の tag は張り直しの前のもので、`bfm_test()` は `BFM_E_STATE` を返す(枠の表を 0 にするので、その結果はもう分からない)。\n* 通し番号 0 は使わない(`c->as[]` の空の印と同じになるため)。",
+      "flow": [
+        {"do": "c->as と c->wqe_slot を 0 で埋める"},
+        {"do": "c->afree = c->aqd >= 64 なら全ビット、そうでなければ (1 << c->aqd) - 1"},
+        {"if": "(c->aseq & SEQ_MASK) == 0 ?", "then": [{"do": "c->aseq++"}]},
+        {"do": "c->abase = c->aseq & SEQ_MASK"},
+        {"do": "c->ainflight = 0、c->aerr = 0"}
+      ]
+    },
+    {
+      "func": "bfm_async_done",
+      "summary": "位置 `pc` の WQE の完了を、その枠に入れる(`poll_one()` から)。成功した read なら、応答を手元の `dst` へ写す(32 バイトまでで CQE に入っていれば `scat` から、そうでなければ枠の中継バッファから)。結果を枠に残し、枠を空きに戻し、仕掛かり中の数を減らす。エラーなら最初のエラーを `c->aerr` に覚えて表示する。",
+      "args": {"c": "接続", "pc": "完了した WQE の SQ の位置(WQEBB 単位)", "scat": "応答データを抱えた CQE(無ければ NULL)", "rc": "完了の結果(`BFM_OK` か、エラー完了の負の値)"},
+      "ret": "なし",
+      "pre": "`bfm_async_attach()` 済みであること。",
+      "notes": "* 位置の枠の番号が 0(多重度つきの操作でない)か、枠が仕掛かり中でなければ何もしない。\n* 位置の枠の番号は読んだら 0 に戻す(同じ完了を 2 度入れない)。",
+      "flow": [
+        {"do": "k1 = c->wqe_slot[pc & (SQ_N - 1)]"},
+        {"if": "k1 == 0 ?", "then": [{"return": ""}]},
+        {"do": "c->wqe_slot[pc & (SQ_N - 1)] = 0。k = k1 - 1、s = &c->as[k]"},
+        {"if": "!s->busy ?", "then": [{"return": ""}]},
+        {"if": "rc == BFM_OK かつ s->kind == BFM_AK_READ ?", "then": [
+          {"if": "scat != NULL かつ s->len <= SCAT_MAX(32)?", "then": [
+            {"do": "scat から s->dst へ s->len バイト写す"}
+          ], "else": [
+            {"do": "枠 k の中継バッファ(c->abuf + k x c->abuf_slot)から s->dst へ s->len バイト写す"}
+          ]}
+        ]},
+        {"do": "s->rc = rc、s->busy = 0、c->afree の bit k を立てる、c->ainflight--"},
+        {"if": "rc != BFM_OK ?", "then": [
+          {"if": "c->aerr == 0 ?", "then": [{"do": "c->aerr = rc"}]},
+          {"do": "BFM_LOG で操作の種類・tag・位置・長さ・エラーを表示"}
+        ]}
+      ]
+    },
+    {
+      "func": "overdue",
+      "summary": "仕掛かり中の枠のうち、出した時刻が最も古いものを探し、それが出してから時間切れを過ぎていればその番号を返す。",
+      "args": {"c": "接続", "now": "今の時刻(ns)"},
+      "ret": "時間切れを過ぎた最も古い枠の番号。無ければ -1。",
+      "pre": "特になし。",
+      "notes": "見るのは最も古い 1 個だけ(それが過ぎていなければ、ほかも過ぎていない)。",
+      "flow": [
+        {"do": "k = -1、oldest = now、i = 0"},
+        {"while": "i < c->aqd ?", "body": [
+          {"if": "c->as[i].busy かつ c->as[i].t < oldest ?", "then": [
+            {"do": "oldest = c->as[i].t、k = i"}
+          ]},
+          {"do": "i++"}
+        ]},
+        {"return": "k >= 0 かつ now - oldest > timeout_ns() なら k、そうでなければ -1"}
+      ]
+    },
+    {
+      "func": "fail_timeout",
+      "summary": "時間切れ: 枠 `k` の操作に ACK・応答が無いことを表示し、接続をエラーにする(`BFM_CS_UP` なら `BFM_CS_ERROR` にし、`c->aerr` が 0 なら `BFM_E_TIMEOUT` を覚える)。",
+      "args": {"c": "接続", "k": "時間切れになった枠の番号", "why": "表示する理由"},
+      "ret": "`BFM_E_TIMEOUT`(常に)。",
+      "pre": "特になし。",
+      "notes": "接続は張り直す(`bfm_reconnect()`)まで使えない。枠は仕掛かり中のまま残る(張り直しの `bfm_async_attach()` で空く)。",
+      "flow": [
+        {"do": "BFM_LOG で理由・時間切れ・操作の種類・tag・位置・長さを表示"},
+        {"if": "c->state == BFM_CS_UP ?", "then": [{"do": "c->state = BFM_CS_ERROR"}]},
+        {"if": "c->aerr == 0 ?", "then": [{"do": "c->aerr = BFM_E_TIMEOUT"}]},
+        {"return": "BFM_E_TIMEOUT"}
+      ]
+    },
+    {
+      "func": "get_slot",
+      "summary": "空いている枠を 1 つ取る(SQ にも `bbs` 個の WQEBB の空きがあること)。空いていれば待たずに返す。空いていなければ `bfm_ops_reap_all()` で完了を刈り取って空くまで回って待つ。仕掛かり中のどれかが出してから時間切れを過ぎたら、または待ち始めてから時間切れを過ぎたら、接続をエラーにして `BFM_E_TIMEOUT` を返す。",
+      "args": {"c": "接続", "bbs": "出す WQE の大きさ(WQEBB の数)", "slot": "取った枠の番号を入れる先"},
+      "ret": "`BFM_OK`: 取れた(`*slot` に番号)。`BFM_E_TIMEOUT`: 時間切れ。`BFM_E_STATE`: 接続が使えなくなった。そのほか負: `c->aerr`(非同期の操作で先に見たエラー)。",
+      "pre": "`bfm_async_attach()` 済みであること。",
+      "notes": "* 取るのは空きのうち番号の最も小さい枠。\n* 時刻は回る 256 回に 1 回だけ見る。待ち始めの時刻(`t0`)は最初に時刻を見たときのもの。\n* 枠・SQ が空かないままの時間切れでも、`fail_timeout()` と同じく接続を `BFM_CS_ERROR` にし `c->aerr` を覚える。",
+      "flow": [
+        {"do": "t0 = 0、spins = 0"},
+        {"loop": "枠と SQ の空きを待つ", "body": [
+          {"if": "c->afree != 0 かつ (sq_pc + bbs) - sq_done <= SQ_N ?", "then": [
+            {"do": "*slot = c->afree の最も下の立っているビットの番号"},
+            {"return": "BFM_OK"}
+          ]},
+          {"call": "bfm_ops_reap_all(c) を呼ぶ(戻り値は見ない)"},
+          {"if": "c->aerr != 0 ?", "then": [{"return": "c->aerr"}]},
+          {"if": "c->state != BFM_CS_UP ?", "then": [{"return": "BFM_E_STATE"}]},
+          {"if": "c->afree != 0 かつ (sq_pc + bbs) - sq_done <= SQ_N ?", "then": [{"continue": true}]},
+          {"if": "++spins が 256 の倍数でない?", "then": [
+            {"call": "bfm_cpu_relax() を呼ぶ"},
+            {"continue": true}
+          ]},
+          {"call": "now = bfm_port_time_ns() を呼ぶ"},
+          {"if": "t0 == 0 ?", "then": [{"do": "t0 = now"}]},
+          {"call": "k = overdue(c, now) を呼ぶ"},
+          {"if": "k >= 0 ?", "then": [
+            {"call": "fail_timeout(c, k, \"枠の空きを待つ間に時間切れ\") を呼ぶ"},
+            {"return": "fail_timeout() の値(BFM_E_TIMEOUT)"}
+          ]},
+          {"if": "now - t0 > timeout_ns() ?", "then": [
+            {"do": "BFM_LOG で枠・SQ が空かないことを表示"},
+            {"if": "c->state == BFM_CS_UP ?", "then": [{"do": "c->state = BFM_CS_ERROR"}]},
+            {"if": "c->aerr == 0 ?", "then": [{"do": "c->aerr = BFM_E_TIMEOUT"}]},
+            {"return": "BFM_E_TIMEOUT"}
+          ]}
+        ]}
+      ]
+    },
+    {
+      "func": "issue",
+      "summary": "非同期の操作を 1 個出す。範囲と先のエラーを確かめ、write で `len` が `bfm_inline_max()` 以下ならデータを WQE に埋め込み(`bfm_ops_build_write_inline()`)、そうでなければ枠を取って、write なら `src` を枠の中継バッファへ写してから、read なら枠の中継バッファを着地点にして `bfm_ops_build_rdma()` で組む。`bfm_ops_post()` で出した後、枠に通し番号・種類・`dst`・長さ・位置・出した時刻を入れて仕掛かり中にし、出した位置に枠の番号 + 1 を書く(`c->wqe_slot[]`)。`tag` が NULL でなければ tag を返す。",
+      "args": {"c": "接続", "kind": "`BFM_AK_WRITE` / `BFM_AK_WRITE_NOACK` / `BFM_AK_READ`", "off": "相手の公開メモリの先頭からのオフセット", "src": "write で書くデータ(read では NULL)", "dst": "read で読んだデータを置く先(write では NULL)", "len": "長さ(バイト)", "tag": "tag を入れる先(NULL なら返さない)"},
+      "ret": "`BFM_OK`: 出した。`BFM_E_STATE` / `BFM_E_PARAM`: `bfm_ops_check_range()` の失敗。`BFM_E_PARAM`: inline でない操作で `len` が枠の中継バッファ(`c->abuf_slot`)を超える。そのほか負: `c->aerr`(先に見たエラー)、`get_slot()` / `bfm_ops_post()` の戻り値。",
+      "pre": "`bfm_async_attach()` 済みであること。",
+      "notes": "* write は `src` を WQE か枠の中継バッファへ写してから出すので、戻った後に `src` を変えてよい。read は刈り取ったときに `dst` へ写す。\n* inline の write の大きさ(WQEBB の数)は (2 + (4 + len + 15) / 16 + 3) / 4。inline でないものは 1。\n* 全部の WQE に完了通知を求める(`bfm_ops_build_write_inline()` も `bfm_ops_build_rdma()` も通知あり)。\n* 枠の番号を位置に書くのは `bfm_ops_post()` から戻った後(`post()` はその位置を 0 にする)。完了を刈り取るのは同じ接続を使うこの CPU だけなので、その間に刈り取られることはない。\n* 通し番号は 26 ビットで回る。回って 0 になったら飛ばす(0 は使わない)。張り直しをまたいで続ける。",
+      "flow": [
+        {"call": "rc = bfm_ops_check_range(c, off, len) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"if": "c->aerr != 0 ?", "then": [{"return": "c->aerr"}]},
+        {"do": "inl = (kind != BFM_AK_READ かつ len <= bfm_inline_max())"},
+        {"if": "!inl かつ len > c->abuf_slot ?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"do": "bbs = inl なら (2 + (4 + len + 15) / 16 + 3) / 4、そうでなければ 1"},
+        {"call": "rc = get_slot(c, bbs, &k) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"do": "buf = c->abuf + k x c->abuf_slot。pc = c->qp.sq_pc"},
+        {"if": "inl ?", "then": [
+          {"call": "bfm_ops_build_write_inline(c, w, off, src, len) を呼ぶ"}
+        ], "else": [
+          {"if": "kind != BFM_AK_READ ?", "then": [{"do": "buf へ src から len バイト写す"}]},
+          {"call": "bfm_ops_build_rdma(c, w, kind == BFM_AK_READ, off, c->dev->lkey, bfm_dma_addr(buf), len, 0) を呼ぶ"}
+        ]},
+        {"call": "rc = bfm_ops_post(c, w, bbs) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"do": "s = &c->as[k]。s->seq = c->aseq++ & SEQ_MASK"},
+        {"if": "s->seq == 0 ?", "then": [{"do": "s->seq = c->aseq++ & SEQ_MASK(26 ビットで回ったとき、0 を飛ばす)"}]},
+        {"do": "s->busy = 1、s->kind = kind、s->rc = BFM_INPROGRESS、s->dst = dst、s->len = len、s->off = off"},
+        {"call": "s->t = bfm_port_time_ns() を呼ぶ"},
+        {"do": "c->wqe_slot[pc & (SQ_N - 1)] = k + 1。c->afree の bit k を落とす。c->ainflight++"},
+        {"if": "tag != NULL ?", "then": [{"do": "*tag = (s->seq << 6) OR k"}]},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "bfm_write_async",
+      "summary": "相手の公開メモリ + `off` へ `len` バイト書く write を、完了を待たずに出す。`ack` が `BFM_ACK` なら ACK を確かめる write として出して `*tag` を返し、`BFM_NOACK` なら ACK を確かめない write として出す(tag は返さない)。",
+      "args": {"c": "書く接続", "off": "相手の公開メモリの先頭からのオフセット", "src": "書くデータ", "len": "長さ(バイト。`bfm_inline_max()` を超えるなら `g_bfm_async_buf_size` まで)", "ack": "`BFM_ACK`(0 以外): ACK を確かめる(tag を返す)。`BFM_NOACK`(0): 確かめない", "tag": "tag を入れる先(`BFM_ACK` なら NULL にしない。`BFM_NOACK` なら見ない)"},
+      "ret": "`BFM_OK`: 出した。`BFM_E_PARAM`: `c` か `src` が NULL、または `BFM_ACK` で `tag` が NULL。そのほか `issue()` の戻り値(`BFM_E_STATE`・`BFM_E_PARAM`・`BFM_E_TIMEOUT`・エラー完了の値)。",
+      "pre": "`bfm_conn()` で得た接続であること。同じ接続を複数のタスクから同時に使わないこと。",
+      "notes": "* 戻った後に `src` を変えてよい。\n* ACK を確かめない write の失敗・時間切れは、`bfm_check()` を定期的に呼んで知ること(新しい write を出さない間も)。\n* ACK を確かめない write も完了通知を求める(枠を空けるため)。",
+      "flow": [
+        {"if": "c == NULL、src == NULL、または (ack かつ tag == NULL)?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"call": "issue(c, ack ? BFM_AK_WRITE : BFM_AK_WRITE_NOACK, off, src, NULL, len, ack ? tag : NULL) を呼ぶ"},
+        {"return": "issue() の値"}
+      ]
+    },
+    {
+      "func": "bfm_read_async",
+      "summary": "相手の公開メモリ + `off` から `len` バイト読む read を、完了を待たずに出して `*tag` を返す。応答は、完了を刈り取ったときに `dst` へ写す。",
+      "args": {"c": "読む接続", "off": "相手の公開メモリの先頭からのオフセット", "dst": "読んだデータを置く先", "len": "長さ(バイト。`g_bfm_async_buf_size` まで)", "tag": "tag を入れる先(NULL にしない)"},
+      "ret": "`BFM_OK`: 出した。`BFM_E_PARAM`: `c`・`dst`・`tag` のどれかが NULL。そのほか `issue()` の戻り値。",
+      "pre": "`bfm_write_async()` と同じ。",
+      "notes": "`bfm_test()` が `BFM_OK` を返すまで、`dst` を変えたり手放したりしないこと。",
+      "flow": [
+        {"if": "c == NULL、dst == NULL、または tag == NULL ?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"call": "issue(c, BFM_AK_READ, off, NULL, dst, len, tag) を呼ぶ"},
+        {"return": "issue() の値"}
+      ]
+    },
+    {
+      "func": "bfm_test",
+      "summary": "tag の操作が済んだかを確かめる(待たない)。先に `bfm_ops_reap_all()` で来ている完了を刈り取り、tag の枠を見る。張り直しの前に出した操作(通し番号が `c->abase` より前)なら `BFM_E_STATE`。枠の通し番号が tag のものと違えば(枠が次の操作に使われた)済んで成功、仕掛かり中でなければ枠に残した結果。仕掛かり中で、接続が使えなければそのエラー、出してから時間切れを過ぎていれば接続をエラーにして `BFM_E_TIMEOUT` を返す。",
+      "args": {"c": "接続", "tag": "`bfm_write_async()`(`BFM_ACK`)/ `bfm_read_async()` が返した tag"},
+      "ret": "`BFM_OK`: 済んだ(write は相手が受け取った。read は `dst` に入った)。`BFM_INPROGRESS`: まだ。`BFM_E_PARAM`: `c` が NULL か、tag の枠の番号が枠の数以上か、通し番号が 0。`BFM_E_STATE`: 張り直しの前に出した操作(結果は分からない)。`BFM_E_TIMEOUT`: 出してから時間切れを過ぎた。そのほか負: 枠に残したエラー完了の値、または接続が使えない(`c->aerr`、それが 0 なら `BFM_E_STATE`)。",
+      "pre": "`bfm_write_async()` と同じ。",
+      "notes": "* 完了は出した順に来るので、ある tag が済めば、それより前に出したものも済んでいる。\n* 刈り取りの戻り値(エラー完了)は見ない。tag の操作の結果は枠で見る。\n* 通し番号は 26 ビットで回るので、`c->abase` との差(26 ビットで回した値)が半分を超えるものを「前」とみなす。\n* 接続が別の操作のエラーで使えなくなっていれば、時間切れより先にそのエラーを返す(時間切れの表示は出さない)。",
+      "flow": [
+        {"if": "c == NULL、または tag の下位 6 ビット >= c->aqd ?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"call": "bfm_ops_reap_all(c) を呼ぶ(戻り値は見ない)"},
+        {"do": "k = tag の下位 6 ビット、seq = tag >> 6、s = &c->as[k]"},
+        {"if": "seq == 0 ?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"if": "((seq - c->abase) & SEQ_MASK) > SEQ_MASK / 2 ?", "then": [{"return": "BFM_E_STATE(張り直しの前に出した操作)"}]},
+        {"if": "s->seq != seq ?", "then": [{"return": "BFM_OK(済んで、枠は次の操作に使われた)"}]},
+        {"if": "!s->busy ?", "then": [{"return": "s->rc"}]},
+        {"if": "c->state != BFM_CS_UP ?", "then": [{"return": "c->aerr != 0 なら c->aerr、そうでなければ BFM_E_STATE"}]},
+        {"if": "bfm_port_time_ns() - s->t > timeout_ns() ?", "then": [
+          {"call": "fail_timeout(c, k, \"時間切れ\") を呼ぶ"},
+          {"return": "fail_timeout() の値(BFM_E_TIMEOUT)"}
+        ]},
+        {"return": "BFM_INPROGRESS"}
+      ]
+    },
+    {
+      "func": "bfm_wait",
+      "summary": "tag の操作が済むまで待つ。`bfm_test()` が `BFM_INPROGRESS` 以外を返すまで、`bfm_cpu_relax()` を挟んで呼び続ける。",
+      "args": {"c": "接続", "tag": "確かめる tag"},
+      "ret": "`bfm_test()` の `BFM_INPROGRESS` 以外の戻り値。",
+      "pre": "`bfm_write_async()` と同じ。",
+      "notes": "待つ上限は `bfm_test()` の時間切れ(出してから `g_bfm_async_timeout_ms`)。",
+      "flow": [
+        {"while": "(rc = bfm_test(c, tag)) == BFM_INPROGRESS ?", "body": [
+          {"call": "bfm_cpu_relax() を呼ぶ"}
+        ]},
+        {"return": "rc"}
+      ]
+    },
+    {
+      "func": "bfm_check",
+      "summary": "完了を刈り取り、仕掛かり中の数を `*inflight` に返す。非同期の操作で先にエラーを見ていればそれを、出してから時間切れを過ぎても ACK・応答の無い操作があれば(表示して接続をエラーにし)`BFM_E_TIMEOUT` を返す。",
+      "args": {"c": "接続", "inflight": "仕掛かり中の数を入れる先(NULL なら返さない)"},
+      "ret": "`BFM_OK`: エラーも時間切れも無い。`BFM_E_PARAM`: `c` が NULL。`BFM_E_TIMEOUT`: 時間切れの操作がある。`BFM_E_STATE`: 接続が使えない。そのほか負: `c->aerr`(エラー完了の値。ACK を確かめない write の失敗もここで分かる)。",
+      "pre": "`bfm_write_async()` と同じ。",
+      "notes": "ACK を確かめない write を出す側は、新しい write を出さない間もこれを定期的に呼ぶこと。",
+      "flow": [
+        {"if": "c == NULL ?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"call": "bfm_ops_reap_all(c) を呼ぶ(戻り値は見ない)"},
+        {"if": "inflight != NULL ?", "then": [{"do": "*inflight = c->ainflight"}]},
+        {"if": "c->aerr != 0 ?", "then": [{"return": "c->aerr"}]},
+        {"call": "k = overdue(c, bfm_port_time_ns()) を呼ぶ"},
+        {"if": "k >= 0 ?", "then": [
+          {"call": "fail_timeout(c, k, \"時間切れ\") を呼ぶ"},
+          {"return": "fail_timeout() の値(BFM_E_TIMEOUT)"}
+        ]},
+        {"if": "c->state != BFM_CS_UP ?", "then": [{"return": "BFM_E_STATE"}]},
+        {"return": "BFM_OK"}
+      ]
+    }
+  ]
+}

@@ -89,6 +89,7 @@ static int poll_one(struct bfm_conn *c)
                 bfm_rd32be(cqe + 16), bfm_rd32be(cqe + 20), bfm_rd32be(cqe + 24), bfm_rd32be(cqe + 28));
         return 2;
     }
+    const uint32_t pc = c->sq_done + ((uint32_t)(uint16_t)(cnt - (uint16_t)c->sq_done));
     if (opcode == MLX5_CQE_REQ_ERR || opcode == MLX5_CQE_RESP_ERR) {
         c->last_synd = cqe[55];
         c->last_vsynd = cqe[54];
@@ -97,11 +98,13 @@ static int poll_one(struct bfm_conn *c)
                     c->index, c->last_synd, c->last_vsynd, syndrome_str(c->last_synd));
             c->state = BFM_CS_ERROR;
         }
+        /* 非同期の操作なら、その枠にエラーを残す(後ろの WQE は WR_FLUSH のエラー完了で来る)*/
+        if (c->wqe_slot[pc & (SQ_N - 1u)] != 0u) bfm_async_done(c, pc, NULL, map_syndrome(c->last_synd));
         return map_syndrome(c->last_synd);
     }
-    const uint32_t pc = c->sq_done + ((uint32_t)(uint16_t)(cnt - (uint16_t)c->sq_done));
     c->sq_done = pc + c->wqe_bbs[pc & (SQ_N - 1u)];
     c->last_scat = (op_own & 0x04u) ? cqe : NULL;
+    if (c->wqe_slot[pc & (SQ_N - 1u)] != 0u) bfm_async_done(c, pc, c->last_scat, BFM_OK);
     return 1;
 }
 
@@ -143,6 +146,7 @@ static int post(struct bfm_conn *c, const uint64_t *w, uint32_t bbs)
         for (unsigned k = 0; k < 8u; k++) dst[k] = w[b * 8u + k];
     }
     c->wqe_bbs[pc & (SQ_N - 1u)] = (uint8_t)bbs;
+    c->wqe_slot[pc & (SQ_N - 1u)] = 0u;           /* 非同期の操作なら、出した後に呼び出し側が入れる */
     c->qp.sq_pc = pc + bbs;
 
     bfm_dma_wmb();
@@ -229,6 +233,7 @@ int bfm_ops_attach(struct bfm_conn *c)
     c->last_synd = c->last_vsynd = 0;
     c->last_scat = NULL;
     bfm_dif_attach(c);
+    bfm_async_attach(c);
     return BFM_OK;
 }
 
@@ -303,6 +308,23 @@ int bfm_ops_reap(struct bfm_conn *c)
     while ((r = poll_one(c)) > 0) {
     }
     return (r < 0) ? r : BFM_OK;
+}
+
+/* 来ている CQE を全部拾う(待たない。エラー完了の後も、来ているものは拾い切る)。
+ * 戻り値: BFM_OK か、最初に見たエラー完了の負の値。 */
+int bfm_ops_reap_all(struct bfm_conn *c)
+{
+    int r, first = BFM_OK;
+    while ((r = poll_one(c)) != 0) {
+        if (r < 0 && first == BFM_OK) first = r;
+    }
+    return first;
+}
+
+/* inline の write を組む(完了通知あり)。WQEBB の数を返す(len <= bfm_inline_max())。 */
+uint32_t bfm_ops_build_write_inline(struct bfm_conn *c, uint64_t *w, uint64_t off, const void *src, uint32_t len)
+{
+    return build_write_inline(c, w, off, src, len, 1);
 }
 
 /* 制御セグメントを組む(fm_ce_se = fence・通知・solicited、imm = UMR なら MKey)。 */

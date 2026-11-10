@@ -134,6 +134,47 @@ int bfm_cas32(bfm_conn_t *c, uint64_t off, uint32_t expect, uint32_t desired, ui
 /* 4 バイトの fetch-and-add。off は 4 の倍数。*old に足す前の値が入る。 */
 int bfm_faa32(bfm_conn_t *c, uint64_t off, uint32_t add, uint32_t *old);
 
+/* ---- 多重度つきの write / read(完了を待たずに出しておき、後で確かめる)----
+ *
+ * 1 本の接続で、完了を待たずに最大 g_bfm_qdepth(既定 64)個まで出しておける。それを超えて出そうと
+ * すると、ACK・read の応答を刈り取って資源(枠)を空けてから出す。空いていれば待たずに出す。
+ * 空きを待つのは、仕掛かり中の操作を出してから g_bfm_async_timeout_ms(既定 100ms)まで
+ * (超えたら BFM_E_TIMEOUT。接続はエラーになり、bfm_reconnect() で張り直す)。
+ * 1 回の長さは、inline に収まる write(bfm_inline_max())を除き g_bfm_async_buf_size(既定 4KiB)まで。
+ *
+ *   ACK を確かめる write と read は tag を返す。bfm_test(c, tag) で 1 個ずつ済んだかを確かめる。
+ *   ACK を確かめない write は tag を返さない。新しい write を出さない間も bfm_check(c, …) を定期的に
+ *   呼ぶこと(仕掛かり中の ACK を刈り取り、出してから時間切れを過ぎても ACK の無いものがあれば
+ *   BFM_E_TIMEOUT、エラー完了があればそのエラーを返す)。
+ * どの関数で完了を刈り取っても同じ(bfm_test()・bfm_check()・次の bfm_*_async()・普通の bfm_write() など)。
+ * 完了は出した順に来るので、ある tag が済めば、それより前に出したものも済んでいる。 */
+typedef uint32_t bfm_tag_t;
+
+#define BFM_NOACK 0    /* bfm_write_async(): ACK を確かめない(tag なし。bfm_check() で見る)*/
+#define BFM_ACK   1    /* bfm_write_async(): ACK を確かめる(tag を返す)*/
+
+/* 相手の公開メモリ + off へ書く。完了を待たずに戻る(src は WQE か枠の中継バッファへ写すので、
+ * 戻った後に変えてよい)。ack = BFM_ACK なら *tag を返す(tag は NULL にしない)。
+ * BFM_NOACK なら tag は見ない(NULL でよい)。
+ * 戻り値: BFM_OK = 出した。BFM_E_PARAM・BFM_E_STATE・BFM_E_TIMEOUT(枠が空かない)・エラー完了の値。 */
+int bfm_write_async(bfm_conn_t *c, uint64_t off, const void *src, uint32_t len, int ack, bfm_tag_t *tag);
+
+/* 相手の公開メモリ + off から読む。完了を待たずに戻り、*tag を返す。応答は、完了を刈り取ったときに
+ * dst へ写す(bfm_test() が BFM_OK を返すまで、dst を変えたり手放したりしないこと)。 */
+int bfm_read_async(bfm_conn_t *c, uint64_t off, void *dst, uint32_t len, bfm_tag_t *tag);
+
+/* tag の操作が済んだか(待たない)。BFM_OK = 済んだ(write は相手が受け取った。read は dst に入った)。
+ * BFM_INPROGRESS = まだ。負 = 失敗(出してから時間切れを過ぎた BFM_E_TIMEOUT、エラー完了の値)。 */
+int bfm_test(bfm_conn_t *c, bfm_tag_t tag);
+
+/* tag の操作が済むまで待つ(戻り値は bfm_test() の BFM_INPROGRESS 以外。上限は時間切れ)。 */
+int bfm_wait(bfm_conn_t *c, bfm_tag_t tag);
+
+/* 完了を刈り取り、仕掛かり中の数を *inflight に返す(NULL でもよい)。
+ * 戻り値: BFM_OK。BFM_E_TIMEOUT = 出してから時間切れを過ぎても ACK・応答の無い操作がある(表示して
+ * 接続をエラーにする)。そのほかの負 = エラー完了があった(ACK を確かめない write の失敗もここで分かる)。 */
+int bfm_check(bfm_conn_t *c, uint32_t *inflight);
+
 /* ---- T10-DIF(512 + 8 バイトのブロック)----
  *
  * 1 ブロック = データ 512 バイト + 保護情報(PI)8 バイト。PI はデータの直後に置く(520 バイトおき)。

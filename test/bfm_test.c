@@ -86,14 +86,16 @@ static void usage(void)
 {
     printf("使い方: bfmem_test [-d BDF] [-i 自分のIP] [-D ポート1のBDF] [-I ポート1の自分のIP] [-c 接続数/ポート]\n"
            "                   [-t スレッド数] [-p 接続の番号] [-m 経路MTU 1-5] [-M ポートのMTU] [-n 回数]\n"
-           "                   [-B] [-S] [-C] [-x] [-q] [-P] [-v]\n"
+           "                   [-Q 多重度 1-64] [-B] [-S] [-C] [-x] [-q] [-P] [-v]\n"
            "                   run <相手のIP> [ポート1の相手のIP] | serve <相手のIP> [ポート1の相手のIP] |\n"
            "                   bench <相手のIP> | info <相手のIP>\n"
            "  両方のノードで同じものを動かす。IP の小さいほうが掛け側になる(自動)。相手の MAC も自動で取る\n"
            "  run: -t 本(既定 4)のスレッドが bfm_run() を同時に呼んで全部の接続(-c 本 x ポート。既定 16)を張り、\n"
            "       両方向に一通りの操作を確かめ、全部の接続で同時に write / read / atomic / T10-DIF を確かめ、\n"
            "       8 バイトの write / read / FAA を -n 回(既定 100000)ずつ、64KiB の write / read を -n/50 回ずつ\n"
-           "       同時に打って合計の速さを出す(区間ごとに相手と足並みをそろえるので、相手も同時に打つ = 両方向)\n"
+           "       同時に打って合計の速さを出す(区間ごとに相手と足並みをそろえるので、相手も同時に打つ = 両方向)。\n"
+           "       続けて多重度つき(bfm_*_async。-Q 個まで出しておく)の 8 バイトの write(ACK なし / あり)・read を\n"
+           "       -n 回ずつ、4KiB の write / read を -n/10 回ずつ打つ\n"
            "  bench: write / read を 4B〜256KiB、多重度 1・4・8・16 で -n 回(既定 100000)ずつ流し、\n"
            "         IOPS・MB/s・平均遅延を出す(接続 1 本。相手は serve -c 1)\n"
            "  -B  BlueFlame を使わない(8 バイトのドアベルだけ。比べるため)\n"
@@ -313,6 +315,7 @@ static void lat(bfm_conn_t *c, const char *name, op_fn fn, uint32_t n)
 }
 
 static void run_dif(bfm_conn_t *c, uint32_t iters);
+static void run_async(bfm_conn_t *c);
 
 /* 接続 c で相手の公開メモリへ一通りの操作をして確かめる(相手も同時に、こちらへ同じことをしている)。 */
 static int run_checks(bfm_conn_t *c, uint32_t iters)
@@ -464,8 +467,105 @@ static int run_checks(bfm_conn_t *c, uint32_t iters)
     }
     /* [8] T10-DIF(データ領域とは別の所を使う)。 */
     if (!g_stop) run_dif(c, iters);
+    /* [9] 多重度つきの write / read(ASYNC_OFF から。データ領域とは別の所を使う)。 */
+    if (!g_stop) run_async(c);
     printf("run: 結果 %s(NG %d 件)\n", g_ng ? "NG" : "OK", g_ng);
     return g_ng ? 1 : 0;
+}
+
+/* ---------------------------------------------------------------------
+ * [9] 多重度つきの write / read(bfm_write_async / bfm_read_async / bfm_test / bfm_check)
+ *
+ * 相手の公開メモリの ASYNC_OFF から ASYNC_N x 4KiB を使う(T10-DIF の領域と足並みの語の間)。
+ * 相手の中身を手元でも持っておき(g_amodel)、読み戻して突き合わせる。
+ * ------------------------------------------------------------------- */
+
+#define ASYNC_OFF  (2u * 1024u * 1024u)
+#define ASYNC_N    200u                    /* 多重度の上限(64)より多く出して、枠の刈り取りを通す */
+#define ASYNC_SPAN 4096u
+
+static uint8_t g_amodel[ASYNC_N * ASYNC_SPAN];   /* 相手の ASYNC_OFF からにあるはずの中身 */
+static uint8_t g_aout[ASYNC_N * ASYNC_SPAN];     /* 読んだ先 */
+
+static void run_async(bfm_conn_t *c)
+{
+    static bfm_tag_t tags[ASYNC_N], rtags[ASYNC_N];
+    const uint32_t span = (g_bfm_async_buf_size < ASYNC_SPAN) ? g_bfm_async_buf_size : ASYNC_SPAN;
+    uint32_t seed = 777u;
+    int ok = 1, rc;
+    printf("run: [9] 多重度 %u、枠の中継バッファ %u バイト、時間切れ %u ms\n", g_bfm_qdepth, g_bfm_async_buf_size,
+           g_bfm_async_timeout_ms);
+    /* ACK を確かめる write を 200 個出してから(64 個を超えると、刈り取って枠を空けながら出す)、tag ごとに確かめる */
+    for (uint32_t k = 0; k < ASYNC_N && ok; k++) {
+        seed = seed * 1103515245u + 12345u;
+        const uint32_t len = (k % 3u == 0u) ? 1u + k % bfm_inline_max() : 1u + (seed >> 8) % span;
+        uint8_t *m = &g_amodel[k * ASYNC_SPAN];
+        for (uint32_t j = 0; j < len; j++) m[j] = (uint8_t)((seed >> (j & 7u)) ^ j ^ k);
+        if ((rc = bfm_write_async(c, ASYNC_OFF + k * ASYNC_SPAN, m, len, BFM_ACK, &tags[k])) != BFM_OK) {
+            printf("run: [9] write_async: %s\n", bfm_strerror(rc));
+            ok = 0;
+        }
+    }
+    for (uint32_t k = 0; k < ASYNC_N && ok; k++)
+        if (bfm_wait(c, tags[k]) != BFM_OK) ok = 0;
+    check("[9] ACK を確かめる write 200 個(多重度を超えて出す)を tag ごとに確かめる", ok);
+    /* read を 200 個出してから、tag ごとに確かめ、書いた中身と突き合わせる */
+    memset(g_aout, 0xee, sizeof(g_aout));
+    for (uint32_t k = 0; k < ASYNC_N && ok; k++)
+        if (bfm_read_async(c, ASYNC_OFF + k * ASYNC_SPAN, &g_aout[k * ASYNC_SPAN], span, &rtags[k]) != BFM_OK) ok = 0;
+    for (uint32_t k = 0; k < ASYNC_N && ok; k++)
+        if (bfm_wait(c, rtags[k]) != BFM_OK) ok = 0;
+    for (uint32_t k = 0; k < ASYNC_N && ok; k++)
+        if (memcmp(&g_aout[k * ASYNC_SPAN], &g_amodel[k * ASYNC_SPAN], span) != 0) ok = 0;
+    check("[9] read 200 個を tag ごとに確かめ、書いた中身と一致", ok);
+    check("[9] 枠が次の操作に使われた古い tag は BFM_OK", bfm_test(c, tags[0]) == BFM_OK);
+    /* write の直後に同じ所を read する(相手の NIC は順に処理するので、read はその write の中身を読む)。
+     * 8 バイトの read は応答が CQE に入る(scatter to CQE)。 */
+    for (uint32_t k = 0; k < 100u && ok; k++) {
+        bfm_tag_t tw, tr;
+        uint64_t v = 0x1111111111111111ull * (k + 1u) + k, r = 0;
+        const uint64_t off = ASYNC_OFF + (k % 50u) * ASYNC_SPAN + 512u;
+        if (bfm_write_async(c, off, &v, 8, BFM_ACK, &tw) != BFM_OK ||
+            bfm_read_async(c, off, &r, 8, &tr) != BFM_OK || bfm_wait(c, tr) != BFM_OK ||
+            bfm_test(c, tw) != BFM_OK || r != v)
+            ok = 0;
+        memcpy(&g_amodel[(k % 50u) * ASYNC_SPAN + 512u], &v, 8);
+    }
+    check("[9] write の直後の read はその write の中身を読む(両方の tag が BFM_OK)", ok);
+    /* ACK を確かめない write を 2,000 個。新しく出さなくなった後、bfm_check() で仕掛かりが 0 になるのを見る */
+    for (uint32_t k = 0; k < 2000u && ok; k++) {
+        seed = seed * 1103515245u + 12345u;
+        const uint32_t len = 1u + k % 64u;
+        const uint32_t at = (seed >> 4) % (ASYNC_N * ASYNC_SPAN - 64u);
+        for (uint32_t j = 0; j < len; j++) g_amodel[at + j] = (uint8_t)(seed + j * 5u);
+        if (bfm_write_async(c, ASYNC_OFF + at, &g_amodel[at], len, BFM_NOACK, NULL) != BFM_OK) ok = 0;
+    }
+    uint32_t inflight = 1;
+    const uint64_t t0 = now_ns();
+    while (ok && inflight != 0 && now_ns() - t0 < 1000000000ull)
+        if (bfm_check(c, &inflight) != BFM_OK) ok = 0;
+    check("[9] ACK を確かめない write 2,000 個の後、bfm_check() で仕掛かりが 0 になる", ok && inflight == 0);
+    rc = bfm_read(c, ASYNC_OFF, g_aout, ASYNC_N * ASYNC_SPAN);
+    check("[9] その後に読み戻すと中身が一致", ok && rc == BFM_OK && memcmp(g_aout, g_amodel, sizeof(g_amodel)) == 0);
+    bfm_tag_t t;
+    check("[9] 枠の中継バッファより長い非同期の read は BFM_E_PARAM",
+          bfm_read_async(c, ASYNC_OFF, g_aout, g_bfm_async_buf_size + 1u, &t) == BFM_E_PARAM);
+}
+
+/* ポート port の接続 i を張り直して、使えるまで待つ(相手も張り直す。30 秒まで)。 */
+static bfm_conn_t *reconnect_wait(unsigned port, unsigned i)
+{
+    for (int k = 0; k < 100 && bfm_conn_state(port, i) == BFM_ST_UP && bfm_conn(port, i) == NULL; k++) {
+        (void)bfm_run();
+        idle();
+    }
+    if (bfm_reconnect(port, i) != BFM_OK) return NULL;
+    const uint64_t t0 = now_ns();
+    while (bfm_conn(port, i) == NULL && !g_stop && now_ns() - t0 < 30ull * 1000000000ull) {
+        (void)bfm_run();
+        idle();
+    }
+    return bfm_conn(port, i);
 }
 
 /* [7] 範囲の外。相手の NIC が REMOTE_ACCESS で断ること(相手の MKey が範囲を持っていること)。
@@ -495,6 +595,40 @@ static void run_oob(bfm_conn_t *c, unsigned port, unsigned i)
     uint64_t v = 0;
     check("[7] bfm_reconnect() で張り直して、読める", rc == BFM_OK && c2 != NULL &&
           bfm_read(c2, ATOM_OFF + 8u, &v, 8) == BFM_OK);
+    if (c2 == NULL) return;
+
+    /* 張り直しの前の tag(成功した ACK あり write のもの)。張り直した後は BFM_E_STATE(結果は分からない)になる */
+    bfm_tag_t old_tag = 0;
+    const int old_ok = bfm_write_async(c2, ATOM_OFF + 64u, &v, 8, BFM_ACK, &old_tag) == BFM_OK &&
+                       bfm_wait(c2, old_tag) == BFM_OK;
+
+    /* ACK を確かめない write の失敗は、bfm_check() で分かる */
+    ci = (struct bfm_conn *)c2;
+    ci->rlen = real + 4096u;
+    rc = bfm_write_async(c2, real, &v, 8, BFM_NOACK, NULL);
+    ci->rlen = real;
+    const uint64_t t1 = now_ns();
+    while (rc == BFM_OK && now_ns() - t1 < 1000000000ull) rc = bfm_check(c2, NULL);
+    check("[7] 公開メモリの外への ACK を確かめない write の失敗を bfm_check() が返す(REMOTE_ACCESS)", rc == BFM_E_REMOTE);
+    bfm_conn_t *c3 = reconnect_wait(port, i);
+    check("[7] 張り直した", c3 != NULL);
+    if (c3 == NULL) return;
+    check("[7] 張り直しの前に出した操作の tag は、張り直した後は BFM_E_STATE",
+          old_ok && bfm_test(c3, old_tag) == BFM_E_STATE);
+
+    /* 時間切れ: 時間切れを 0ms にして、ACK が返る前に bfm_check() すると BFM_E_TIMEOUT になる */
+    const uint32_t save = g_bfm_async_timeout_ms;
+    g_bfm_async_timeout_ms = 0;
+    rc = BFM_OK;
+    for (int k = 0; k < 100 && rc == BFM_OK; k++) {
+        rc = bfm_write_async(c3, ATOM_OFF + 64u, &v, 8, BFM_NOACK, NULL);
+        if (rc == BFM_OK) rc = bfm_check(c3, NULL);
+    }
+    g_bfm_async_timeout_ms = save;
+    check("[7] 出してから時間切れを過ぎても ACK が無ければ bfm_check() が BFM_E_TIMEOUT(接続はエラー)",
+          rc == BFM_E_TIMEOUT && !bfm_is_up(c3));
+    bfm_conn_t *c4 = reconnect_wait(port, i);
+    check("[7] 時間切れの後も張り直して、読める", c4 != NULL && bfm_read(c4, ATOM_OFF + 8u, &v, 8) == BFM_OK);
 }
 
 /* ---------------------------------------------------------------------
@@ -847,18 +981,53 @@ static void run_dif(bfm_conn_t *c, uint32_t iters)
 #define MT_SPAN    (64u * 1024u)
 #define MT_CNT_OFF (MT_OFF + BFM_MAX_CONN * MT_SPAN)   /* 全スレッドで共有する FAA の語 */
 #define MT_DIF_N   16u
-#define MT_PH      5u                     /* 速さの区間の数(write 8B / read 8B / FAA / write 64KiB / read 64KiB)*/
+#define MT_PH      10u                    /* 速さの区間の数(g_mt_ph)*/
 #define MT_SYNC    10u                    /* 速さの区間ごとに相手と足並みをそろえる段の番号の起点 */
 #define MT_BIG     (64u * 1024u)          /* 帯域を測る write / read の長さ */
 
-static const char *g_mt_names[MT_PH] = {"write 8B", "read 8B", "FAA", "write 64KiB", "read 64KiB"};
+/* 速さの区間。0〜4 は 1 回ずつ完了を待つ関数、5〜9 は多重度つき(bfm_*_async。g_bfm_qdepth 個まで出しておく)。
+ * 回数 = -n / div。bytes が 4KiB 以上の区間は MB/s で、それ以外は Mops で出す。 */
+static const struct {
+    const char *name;                     /* 区間の名前(表示と相手との足並み)*/
+    uint32_t div;                         /* 回数 = -n / div */
+    uint32_t bytes;                       /* 1 回の長さ */
+} g_mt_ph[MT_PH] = {
+    {"write 8B", 1u, 8u}, {"read 8B", 1u, 8u}, {"FAA", 1u, 8u},
+    {"write 64KiB", 50u, MT_BIG}, {"read 64KiB", 50u, MT_BIG},
+    {"aw 8B NOACK", 1u, 8u}, {"aw 8B ACK", 1u, 8u}, {"ar 8B", 1u, 8u},
+    {"aw 4KiB ACK", 10u, 4096u}, {"ar 4KiB", 10u, 4096u},
+};
 static uint8_t g_mt_big[MT_BIG];          /* 帯域を測る write の元(どのスレッドも読むだけ)*/
 static __thread uint8_t mt_rbuf[MT_BIG];  /* 帯域を測る read の着地点(スレッドごと)*/
+static __thread uint64_t mt_r8[64];       /* 多重度つきの 8 バイトの read の着地点(スレッドごと)*/
 
-/* 帯域の区間の回数(8 バイトの区間の 1/50。1 本あたり 100,000 回なら 2,000 回 = 128MiB)。 */
-static uint32_t mt_big_reps(uint32_t n)
+/* 区間 ph の回数(1 本のスレッドあたり)。 */
+static uint32_t mt_reps(unsigned ph, uint32_t n)
 {
-    return (n / 50u) ? n / 50u : 1u;
+    return (n / g_mt_ph[ph].div) ? n / g_mt_ph[ph].div : 1u;
+}
+
+/* 多重度つきの区間を 1 回分打つ(区間 5〜9)。最後に出したものが済むまで待つ(完了は出した順に来るので、
+ * それで全部済んでいる)。ACK を確かめない write は bfm_check() で仕掛かりが 0 になるまで見る。 */
+static int mt_async(bfm_conn_t *c, unsigned ph, uint64_t own, uint64_t big, uint32_t reps)
+{
+    bfm_tag_t tag = 0;
+    int rc = BFM_OK;
+    for (uint32_t k = 0; k < reps && rc == BFM_OK; k++) {
+        uint64_t v = k;
+        switch (ph) {
+        case 5: rc = bfm_write_async(c, own, &v, 8, BFM_NOACK, NULL); break;
+        case 6: rc = bfm_write_async(c, own, &v, 8, BFM_ACK, &tag); break;
+        case 7: rc = bfm_read_async(c, own, &mt_r8[k & 63u], 8, &tag); break;
+        case 8: rc = bfm_write_async(c, big + (k & 15u) * 4096u, g_mt_big, 4096, BFM_ACK, &tag); break;
+        default: rc = bfm_read_async(c, big + (k & 15u) * 4096u, mt_rbuf + (k & 15u) * 4096u, 4096, &tag); break;
+        }
+    }
+    if (rc != BFM_OK) return rc;
+    if (ph != 5) return bfm_wait(c, tag);
+    uint32_t inflight = 1;
+    while (rc == BFM_OK && inflight != 0) rc = bfm_check(c, &inflight);
+    return rc;
 }
 
 static int sync_at(uint64_t stage, const char *what);
@@ -982,16 +1151,21 @@ static void *mt_worker(void *p)
     const uint64_t own = MT_OFF + (uint64_t)a->idx * MT_SPAN + 4096u + 512u;
     const uint64_t big = MT_OFF + (uint64_t)a->idx * MT_SPAN;
     for (unsigned ph = 0; ph < MT_PH; ph++) {
-        if (a->idx == 0 && sync_at(MT_SYNC + ph, g_mt_names[ph]) != BFM_OK) mt_fail(a, "相手と足並みをそろえられない", 0);
+        if (a->idx == 0 && sync_at(MT_SYNC + ph, g_mt_ph[ph].name) != BFM_OK) mt_fail(a, "相手と足並みをそろえられない", 0);
         pthread_barrier_wait(&g_mt_bar);
         const uint64_t t0 = now_ns();
-        const uint32_t reps = (ph < 3) ? g_mt_n : mt_big_reps(g_mt_n);
+        const uint32_t reps = mt_reps(ph, g_mt_n);
+        if (ph >= 5) {
+            if (a->c && !a->ng && (rc = mt_async(a->c, ph, own, big, reps)) != BFM_OK) mt_fail(a, g_mt_ph[ph].name, rc);
+            a->ns[ph] = now_ns() - t0;
+            continue;
+        }
         for (uint32_t k = 0; k < reps && a->c && !a->ng; k++) {
             uint64_t v = k, old;
             rc = (ph == 0) ? bfm_write(a->c, own, &v, 8) : (ph == 1) ? bfm_read(a->c, own, &v, 8)
                : (ph == 2) ? bfm_faa(a->c, own + 8u, 1, &old)
                : (ph == 3) ? bfm_write(a->c, big, g_mt_big, MT_BIG) : bfm_read(a->c, big, mt_rbuf, MT_BIG);
-            if (rc != BFM_OK) mt_fail(a, g_mt_names[ph], rc);
+            if (rc != BFM_OK) mt_fail(a, g_mt_ph[ph].name, rc);
         }
         a->ns[ph] = now_ns() - t0;
     }
@@ -1049,15 +1223,16 @@ static int run_mt(uint32_t n)
                 if (args[t].ns[ph] > worst) worst = args[t].ns[ph];
                 sum += args[t].ns[ph];
             }
-            if (ph >= 3) {
-                const double mb = (double)mt_big_reps(n) * MT_BIG * nthreads / ((double)worst / 1e9) / 1e6;
-                printf("mt: 速さ %-11s スレッド %2u 本: 合計 %.0f MB/s(%.2f Gbit/s)\n", g_mt_names[ph], nthreads, mb,
+            const uint32_t reps = mt_reps(ph, n);
+            if (g_mt_ph[ph].bytes >= 4096u) {
+                const double mb = (double)reps * g_mt_ph[ph].bytes * nthreads / ((double)worst / 1e9) / 1e6;
+                printf("mt: 速さ %-11s スレッド %2u 本: 合計 %.0f MB/s(%.2f Gbit/s)\n", g_mt_ph[ph].name, nthreads, mb,
                        mb * 8.0 / 1000.0);
                 continue;
             }
-            printf("mt: 速さ %-11s スレッド %2u 本: 合計 %.2f Mops(1 本あたり %.2f Mops、1 回 %.0f ns)\n", g_mt_names[ph],
-                   nthreads, (double)n * nthreads / (double)worst * 1000.0,
-                   (double)n / ((double)sum / nthreads) * 1000.0, (double)sum / nthreads / n);
+            printf("mt: 速さ %-11s スレッド %2u 本: 合計 %.2f Mops(1 本あたり %.2f Mops、1 回 %.0f ns)\n", g_mt_ph[ph].name,
+                   nthreads, (double)reps * nthreads / (double)worst * 1000.0,
+                   (double)reps / ((double)sum / nthreads) * 1000.0, (double)sum / nthreads / reps);
         }
     }
     printf("mt: 結果 %s(NG %d 件)\n", g_ng ? "NG" : "OK", g_ng);
@@ -1204,7 +1379,7 @@ static int run_all(uint32_t nthreads, uint32_t iters, int oob)
         ret |= run_mt(iters ? iters : 100000u);
     } else {
         for (unsigned ph = 0; ph < MT_PH && !g_stop; ph++)
-            if (sync_at(MT_SYNC + ph, g_mt_names[ph]) != BFM_OK) return 1;
+            if (sync_at(MT_SYNC + ph, g_mt_ph[ph].name) != BFM_OK) return 1;
     }
     if (g_stop || sync_at(20, "全部の接続での転送") != BFM_OK) return 1;
 
@@ -1260,7 +1435,7 @@ int main(int argc, char **argv)
     uint32_t iters = 0, threads = 4, nconn = 0;
     int oob = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "d:i:D:I:c:p:m:M:n:t:BSCxqPvh")) != -1) {
+    while ((opt = getopt(argc, argv, "d:i:D:I:c:p:m:M:n:t:Q:BSCxqPvh")) != -1) {
         switch (opt) {
         case 'd': g_bfm_linux_pci_bdf[0] = optarg; break;
         case 'i': if (parse_ip(optarg, &g_bfm_local_ip[0]) != 0) { usage(); return 2; } break;
@@ -1278,6 +1453,7 @@ int main(int argc, char **argv)
         case 'x': oob = 1; break;
         case 'q': g_quiet = 1; break;
         case 'P': g_perf = 1; break;
+        case 'Q': g_bfm_qdepth = (uint32_t)atoi(optarg); break;
         case 'v': g_bfm_verbose = 1; break;
         default: usage(); return 2;
         }

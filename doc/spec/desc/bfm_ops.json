@@ -1,6 +1,6 @@
 {
   "file": "src/bfm_ops.c",
-  "summary": "データ経路。相手の公開メモリへの write / read / atomic(CAS・FAA)を、1 個の操作 = 1 個の WQE として出す。WQE は手元の作業域で組み、SQ のリング(ホストメモリ)へ写し、doorbell record を進めてから、同じ WQE を UAR の BlueFlame の窓へ MMIO で書く(`post()`)。窓は write-combining なので 64 バイトが 1 個の PCIe の書き込みにまとまり、NIC はドアベルと一緒に WQE を受け取る。窓は 2 面あり交互に使う。小さい write はデータを WQE に埋め込む(inline)。read と atomic は必ず完了通知(CQE)を求め、32 バイトまでの応答は CQE に入るので CPU がそこから写す。完了は `poll_one()` で CQ から拾い、`wait_done()` で待つ。装置(ポート)ごとの値(BlueFlame の窓の大きさ・lkey・atomic の能力)は、接続のポートの装置 `c->dev`(`g_bfm_dev[port]`)から読む。データ経路は接続をまたいで書き換えるものを持たないので、別々の接続なら複数のコアから同時に使える。",
+  "summary": "データ経路。相手の公開メモリへの write / read / atomic(CAS・FAA)を、1 個の操作 = 1 個の WQE として出す。WQE は手元の作業域で組み、SQ のリング(ホストメモリ)へ写し、doorbell record を進めてから、同じ WQE を UAR の BlueFlame の窓へ MMIO で書く(`post()`)。窓は write-combining なので 64 バイトが 1 個の PCIe の書き込みにまとまり、NIC はドアベルと一緒に WQE を受け取る。窓は 2 面あり交互に使う。小さい write はデータを WQE に埋め込む(inline)。read と atomic は必ず完了通知(CQE)を求め、32 バイトまでの応答は CQE に入るので CPU がそこから写す。完了は `poll_one()` で CQ から拾い、`wait_done()` で待つ。拾った完了が多重度つきの操作(`bfm_async.c`)の WQE のものなら、`poll_one()` が `bfm_async_done()` でその枠へ渡す(どの関数で拾っても同じ)。装置(ポート)ごとの値(BlueFlame の窓の大きさ・lkey・atomic の能力)は、接続のポートの装置 `c->dev`(`g_bfm_dev[port]`)から読む。データ経路は接続をまたいで書き換えるものを持たないので、別々の接続なら複数のコアから同時に使える。",
   "functions": [
     {
       "func": "conn_usable",
@@ -54,11 +54,11 @@
     },
     {
       "func": "poll_one",
-      "summary": "CQ から CQE を 1 個読む。CQ の消費位置(`cq_cc`)の CQE の owner ビットと opcode を見て、新しい CQE が無ければ 0 を返す。あれば消費位置を進めて CQ の doorbell record に書く。署名の誤り(SIG_ERR)なら、CQE の MKey でどちらの面の誤りかを見分け、面ごとに数えて中身を覚え、2 を返す(WQE の完了ではない)。エラー完了なら syndrome を記録し、接続を `BFM_CS_ERROR` にする。正常な完了なら、CQE の WQE カウンタが指す WQE までを済んだ扱いにし(`sq_done` を進める)、応答データを CQE に抱えていればその CQE を `last_scat` に覚える。",
+      "summary": "CQ から CQE を 1 個読む。CQ の消費位置(`cq_cc`)の CQE の owner ビットと opcode を見て、新しい CQE が無ければ 0 を返す。あれば消費位置を進めて CQ の doorbell record に書く。署名の誤り(SIG_ERR)なら、CQE の MKey でどちらの面の誤りかを見分け、面ごとに数えて中身を覚え、2 を返す(WQE の完了ではない)。CQE の WQE カウンタから、完了した WQE の位置 `pc` を求める。エラー完了なら syndrome を記録し、接続を `BFM_CS_ERROR` にし、その WQE が多重度つきの操作なら `bfm_async_done()` にエラーを渡す。正常な完了なら、`pc` の WQE までを済んだ扱いにし(`sq_done` を進める)、応答データを CQE に抱えていればその CQE を `last_scat` に覚え、その WQE が多重度つきの操作なら `bfm_async_done()` に完了を渡す。",
       "args": {"c": "完了を拾う接続"},
       "ret": "1: 正常な完了を 1 個拾った。2: 署名の誤り(SIG_ERR)の CQE を拾った(WQE の完了ではない)。0: まだ CQE が無い。負: エラー完了(`map_syndrome()` の値。`BFM_E_REMOTE` / `BFM_E_RETRY` / `BFM_E_CQE`)。",
       "pre": "`c` の QP・CQ が作られ、`bfm_ops_attach()` 済みであること。",
-      "notes": "* CQE は投稿の順に来るので、正常な完了 1 個でその WQE までの全部(通知なしで出したものを含む)を済んだ扱いにする。\n* 済んだ位置は、CQE の WQE カウンタ(16 ビット)を `sq_done` の 32 ビットへ広げ、その WQE の大きさ(`wqe_bbs[]`)を足して求める。\n* エラー完了では `sq_done` を進めない。接続が `BFM_CS_UP` のときだけ表示して `BFM_CS_ERROR` にする(2 回目以降は表示しない)。\n* `last_scat` は CQ のリングの中を指すので、次の CQE を拾うまでに読むこと。\n* SIG_ERR の CQE(T10-DIF の検査の誤り)は、その WQE の普通の完了の前に来る。CQE の MKey(byte 36、下位 8 ビットの key を除いて比べる)が `c->sig_mkey[1]` なら面 1、そうでなければ面 0 として `c->sig[]` に覚え、`bfm_dif.c` が見て消す(Linux の `mlx5_poll_one()` と同じ扱い)。同じ面に何個来ても、中身は最初の 1 個のもの。",
+      "notes": "* CQE は投稿の順に来るので、正常な完了 1 個でその WQE までの全部(通知なしで出したものを含む)を済んだ扱いにする。\n* 済んだ位置は、CQE の WQE カウンタ(16 ビット)を `sq_done` の 32 ビットへ広げ、その WQE の大きさ(`wqe_bbs[]`)を足して求める。\n* エラー完了では `sq_done` を進めない。接続が `BFM_CS_UP` のときだけ表示して `BFM_CS_ERROR` にする(2 回目以降は表示しない)。\n* `last_scat` は CQ のリングの中を指すので、次の CQE を拾うまでに読むこと。\n* SIG_ERR の CQE(T10-DIF の検査の誤り)は、その WQE の普通の完了の前に来る。CQE の MKey(byte 36、下位 8 ビットの key を除いて比べる)が `c->sig_mkey[1]` なら面 1、そうでなければ面 0 として `c->sig[]` に覚え、`bfm_dif.c` が見て消す(Linux の `mlx5_poll_one()` と同じ扱い)。同じ面に何個来ても、中身は最初の 1 個のもの。\n* 多重度つきの操作かどうかは、位置ごとの枠の番号(`wqe_slot[]`。0 = 違う)で見分ける。エラー完了の後ろの WQE は WR_FLUSH のエラー完了で来るので、それぞれの枠にエラーが入る。",
       "flow": [
         {"do": "cqe = CQ のリングの (cq_cc & (CQ_N - 1)) 番目(64 バイト)"},
         {"do": "op_own = cqe[63]"},
@@ -71,18 +71,24 @@
           {"do": "BFM_DBG で中身を表示"},
           {"return": "2"}
         ]},
+        {"do": "pc = cnt を sq_done の 32 ビットへ広げた位置"},
         {"if": "opcode が MLX5_CQE_REQ_ERR / MLX5_CQE_RESP_ERR ?", "then": [
           {"do": "last_synd = cqe[55]、last_vsynd = cqe[54]"},
           {"if": "c->state == BFM_CS_UP ?", "then": [
             {"call": "BFM_LOG で syndrome と syndrome_str() の名前を表示"},
             {"do": "c->state = BFM_CS_ERROR"}
           ]},
+          {"if": "wqe_slot[pc & (SQ_N - 1)] != 0(多重度つきの操作)?", "then": [
+            {"call": "bfm_async_done(c, pc, NULL, map_syndrome(last_synd)) を呼ぶ"}
+          ]},
           {"call": "map_syndrome(last_synd) を呼ぶ"},
           {"return": "map_syndrome() の値"}
         ]},
-        {"do": "pc = cnt を sq_done の 32 ビットへ広げた位置"},
         {"do": "sq_done = pc + wqe_bbs[pc & (SQ_N - 1)]"},
         {"if": "op_own & 0x04(応答データを CQE に抱えている)?", "then": [{"do": "last_scat = cqe"}], "else": [{"do": "last_scat = NULL"}]},
+        {"if": "wqe_slot[pc & (SQ_N - 1)] != 0(多重度つきの操作)?", "then": [
+          {"call": "bfm_async_done(c, pc, last_scat, BFM_OK) を呼ぶ"}
+        ]},
         {"return": "1"}
       ]
     },
@@ -114,7 +120,7 @@
       "args": {"c": "出す接続", "w": "組み終えた WQE(8 バイト単位の作業域)", "bbs": "WQE の大きさ(WQEBB = 64 バイトの数)"},
       "ret": "`BFM_OK`: 出した。そのほか負: 空きを待つ間の `poll_one()` のエラー完了の値、または `wait_done()` の失敗の値(エラー完了なら `poll_one()` の値、時間切れなら `BFM_E_TIMEOUT`)。",
       "pre": "`w` の制御セグメントの WQE の位置が、今の `c->qp.sq_pc` で組まれていること(`build_ctrl()`)。",
-      "notes": "* 書く順は、リングへ写す → `bfm_dma_wmb()` → doorbell record(`dbr[1]`)→ `bfm_dma_wmb()` → 窓(またはドアベル)→ `bfm_wc_flush()`。\n* 位置ごとの WQE の大きさを `wqe_bbs[]` に覚える(`poll_one()` が済んだ位置を求めるのに使う)。\n* 空きを待つ間の `wait_done()` の失敗は、その戻り値(エラー完了も時間切れも)をそのまま返す。",
+      "notes": "* 書く順は、リングへ写す → `bfm_dma_wmb()` → doorbell record(`dbr[1]`)→ `bfm_dma_wmb()` → 窓(またはドアベル)→ `bfm_wc_flush()`。\n* 位置ごとの WQE の大きさを `wqe_bbs[]` に覚える(`poll_one()` が済んだ位置を求めるのに使う)。\n* 位置ごとの枠の番号(`wqe_slot[]`)を 0(多重度つきの操作ではない)にする。多重度つきの操作なら、`post()` から戻った後に呼び出し側(`bfm_async.c` の `issue()`)が入れる。\n* 空きを待つ間の `wait_done()` の失敗は、その戻り値(エラー完了も時間切れも)をそのまま返す。",
       "flow": [
         {"while": "(sq_pc + bbs) - sq_done > SQ_N(空きが足りない)?", "body": [
           {"call": "r = poll_one(c) を呼ぶ"},
@@ -129,7 +135,7 @@
           {"do": "w の b 番目の WQEBB(8 バイト x 8)をリングの (pc + b) & (SQ_N - 1) 番目へ写す"},
           {"do": "b++"}
         ]},
-        {"do": "wqe_bbs[pc & (SQ_N - 1)] = bbs。sq_pc = pc + bbs"},
+        {"do": "wqe_bbs[pc & (SQ_N - 1)] = bbs。wqe_slot[pc & (SQ_N - 1)] = 0。sq_pc = pc + bbs"},
         {"do": "bfm_dma_wmb()。dbr[1] = sq_pc の下位 16 ビット(BE)"},
         {"do": "bfm_dma_wmb()"},
         {"if": "c->bf != NULL かつ bbs x 64 <= c->dev->bf_buf_size ?", "then": [
@@ -235,7 +241,7 @@
     },
     {
       "func": "bfm_ops_attach",
-      "summary": "接続ができた後に、データ経路の状態を初期化する。QP の番号を 8 ビットずらした値(`qpn8`)を求め、済んだ位置を今の SQ の位置に合わせ、通知なしの数・窓の面・記録した syndrome・`last_scat` を 0 にし、`bfm_dif_attach()` で T10-DIF の転送の状態も空にする。",
+      "summary": "接続ができた後に、データ経路の状態を初期化する。QP の番号を 8 ビットずらした値(`qpn8`)を求め、済んだ位置を今の SQ の位置に合わせ、通知なしの数・窓の面・記録した syndrome・`last_scat` を 0 にし、`bfm_dif_attach()` で T10-DIF の転送の状態を、`bfm_async_attach()` で多重度の枠を空にする。",
       "args": {"c": "接続ができた接続"},
       "ret": "`BFM_OK`(常に)。",
       "pre": "`c` の QP が作られ、`c->qp.qpn` と `c->qp.sq_pc` が正しいこと。",
@@ -244,6 +250,7 @@
         {"do": "qpn8 = qp.qpn << 8。sq_done = qp.sq_pc"},
         {"do": "unsig = 0、bf_off = 0、last_synd = last_vsynd = 0、last_scat = NULL"},
         {"call": "bfm_dif_attach(c) を呼ぶ"},
+        {"call": "bfm_async_attach(c) を呼ぶ"},
         {"return": "BFM_OK"}
       ]
     },
@@ -348,6 +355,33 @@
       "flow": [
         {"while": "(r = poll_one(c)) > 0 ?", "body": [{"do": "何もしない(条件の中で CQE を 1 個拾う)"}]},
         {"return": "r < 0 ? r : BFM_OK"}
+      ]
+    },
+    {
+      "func": "bfm_ops_reap_all",
+      "summary": "来ている CQE を全部拾う(待たない。`bfm_async.c` から使う)。`bfm_ops_reap()` と違い、エラー完了の後も `poll_one()` が 0(まだ無い)を返すまで拾い切る(後ろの WQE の WR_FLUSH のエラー完了も拾って、多重度の枠を空ける)。",
+      "args": {"c": "接続"},
+      "ret": "`BFM_OK`: 拾い終わった(エラー完了が無かった)。負: 最初に見たエラー完了の値(`poll_one()` の値)。",
+      "pre": "`bfm_ops_attach()` 済みであること。",
+      "notes": "署名の誤りの CQE(2)も拾い続ける。多重度つきの操作の結果は、`poll_one()` が `bfm_async_done()` で枠に入れる。",
+      "flow": [
+        {"do": "first = BFM_OK"},
+        {"while": "(r = poll_one(c)) != 0 ?", "body": [
+          {"if": "r < 0 かつ first == BFM_OK ?", "then": [{"do": "first = r"}]}
+        ]},
+        {"return": "first"}
+      ]
+    },
+    {
+      "func": "bfm_ops_build_write_inline",
+      "summary": "データを WQE に埋め込んだ RDMA write の WQE を、完了通知ありで組む(`build_write_inline()` を `signaled` = 1 で呼ぶ。`bfm_async.c` から使う)。",
+      "args": {"c": "接続", "w": "WQE の作業域", "off": "相手の公開メモリの先頭からのオフセット", "src": "書くデータ", "len": "データの長さ(バイト)"},
+      "ret": "WQE の大きさ(WQEBB の数)。",
+      "pre": "`len` が `bfm_inline_max()` 以下であること。",
+      "notes": "特になし。",
+      "flow": [
+        {"call": "build_write_inline(c, w, off, src, len, 1) を呼ぶ"},
+        {"return": "build_write_inline() の値"}
       ]
     },
     {

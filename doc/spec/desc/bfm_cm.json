@@ -564,7 +564,7 @@
     },
     {
       "func": "slot_alloc",
-      "summary": "ポート `d` の接続 `i` の枠の QP の状態を 0 で埋めて `BFM_CS_FREE` にし、RC QP の WQ・ドアベルレコード・CQ・CQ のドアベルレコード・中継バッファ(`g_bfm_stage_size` を `BFM_PAGE` に切り上げた大きさ)・T10-DIF 用の中継バッファ(`BFM_DIF_SLOTS` 面。1 面 = `g_bfm_dif_buf_size / BFM_DIF_SLOTS` を `BFM_PAGE` に切り上げた大きさ)を DMA 領域から切り出す。",
+      "summary": "ポート `d` の接続 `i` の枠の QP の状態を 0 で埋めて `BFM_CS_FREE` にし、RC QP の WQ・ドアベルレコード・CQ・CQ のドアベルレコード・中継バッファ(`g_bfm_stage_size` を `BFM_PAGE` に切り上げた大きさ)・T10-DIF 用の中継バッファ(`BFM_DIF_SLOTS` 面。1 面 = `g_bfm_dif_buf_size / BFM_DIF_SLOTS` を `BFM_PAGE` に切り上げた大きさ)・多重度の枠の中継バッファ(`c->abuf`。枠の数 `c->aqd` x 1 枠 `c->abuf_slot`)を DMA 領域から切り出す。枠の数は `g_bfm_qdepth`(1〜`BFM_QD_MAX` の外なら `BFM_QD_MAX`)、1 枠の大きさは `g_bfm_async_buf_size` を 64 の倍数に切り上げた値(64 未満なら 64)。",
       "args": {"d": "ポートの装置", "i": "ポートの中の接続の番号"},
       "ret": "`BFM_OK`: 切り出した。`BFM_E_NOMEM`: DMA 領域が足りない。",
       "pre": "`bfm_mem_reset()` で DMA 領域の切り出しが初期化してあること。`i < d->nconn`。`g_bfm_ctl_lock` を持っていること。",
@@ -576,6 +576,9 @@
         {"call": "c->stage = bfm_mem_alloc(c->stage_size, BFM_PAGE) を呼ぶ"},
         {"do": "c->dif_slot_size = g_bfm_dif_buf_size / BFM_DIF_SLOTS を BFM_PAGE に切り上げた値"},
         {"call": "c->dif_buf = bfm_mem_alloc(c->dif_slot_size × BFM_DIF_SLOTS, BFM_PAGE) を呼ぶ"},
+        {"do": "c->aqd = g_bfm_qdepth が 1〜BFM_QD_MAX なら g_bfm_qdepth、そうでなければ BFM_QD_MAX"},
+        {"do": "c->abuf_slot = g_bfm_async_buf_size < 64 なら 64、そうでなければ 64 の倍数に切り上げた値"},
+        {"call": "c->abuf = bfm_mem_alloc(c->abuf_slot × c->aqd, BFM_PAGE) を呼ぶ"},
         {"if": "どれかが NULL ?", "then": [{"return": "BFM_E_NOMEM"}]},
         {"return": "BFM_OK"}
       ]

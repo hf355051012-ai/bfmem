@@ -56,6 +56,14 @@ bfm_faa(c, off, add, &old);
 bfm_cas32(c, off, expect, desired, &old32);   /* 4 バイト、off は 4 の倍数(拡張 atomic)*/
 bfm_faa32(c, off, add, &old32);
 
+/* 多重度つき(下の「多重度」)。完了を待たずに 64 個まで出しておける */
+bfm_tag_t tw, tr;
+bfm_write_async(c, off, src, len, BFM_ACK, &tw);     /* ACK を確かめる write。tag を返す */
+bfm_write_async(c, off, src, len, BFM_NOACK, NULL);  /* ACK を確かめない write(tag なし)*/
+bfm_read_async(c, off, dst, len, &tr);               /* read。応答は刈り取ったときに dst へ */
+bfm_test(c, tw);                                     /* 済んだか(待たない)。bfm_wait(c, tw) なら済むまで */
+bfm_check(c, &inflight);                             /* ときどき呼ぶ(ACK なしの write の時間切れ・エラー)*/
+
 bfm_dif_t d = { .op = BFM_DIF_INSERT, .mode = BFM_DIF_SW, .app_tag = 0x1234, .ref_tag = lba };
 bfm_dif_write(c, off, src, nblocks, &d, &err); /* T10-DIF(下の「T10-DIF」)。終わるまで待つ */
 bfm_dif_read(c, off, dst, nblocks, &d, &err);
@@ -75,6 +83,30 @@ while (bfm_shutdown() == BFM_INPROGRESS) { }
 - `src` / `dst` はどこにあってもよい(NIC が直接読み書きするのは中継バッファで、CPU が写す)。
 - 接続の数は `g_bfm_port_conn[ポート]`(既定 16。上限 `BFM_MAX_PORT_CONN` = 16)。ポートは `BFM_MAX_PORT` = 2 個まで
   (合計 32 本)。0 のポートは使わない。両方のノードで同じ値にする。
+
+### 多重度(完了を待たずに出す write / read)
+
+`bfm_write()` / `bfm_read()` は 1 回ずつ ACK・応答を待つ(1 回 約 1.4〜1.7µs = 往復の時間)。`bfm_write_async()` /
+`bfm_read_async()` は待たずに戻り、**1 本の接続で最大 64 個(`g_bfm_qdepth`)まで出しておける**。
+
+- 仕掛かり中の 1 個ごとに「枠」を 1 つ使う。枠は送り元 / 着地点の中継バッファ(`g_bfm_async_buf_size`、既定 4KiB)を
+  1 つずつ持つので、1 回の長さはその大きさまで(inline に収まる 220 バイトまでの write は WQE に埋め込む)。
+- **枠が空いていれば待たずに出す。64 個が全部仕掛かり中なら、ACK・read の応答を刈り取って枠を空けてから出す。**
+  空くまで回って待つのは、仕掛かり中の操作を出してから `g_bfm_async_timeout_ms`(既定 100ms)まで。超えたら
+  `BFM_E_TIMEOUT` を返し、その接続をエラーにする(`bfm_reconnect()` で張り直す)。
+- **ACK を確かめる write(`BFM_ACK`)と read は tag を返す。** `bfm_test(c, tag)` で 1 個ずつ、済んだか(`BFM_OK`)・まだか
+  (`BFM_INPROGRESS`)・失敗か(負)を確かめる。`bfm_wait()` は済むまで待つ。read の応答は、完了を刈り取ったときに
+  `dst` へ写す(`bfm_test()` が `BFM_OK` を返すまで `dst` を手放さない)。write の `src` は出したときに写すので、戻ったら変えてよい。
+- **ACK を確かめない write(`BFM_NOACK`)は tag を返さない。** アプリケーションは、新しい write を出していない間も
+  `bfm_check(c, &inflight)` を定期的に呼ぶこと。仕掛かり中の ACK を刈り取り、出してから時間切れを過ぎても ACK の
+  無いものがあれば表示して `BFM_E_TIMEOUT`、エラー完了があればそのエラーを返す。`inflight` が 0 なら全部届いた。
+- 完了はどの関数で刈り取っても同じ(`bfm_test()`・`bfm_check()`・次の `bfm_*_async()`・普通の `bfm_write()` など)。
+  完了は出した順に来るので、ある tag が済めば、それより前に出したものも済んでいる。刈り取った枠はすぐ次の操作に使い、
+  使い回された古い tag は `bfm_test()` が `BFM_OK` を返す(失敗した操作があると接続がエラーになって次を出せないので、
+  使い回されるのは成功した枠だけ)。張り直す前に出した操作の tag は、張り直した後は `BFM_E_STATE`(結果はもう
+  分からない)を返す(結果は張り直す前に確かめること)。
+- 全部の WQE に完了通知を求める(ACK を確かめない write も。枠を空ける時と時間切れを知るため)。read / atomic の
+  同時の数は QP の上限(相手が受け付ける数、16)を NIC が守る(超えた分は NIC の中で待つ)。
 
 ### 代表 API `bfm_run()`
 
@@ -349,6 +381,9 @@ PI は guard(データの CRC16、多項式 0x8BB7)・app tag・ref tag(ブロ�
 | `g_bfm_fw_pages_max` | FW に渡すページの上限(ポートごと)|
 | `g_bfm_stage_size` | 接続ごとの中継バッファ |
 | `g_bfm_dif_buf_size` | 接続ごとの T10-DIF 用の中継バッファ(2 面に分けて交互に使う。既定 128KiB)|
+| `g_bfm_qdepth` | 多重度(1〜`BFM_QD_MAX` = 64、既定 64。完了を待たずに出しておける `bfm_*_async()` の数)|
+| `g_bfm_async_buf_size` | 多重度の枠ごとの中継バッファ(既定 4KiB = 非同期の操作の長さの上限。接続 1 本で 64 倍使う)|
+| `g_bfm_async_timeout_ms` | 非同期の操作の時間切れ(既定 100ms。枠の空き待ち・`bfm_test()`・`bfm_check()`)|
 | `g_bfm_local_ip` / `g_bfm_local_mac[ポート]` | ポートの IPv4 / MAC(MAC が全部 0 なら NIC の固有の MAC)|
 | `g_bfm_peer_ip` / `g_bfm_peer_mac[ポート]` | ポートの相手(相手のノードの同じ番号のポート)。**IP の小さいほうが掛け側**。MAC が全部 0 なら自動(REQ を同報で送り、REP から取る)|
 | `g_bfm_cm_port` | 接続の番号の起点(接続 i は +i)|
@@ -416,7 +451,9 @@ sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -D 0000:01:00.0 -I 192.1
 2. 接続 (0, 0) で、相手の公開メモリへ一通りの検査(下の表)。終わったら相手と足並みをそろえる
    (相手の公開メモリの 3MiB の語へ進み具合を書き、自分の同じ語に相手の進み具合が来るのを待つ)。
 3. 全部の接続に 1 本ずつスレッドを付け、次を確かめてから、8 バイトの write / read / FAA を `-n` 回(既定 100,000)ずつ、
-   64KiB の write / read を `-n` / 50 回ずつ、全スレッドで同時に打って合計の速さ(Mops・MB/s)を出す。**区間ごとに相手と
+   64KiB の write / read を `-n` / 50 回ずつ、続けて多重度つき(`bfm_*_async()`。`-Q` 個まで出しておく)の 8 バイトの
+   write(ACK なし / あり)・read を `-n` 回ずつ、4KiB の write / read を `-n` / 10 回ずつ、
+   全スレッドで同時に打って合計の速さ(Mops・MB/s)を出す。**区間ごとに相手と
    足並みをそろえる**ので、相手も同じ区間を同時に打つ(= 両方向の速さ)。片方向の速さは、受ける側に `-q` を付けて測る
    (`-q` の側は転送せず、足並みだけそろえる)。本数を変えて速さだけ測るときは、両方に `-P -c <本数>` を付ける
    (`-P` は 2. の一通りの検査を飛ばす)。間ずっと別のスレッドが `bfm_run()` を回す。
@@ -431,6 +468,8 @@ sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -D 0000:01:00.0 -I 192.1
 
 4. (`-x`)最後の接続で公開メモリの外を読み、相手の NIC が断ること、その接続が `BFM_ST_DOWN` になること、
    `bfm_reconnect()` で張り直して読めることを確かめる(相手は BYE を受けて、自分の側を張り直す)。
+   続けて、公開メモリの外への ACK を確かめない write の失敗を `bfm_check()` が返すこと、時間切れを 0ms にして
+   ACK が返る前に `bfm_check()` すると `BFM_E_TIMEOUT` になる(接続はエラーになる)ことを確かめ、そのたびに張り直す。
 5. 相手と足並みをそろえてから、模型の hash と自分の公開メモリの hash を出して止める。
 
 - `serve` は接続を張って保つだけ(`bench` の相手。`serve -c 1`)。`info` はポートを立ち上げて能力を表示する。
@@ -450,6 +489,7 @@ sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -D 0000:01:00.0 -I 192.1
 | [5] | データ領域を読み戻して模型と比べる |
 | [5b] | 相手の公開メモリの最後の 64KiB と 8 バイトを write して読み戻す。はみ出す操作は手元で断る(`BFM_E_PARAM`)|
 | [6] | 遅延(write / read 8・64 バイト、FAA、CAS、FAA32、CAS32)と write_post の速さ。測った後にもう一度読み戻して比べる |
+| [9] | 多重度つき: ACK を確かめる write 200 個(64 を超えて出し、刈り取りながら出す)を tag ごとに確かめる、read 200 個を tag ごとに確かめて中身を比べる、使い回された古い tag が `BFM_OK`、write の直後の同じ所の read がその中身を読む、ACK を確かめない write 2,000 個の後に `bfm_check()` で仕掛かりが 0 になり中身が一致、長すぎる操作は `BFM_E_PARAM` |
 | [8] | T10-DIF: 4 つの操作を write / read の両方(8 通り)で、相手のメモリ・手元の結果と独立に作った期待値を比べる。誤りの検出(guard・ref tag・app tag)。起動と完了確認を分けた使い方(途中の 2 本目の起動が `BFM_E_BUSY`、途中で普通の write / read、`bfm_dif_poll()` で完了、3 つ目の分の誤りを `bfm_dif_wait()` で受け取る)。SW は常に、HW は使えるときだけ。使えなければ `BFM_E_NOTSUP` を確かめる。DIF の遅延とスループット |
 | 最後 | 模型の hash を出す(相手が止める前に出す「自分の公開メモリの hash」と同じであること)|
 
@@ -494,4 +534,7 @@ sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -D 0000:01:00.0 -I 192.1
   - **接続の数を変えると**(双方向、`run -P -c <本数>`): 帯域は 1 ポートなら 2 本で頭打ち(合計 5.4〜5.8 GB/s)、2 ポートなら
     各 2 本(合計 4 本)で最も高い(合計 10.6 / 11.2 GB/s)。8 バイトの操作は本数にほぼ比例して伸び(1 本あたり write 約 0.7 Mops)、
     打つ側の CPU の数で頭打ちになる(OptiPlex は 4 本で約 2.6 Mops、Precision は 8 本で 5.5 Mops)。
+  - **多重度つき(`bfm_*_async()`)**: 1 本の接続・1 つのコアで、8 バイトの write が多重度 1 の 0.75 Mops から 64 で 9.5 Mops、
+    read が 0.6 → 7.4 Mops(多重度 8 まではほぼ比例)。4KiB は多重度 4 で 1 ポートの片方向の線速近く(2.7〜2.8 GB/s)。
+    2 ポート × 16 本・双方向では 8 バイトの write が合計 24〜47 Mops(1 回ずつ待つ形の 2.6〜10.6 Mops から)。
   - 数字の表は `TEST_PLAN.md` の最後。

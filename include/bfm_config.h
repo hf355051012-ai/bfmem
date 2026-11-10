@@ -35,6 +35,10 @@
 /* 接続の表の大きさ(全部のポートの合計。既定 2 x 16 = 32)。 */
 #define BFM_MAX_CONN (BFM_MAX_PORT * BFM_MAX_PORT_CONN)
 
+/* 多重度の上限(1 本の接続で、完了を待たずに出しておける write / read の数。bfm_write_async() /
+ * bfm_read_async())。仕掛かり中の 1 個ごとに「枠」を 1 つ使う。tag の下位 6 ビットが枠の番号なので 64 まで。 */
+#define BFM_QD_MAX 64u
+
 /* ---------------------------------------------------------------------
  * ポートごとの値(添字はポートの番号 0〜BFM_MAX_PORT-1)
  * ------------------------------------------------------------------- */
@@ -126,6 +130,19 @@ extern uint32_t g_bfm_stage_size;
  * 1 面 = この半分で、1 回の RDMA で運ぶブロック数 = 1 面 / 520(既定 128KiB なら 126 ブロック)。
  * 普通の write / read の中継バッファとは別なので、DIF の転送の途中でも普通の操作を出せる。 */
 extern uint32_t g_bfm_dif_buf_size;
+
+/* 多重度(1〜BFM_QD_MAX。0 か上限より大きければ BFM_QD_MAX)。1 本の接続で同時に仕掛かり中にできる
+ * bfm_write_async() / bfm_read_async() の数。これを超えて出そうとすると、完了を刈り取って枠を空けてから出す。 */
+extern uint32_t g_bfm_qdepth;
+
+/* 多重度の枠ごとの中継バッファの大きさ(バイト。64 の倍数に切り上げる)。inline に収まらない
+ * bfm_write_async() の送り元と、bfm_read_async() の着地点で、1 回の非同期の操作の長さの上限になる。
+ * 接続 1 本で DMA 領域を g_bfm_qdepth 倍使う(既定 64 x 4KiB = 256KiB)。 */
+extern uint32_t g_bfm_async_buf_size;
+
+/* 非同期の操作(bfm_write_async() / bfm_read_async())の時間切れ(ミリ秒)。出してからこの時間を過ぎても
+ * ACK・応答が無ければ、その接続をエラーにして BFM_E_TIMEOUT を返す(枠の空き待ち・bfm_test()・bfm_check())。 */
+extern uint32_t g_bfm_async_timeout_ms;
 
 /* ---------------------------------------------------------------------
  * ネットワーク(RoCE v2、IPv4。全部のポートで共通)

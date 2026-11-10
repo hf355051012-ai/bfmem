@@ -312,6 +312,19 @@ struct bfm_sig_rec {
     uint64_t off;                    /* 誤りの位置(署名つき MKey の中のバイト)*/
 };
 
+/* 多重度の枠 1 つ(仕掛かり中の非同期の write / read 1 個)。 */
+struct bfm_aslot {
+    uint32_t seq;                    /* この枠で最後に出した操作の通し番号(tag の上位 26 ビット)*/
+    uint8_t  busy;                   /* 1 = 仕掛かり中(完了をまだ刈り取っていない)*/
+    uint8_t  kind;                   /* BFM_AK_*(ACK を確かめる write / 確かめない write / read)*/
+    int      rc;                     /* 刈り取った結果(BFM_OK か負)。次にこの枠を使うまで残す */
+    void    *dst;                    /* read: 刈り取ったときに写す先 */
+    uint32_t len;                    /* 操作の長さ */
+    uint64_t off;                    /* 相手の公開メモリの中の位置(表示用)*/
+    uint64_t t;                      /* 出した時刻(ns。時間切れを見る)*/
+};
+enum { BFM_AK_WRITE = 0, BFM_AK_WRITE_NOACK = 1, BFM_AK_READ = 2 };
+
 /* 接続 1 本 = 接続の表(g_bfm_conn)の 1 行。行ごとに状態機械(step)を持ち、bfm_run() は鍵(lock)を
  * 取れた行の状態を 1 つ進める。コアごとに別の接続を使うので、隣の接続とキャッシュラインを分ける。 */
 struct __attribute__((aligned(64))) bfm_conn {
@@ -339,6 +352,18 @@ struct __attribute__((aligned(64))) bfm_conn {
     volatile uint8_t *stage;         /* 中継バッファ(DMA 領域)*/
     uint32_t stage_size;             /* 中継バッファのバイト数(g_bfm_stage_size を 4KiB に切り上げたもの)*/
     const volatile uint8_t *last_scat;  /* 直前の CQE が応答データを抱えていればその CQE */
+
+    /* 多重度(bfm_async.c)。仕掛かり中の非同期の操作 1 個 = 枠 1 つ。 */
+    uint8_t  wqe_slot[1u << BFM_RC_SQ_LOG];  /* 位置ごとの WQE が使う枠の番号 + 1(0 = 非同期の操作ではない)*/
+    struct bfm_aslot as[BFM_QD_MAX];  /* 枠 */
+    uint64_t afree;                  /* 空いている枠(bit n = 枠 n。1 = 空き)*/
+    uint32_t aqd;                    /* 使う枠の数(g_bfm_qdepth を直したもの)*/
+    uint32_t aseq;                   /* 次に出す操作の通し番号(tag の上位 26 ビット。張り直しをまたいで続ける)*/
+    uint32_t abase;                  /* 今の接続で最初の通し番号(これより前の tag は張り直しの前のもの)*/
+    uint32_t ainflight;              /* 仕掛かり中の数 */
+    int      aerr;                   /* 非同期の操作で最初に見たエラー(0 = なし。張り直すまで残す)*/
+    volatile uint8_t *abuf;          /* 枠ごとの中継バッファ(DMA 領域。枠 i は + i * abuf_slot)*/
+    uint32_t abuf_slot;              /* 枠 1 つの中継バッファのバイト数 */
 
     /* T10-DIF(bfm_dif.c)。DIF 用の中継バッファは 2 面(BFM_DIF_SLOTS)に分けて交互に使う。 */
     volatile uint8_t *dif_buf;       /* DIF 用の中継バッファ(DMA 領域。面 i は + i * dif_slot_size)*/
@@ -450,10 +475,17 @@ int  bfm_ops_poll1(struct bfm_conn *c);
 int  bfm_ops_check_range(const struct bfm_conn *c, uint64_t off, uint64_t len);
 int  bfm_ops_post(struct bfm_conn *c, const uint64_t *w, uint32_t bbs);
 int  bfm_ops_reap(struct bfm_conn *c);
+int  bfm_ops_reap_all(struct bfm_conn *c);
+uint32_t bfm_ops_build_write_inline(struct bfm_conn *c, uint64_t *w, uint64_t off, const void *src, uint32_t len);
 void bfm_ops_ctrl(struct bfm_conn *c, uint64_t *w, uint32_t opcode, uint32_t ds, uint8_t fm_ce_se,
                   uint32_t imm);
 void bfm_ops_build_rdma(struct bfm_conn *c, uint64_t *w, int is_read, uint64_t off, uint32_t lkey,
                         uint64_t addr, uint32_t len, uint8_t fence);
+
+/* bfm_async.c */
+void bfm_async_attach(struct bfm_conn *c);   /* 接続ができたとき(bfm_ops_attach() から)。枠を全部空ける */
+void bfm_async_done(struct bfm_conn *c, uint32_t pc, const volatile uint8_t *cqe, int rc);
+                                           /* poll_one() が、位置 pc の WQE の完了(rc = BFM_OK か負)を渡す */
 
 /* bfm_dif.c */
 void bfm_dif_init_reset(bfm_dev_t *d);

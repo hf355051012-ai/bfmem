@@ -693,7 +693,11 @@ static int slot_alloc(bfm_dev_t *d, unsigned i)
     c->stage = (volatile uint8_t *)bfm_mem_alloc(c->stage_size, BFM_PAGE);
     c->dif_slot_size = (g_bfm_dif_buf_size / BFM_DIF_SLOTS + BFM_PAGE - 1u) & ~(BFM_PAGE - 1u);
     c->dif_buf = (volatile uint8_t *)bfm_mem_alloc((uint64_t)c->dif_slot_size * BFM_DIF_SLOTS, BFM_PAGE);
-    if (!c->qp.wq || !c->qp.dbr || !c->qp.cq || !c->qp.cq_dbr || !c->stage || !c->dif_buf) return BFM_E_NOMEM;
+    c->aqd = (g_bfm_qdepth >= 1u && g_bfm_qdepth <= BFM_QD_MAX) ? g_bfm_qdepth : BFM_QD_MAX;
+    c->abuf_slot = (g_bfm_async_buf_size < 64u) ? 64u : (g_bfm_async_buf_size + 63u) & ~63u;
+    c->abuf = (volatile uint8_t *)bfm_mem_alloc((uint64_t)c->abuf_slot * c->aqd, BFM_PAGE);
+    if (!c->qp.wq || !c->qp.dbr || !c->qp.cq || !c->qp.cq_dbr || !c->stage || !c->dif_buf || !c->abuf)
+        return BFM_E_NOMEM;
     return BFM_OK;
 }
 
