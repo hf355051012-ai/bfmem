@@ -178,7 +178,14 @@ extern uint32_t g_bfm_bf_enable;
 /* 1 = 32 バイトまでの read / atomic の応答を CQE に書かせる(scatter to CQE)。 */
 extern uint32_t g_bfm_scatter_cqe;
 
-/* RC の再送: ack timeout(4.096us x 2^N)と再送回数(0〜7)。 */
+/* RC の再送: ack timeout(4.096us x 2^N)と再送回数(0〜7)。NIC がハードウェアで再送する。
+ * 途中のフレームが抜けたときは、受け側が番号の飛びに気付いて NAK を返すので、すぐ(往復 1 回で)送り直す。
+ * 後ろに続くもののない最後のフレームが抜けたときは、ack timeout が過ぎてから送り直す。0 は「待ち続ける」(送り直さない)。
+ * **ConnectX-4 Lx(FW 14.29 / 14.32)では、NIC が実際に待つ時間に約 0.37〜0.40 秒の下限がある**(4〜16 のどれを設定しても
+ * 送り直す間隔は約 370〜400ms。17 なら 0.54 秒以上。試験 run -z の [10] D で測った)。そのため、最後のフレームが抜けたときは、
+ * 非同期の操作の時間切れ(g_bfm_async_timeout_ms、既定 100ms)が先に来て接続がエラーになる(張り直すと使える)。
+ * 既定の 12 は、下限の間隔で送り直させるための値(設定上は 4.096us x 2^12 = 約 16.8ms)。
+ * 再送が尽きると(既定 7 回。下限の間隔で約 3 秒)、NIC は TRANSPORT_RETRY_EXC のエラー完了を返す(BFM_E_RETRY)。 */
 extern uint8_t g_bfm_ack_timeout;
 extern uint8_t g_bfm_retry_count;
 

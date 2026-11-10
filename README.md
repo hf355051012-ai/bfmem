@@ -111,6 +111,22 @@ while (bfm_shutdown() == BFM_INPROGRESS) { }
 - 全部の WQE に完了通知を求める(ACK を確かめない write も。枠を空ける時と時間切れを知るため)。read / atomic の
   同時の数は QP の上限(相手が受け付ける数、16)を NIC が守る(超えた分は NIC の中で待つ)。
 
+### 再送(フレームが抜けたとき)
+
+接続は RC の QP なので、抜けたフレームは NIC がハードウェアで送り直す(CPU もライブラリも関わらない)。
+
+| 抜けたフレーム | 送り直すまで |
+|---|---|
+| 途中のフレーム(長い write の途中、または後ろに別の操作が続いている)| 受け側が番号(PSN)の飛びに気付いて NAK を返し、すぐ(往復 1 回で)送り直す |
+| 後ろに続くもののない最後のフレーム | ack timeout が過ぎてから送り直す。**ConnectX-4 Lx は `g_bfm_ack_timeout` によらず約 0.37〜0.40 秒待つ**(4〜16 で同じ。0 は送り直さない)|
+
+- 再送が尽きると(既定 7 回。約 3 秒)、NIC は `TRANSPORT_RETRY_EXC` を返す(`BFM_E_RETRY`。接続はエラー)。
+- **最後のフレームが抜けたとき、1 回ずつ待つ `bfm_write()` など(時間切れ 5 秒)は再送で救われるが、多重度つきの操作
+  (時間切れ `g_bfm_async_timeout_ms` = 100ms)は再送より先に `BFM_E_TIMEOUT` になる**(接続はエラーになり、張り直すと使える)。
+  再送で救いたい場合は、`g_bfm_async_timeout_ms` を約 1 秒以上(再送 2 回ぶん以上)にする。
+- 実際の間隔は試験 `run -z` の [10] D で測れる(ACK の返らない接続で `bfm_write()` が `BFM_E_RETRY` になるまでの時間)。
+  フレームを狙って 1 つだけ落とす試験はしていない(直結では落とせない)。
+
 ### 代表 API `bfm_run()`
 
 外から `bfm_run()` を**周期的に呼び続けるだけで、初期化(PCIe)→ init(HCA)→ connect → 転送の準備 →
@@ -393,7 +409,8 @@ PI は guard(データの CRC16、多項式 0x8BB7)・app tag・ref tag(ブロ�
 | `g_bfm_req_retry_ms` | 掛け側が REQ を送り直す間隔(既定 1 秒。相手が立ち上がるまで続ける)|
 | `g_bfm_path_mtu` / `g_bfm_port_mtu` | RoCE の経路 MTU(1〜5)/ ポートの MTU |
 | `g_bfm_bf_enable` / `g_bfm_scatter_cqe` | 機能の入り切り |
-| `g_bfm_ack_timeout` / `g_bfm_retry_count` / `g_bfm_op_timeout_ms` | 再送と時間切れ |
+| `g_bfm_ack_timeout` / `g_bfm_retry_count` | RC の再送(NIC が行う): ack timeout 4.096µs × 2^N(既定 12)と再送回数(既定 7)。**ConnectX-4 Lx は設定によらず、送り直すまで約 0.37〜0.40 秒待つ**(下の「再送」)|
+| `g_bfm_op_timeout_ms` | 1 回ずつ待つ操作の時間切れ(既定 5 秒)|
 | `g_bfm_cpu_awake` | CPU を深い省電力状態に入れない(相手からの read / atomic の遅延に効く。VxWorks では下の 6)|
 | `g_bfm_tsc_hz` | TSC の周波数(Hz)。0 なら CPUID / MSR から求める。求められない CPU では入れる |
 | `g_bfm_link_wait_ms` / `g_bfm_signal_every` / `g_bfm_verbose` | そのほか |

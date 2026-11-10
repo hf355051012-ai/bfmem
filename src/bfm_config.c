@@ -76,7 +76,7 @@ uint32_t g_bfm_req_retry_ms = 1000u;                /* REP が来なければ RE
 
 uint32_t g_bfm_bf_enable          = 1u;             /* BlueFlame を使う */
 uint32_t g_bfm_scatter_cqe        = 1u;             /* 32 バイトまでの read / atomic の応答を CQE に書かせる */
-uint8_t  g_bfm_ack_timeout        = 17u;            /* RC の ack timeout(4.096us x 2^17 = 約 0.54 秒)*/
+uint8_t  g_bfm_ack_timeout        = 12u;            /* RC の ack timeout(設定上 4.096us x 2^12 = 約 16.8ms。ConnectX-4 Lx は実際には約 0.37 秒以上待つ)*/
 uint8_t  g_bfm_retry_count        = 7u;             /* RC の再送回数(最大)*/
 uint32_t g_bfm_op_timeout_ms      = 5000u;          /* 1 回の操作の完了を待つ上限。5 秒 */
 uint32_t g_bfm_signal_every       = 32u;            /* bfm_write_post() で完了通知を求める間隔(WQE 32 個ごと)*/

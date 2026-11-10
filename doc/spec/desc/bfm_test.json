@@ -1541,20 +1541,20 @@
     },
     {
       "func": "run_silent",
-      "summary": "[10] 無応答の試験(`-z`。両方のノードに付ける)。ポート p0(`first_port()`)の最後の 3 本の接続を使う。IP の大きいほう(黙る側)は、その 3 本の QP を BYE を送らずに消す(状態を「相手が切った」(`BFM_CS_CLOSED`)にしてから張り直しを頼むと、BYE を送らずに QP と CQ を消し、受け側の確立の最初 = REQ 待ちへ戻る)。消された QP 宛てのパケットは相手の NIC が黙って捨てるので、IP の小さいほう(試す側)には ACK も応答も返らない。試す側はその 3 本で次を確かめ、最後に張り直して読めることを確かめる。\n\n* A(最後の接続): ACK を確かめる write(`bfm_write_async()` の `BFM_ACK`)で枠を全部(ライブラリが実際に使う数 `aqd`。既定 64 個)埋め、次の 1 個が資源の空きを待って、時間切れ(100ms)で `BFM_E_TIMEOUT` を返す。接続はエラーになり、仕掛かり中の tag も `bfm_test()` で `BFM_E_TIMEOUT`\n* B(最後から 2 本め): ACK を確かめない write(`BFM_NOACK`)を 10 個出し、`bfm_check()` が時間切れで `BFM_E_TIMEOUT` を報告する(仕掛かり 10 個)\n* C(最後から 3 本め): read を 1 個出し、`bfm_wait()` が時間切れで `BFM_E_TIMEOUT` を返す\n\n待った時間は、ライブラリの時間切れと同じく最初の操作を出した時刻から測り、`near_timeout()` で時間切れからその 5 倍までの間にあることを確かめる。",
+      "summary": "[10] 無応答の試験(`-z`。両方のノードに付ける)。ポート p0(`first_port()`)の最後の 4 本(`SILENT_N`)の接続を使う。IP の大きいほう(黙る側)は、その 4 本の QP を BYE を送らずに消す(状態を「相手が切った」(`BFM_CS_CLOSED`)にしてから張り直しを頼むと、BYE を送らずに QP と CQ を消し、受け側の確立の最初 = REQ 待ちへ戻る)。消された QP 宛てのパケットは相手の NIC が黙って捨てるので、IP の小さいほう(試す側)には ACK も応答も返らない。試す側はその 4 本で次を確かめ、最後に張り直して読めることを確かめる。\n\n* A(最後の接続): ACK を確かめる write(`bfm_write_async()` の `BFM_ACK`)で枠を全部(ライブラリが実際に使う数 `aqd`。既定 64 個)埋め、次の 1 個が資源の空きを待って、時間切れ(100ms)で `BFM_E_TIMEOUT` を返す。接続はエラーになり、仕掛かり中の tag も `bfm_test()` で `BFM_E_TIMEOUT`\n* B(最後から 2 本め): ACK を確かめない write(`BFM_NOACK`)を 10 個出し、`bfm_check()` が時間切れで `BFM_E_TIMEOUT` を報告する(仕掛かり 10 個)\n* C(最後から 3 本め): read を 1 個出し、`bfm_wait()` が時間切れで `BFM_E_TIMEOUT` を返す\n* D(最後から 4 本め): 1 回ずつ待つ `bfm_write()` を出し、NIC が ack timeout ごとに `g_bfm_retry_count` 回送り直してから `BFM_E_RETRY`(TRANSPORT_RETRY_EXC)を返すこと、かかった時間 /(再送回数 + 1)が ack timeout の設定(4.096us x 2^`g_bfm_ack_timeout`)以上であることを確かめ、その値を表示する(ConnectX-4 Lx は設定によらず約 0.37〜0.40 秒)\n\n待った時間は、ライブラリの時間切れと同じく最初の操作を出した時刻から測り、`near_timeout()` で時間切れからその 5 倍までの間にあることを確かめる。",
       "args": {},
-      "ret": "`BFM_OK`: 済んだ(結果は `check()` が `g_ng` に数える)。ポートの接続が 4 本より少ないときも、何もせず `BFM_OK`。`BFM_E_TIMEOUT`: 相手と「無応答の用意」(段 210)でそろえられない(黙る側は `sync_at()` の値をそのまま返す)。",
+      "ret": "`BFM_OK`: 済んだ(結果は `check()` が `g_ng` に数える)。ポートの接続が 5 本より少ないときも、何もせず `BFM_OK`。`BFM_E_TIMEOUT`: 相手と「無応答の用意」(段 210)でそろえられない(黙る側は `sync_at()` の値をそのまま返す)。",
       "pre": "全部の接続が張れていて、どの接続でも転送していないこと(`run_all()` が段 200 で相手とそろえた後)。相手も `-z` を付けて run を動かしていること。",
-      "notes": "* 黙る側は、内部の構造体 `g_bfm_conn[]` の `state` を直接 `BFM_CS_CLOSED` に書き換えてから `bfm_reconnect()` を呼ぶ(BYE を送らせないため)。QP が消えたか(`qp.has_qp`)を、`bfm_run()` と `idle()` を回して 5 秒まで待つ(消えなくても先へ進み、「消えない」と表示する)。\n* 黙る側は QP を消してから段 210 でそろえる。試す側は段 210 でそろえてから試すので、試すときには相手の QP は消えている。\n* 試す側の張り直しは `reconnect_wait()`(相手の黙らせた側は REQ を待っている)。\n* 時間切れは `g_bfm_async_timeout_ms`(既定 100ms)。`check()` の文言には数を書かない(枠の数は表示する)。",
+      "notes": "* 黙る側は、内部の構造体 `g_bfm_conn[]` の `state` を直接 `BFM_CS_CLOSED` に書き換えてから `bfm_reconnect()` を呼ぶ(BYE を送らせないため)。QP が消えたか(`qp.has_qp`)を、`bfm_run()` と `idle()` を回して 5 秒まで待つ(消えなくても先へ進み、「消えない」と表示する)。\n* 黙る側は QP を消してから段 210 でそろえる。試す側は段 210 でそろえてから試すので、試すときには相手の QP は消えている。\n* 試す側の張り直しは `reconnect_wait()`(相手の黙らせた側は REQ を待っている)。\n* 時間切れは `g_bfm_async_timeout_ms`(既定 100ms)。`check()` の文言には数を書かない(枠の数は表示する)。\n* D の再送の間隔は上限を見ない(下限の値は装置で違う。ConnectX-4 Lx は約 0.37〜0.40 秒)。D は 1 回ずつ待つ `bfm_write()` なので、時間切れは `g_bfm_op_timeout_ms`(5 秒)。",
       "flow": [
         {"call": "p = first_port() を呼び、n = g_bfm_port_conn[p]、tester = (g_bfm_local_ip[p] < g_bfm_peer_ip[p])"},
-        {"if": "n < 4 ?", "then": [
-          {"do": "「[10] は接続が 4 本以上のときだけ行う」を表示"},
+        {"if": "n < 5 ?", "then": [
+          {"do": "「[10] は接続が 5 本以上のときだけ行う」を表示"},
           {"return": "BFM_OK"}
         ]},
         {"if": "!tester ?(黙る側)", "then": [
           {"do": "j = 0"},
-          {"while": "j < 3 ?", "body": [
+          {"while": "j < SILENT_N ?", "body": [
             {"do": "ci = &g_bfm_conn[p * BFM_MAX_PORT_CONN + n - 1 - j]、ci->state = BFM_CS_CLOSED"},
             {"call": "bfm_reconnect(p, n - 1 - j) を呼ぶ"},
             {"do": "j++"}
@@ -1563,7 +1563,7 @@
           {"do": "gone = 0"},
           {"while": "!gone && now_ns() - t0 < 5 秒 ?", "body": [
             {"call": "bfm_run() を呼ぶ"},
-            {"do": "gone = 1。最後の 3 本のどれかの qp.has_qp が 0 でなければ gone = 0"},
+            {"do": "gone = 1。最後の SILENT_N 本のどれかの qp.has_qp が 0 でなければ gone = 0"},
             {"call": "idle() を呼ぶ"}
           ]},
           {"do": "「QP を、BYE を送らずに消した(済んだ / 消えない)」を表示"},
@@ -1603,7 +1603,7 @@
         ]},
         {"call": "dt = now_ns() - t0 を呼ぶ"},
         {"call": "bfm_strerror(rc) を呼び、待った時間・結果・仕掛かりの数を表示"},
-        {"call": "check(\"[10] B: ACK の返らない ACK なし write を、bfm_check() が時間切れ(100ms)で報告する\", ok && rc == BFM_E_TIMEOUT && inflight == 10 && near_timeout(dt)) を呼ぶ"},
+        {"call": "check(\"[10] B: ACK の返らない ACK なし write を、bfm_check() が時間切れで報告する\", ok && rc == BFM_E_TIMEOUT && inflight == 10 && near_timeout(dt)) を呼ぶ"},
         {"call": "c = bfm_conn(p, n - 3) を呼ぶ(C)"},
         {"do": "t = 0、r = 0"},
         {"call": "t0 = now_ns() を呼ぶ"},
@@ -1611,9 +1611,18 @@
         {"if": "rc == BFM_OK ?", "then": [{"call": "rc = bfm_wait(c, t) を呼ぶ"}]},
         {"call": "dt = now_ns() - t0 を呼ぶ"},
         {"call": "bfm_strerror(rc) を呼び、待った時間と結果を表示"},
-        {"call": "check(\"[10] C: 応答の返らない read を、bfm_wait() が時間切れ(100ms)で返す\", rc == BFM_E_TIMEOUT && near_timeout(dt)) を呼ぶ"},
+        {"call": "check(\"[10] C: 応答の返らない read を、bfm_wait() が時間切れで返す\", rc == BFM_E_TIMEOUT && near_timeout(dt)) を呼ぶ"},
+        {"call": "c = bfm_conn(p, n - 4) を呼ぶ(D)"},
+        {"call": "t0 = now_ns() を呼ぶ"},
+        {"call": "rc = (c != NULL) ? bfm_write(c, ATOM_OFF + 64, &v, 8) : BFM_E_STATE を呼ぶ(c が NULL なら呼ばない)"},
+        {"call": "dt = now_ns() - t0 を呼ぶ"},
+        {"do": "set_ms = 4.096e-3 x 2^g_bfm_ack_timeout、per_ms = dt(ms)/(g_bfm_retry_count + 1)"},
+        {"call": "bfm_strerror(rc) を呼び、かかった時間・結果・ack timeout の設定・1 回あたりの時間を表示"},
+        {"call": "check(\"[10] D: ACK の返らない write を NIC が送り直し、尽きると BFM_E_RETRY\", rc == BFM_E_RETRY) を呼ぶ"},
+        {"call": "snprintf(g_mt_msg, …, \"[10] D: 再送の間隔が ack timeout の設定(%.1f ms)以上\", set_ms) を呼ぶ"},
+        {"call": "check(g_mt_msg, rc == BFM_E_RETRY && per_ms >= set_ms) を呼ぶ"},
         {"do": "j = 0"},
-        {"while": "j < 3 ?", "body": [
+        {"while": "j < SILENT_N ?", "body": [
           {"do": "r = 0"},
           {"call": "c = reconnect_wait(p, n - 1 - j) を呼ぶ"},
           {"call": "snprintf(g_mt_msg, …, \"[10] 接続 %u を張り直して、読める\", n - 1 - j) を呼ぶ"},
@@ -1717,7 +1726,7 @@
     },
     {
       "func": "main",
-      "summary": "オプションと引数を読んで設定の変数を決め、シグナルの受け口を登録し、最初の `bfm_run()` の後で自分の公開メモリを埋めて、引数の動き(run / serve / bench / info)を行い、最後に `do_shutdown()` で止める。\n\n* `-d BDF` / `-D BDF`: `g_bfm_linux_pci_bdf[0]` / `[1]`(ポート 0 / 1 の装置)\n* `-i IP` / `-I IP`: `g_bfm_local_ip[0]` / `[1]`(ポート 0 / 1 の自分の IP)\n* `-c 本数`: ポートごとの接続の数(`g_bfm_port_conn[]`。ポート 1 は使うときだけ)\n* `-t 本数`: `bfm_run()` を同時に呼ぶスレッドの数(既定 4)\n* `-p 番号`: `g_bfm_cm_port`(接続の番号の起点。両方のノードで同じ値にする)\n* `-m 経路MTU`: `g_bfm_path_mtu`\n* `-M ポートのMTU`: `g_bfm_port_mtu`\n* `-n 回数`: run の回数(0 なら一通りの検査の遅延の測定 20000、mt 100000)、bench の回数(既定 100000)\n* `-B` / `-S` / `-C`: `g_bfm_bf_enable` / `g_bfm_scatter_cqe` / `g_bfm_cpu_awake` を 0 にする\n* `-Q 多重度`: `g_bfm_qdepth`(多重度つきの write / read を出しておける数。1〜64)\n* `-x`: run で [7](`run_oob()`)を行う\n* `-q` / `-P` / `-z`: `g_quiet` / `g_perf` / `g_silent` を 1 にする(run で、受けるだけ / mt だけ / [10] 無応答の試験 `run_silent()` も行う)\n* `-v`: `g_bfm_verbose` を 1 にする\n\n引数は `<動き> <相手のIP> [ポート1の相手のIP]`(`g_bfm_peer_ip[0]` / `[1]`)。",
+      "summary": "オプションと引数を読んで設定の変数を決め、シグナルの受け口を登録し、最初の `bfm_run()` の後で自分の公開メモリを埋めて、引数の動き(run / serve / bench / info)を行い、最後に `do_shutdown()` で止める。\n\n* `-d BDF` / `-D BDF`: `g_bfm_linux_pci_bdf[0]` / `[1]`(ポート 0 / 1 の装置)\n* `-i IP` / `-I IP`: `g_bfm_local_ip[0]` / `[1]`(ポート 0 / 1 の自分の IP)\n* `-c 本数`: ポートごとの接続の数(`g_bfm_port_conn[]`。ポート 1 は使うときだけ)\n* `-t 本数`: `bfm_run()` を同時に呼ぶスレッドの数(既定 4)\n* `-p 番号`: `g_bfm_cm_port`(接続の番号の起点。両方のノードで同じ値にする)\n* `-m 経路MTU`: `g_bfm_path_mtu`\n* `-M ポートのMTU`: `g_bfm_port_mtu`\n* `-n 回数`: run の回数(0 なら一通りの検査の遅延の測定 20000、mt 100000)、bench の回数(既定 100000)\n* `-B` / `-S` / `-C`: `g_bfm_bf_enable` / `g_bfm_scatter_cqe` / `g_bfm_cpu_awake` を 0 にする\n* `-Q 多重度`: `g_bfm_qdepth`(多重度つきの write / read を出しておける数。1〜64)\n* `-a N`: `g_bfm_ack_timeout`(RC の ack timeout)\n* `-x`: run で [7](`run_oob()`)を行う\n* `-q` / `-P` / `-z`: `g_quiet` / `g_perf` / `g_silent` を 1 にする(run で、受けるだけ / mt だけ / [10] 無応答の試験 `run_silent()` も行う)\n* `-v`: `g_bfm_verbose` を 1 にする\n\n引数は `<動き> <相手のIP> [ポート1の相手のIP]`(`g_bfm_peer_ip[0]` / `[1]`)。",
       "args": {"argc": "引数の数", "argv": "引数"},
       "ret": "0: 成功。1: 最初の `bfm_run()` が失敗した、公開メモリが小さい、または run / bench / info が失敗を返した。2: 引数が正しくない。",
       "pre": "特になし。",
@@ -1725,7 +1734,7 @@
       "entry_note": "プログラムの開始点(OS から呼ばれる)",
       "flow": [
         {"do": "iters = 0、threads = 4、nconn = 0、oob = 0"},
-        {"while": "(opt = getopt(argc, argv, \"d:i:D:I:c:p:m:M:n:t:Q:BSCxqPzvh\")) != -1 ?", "body": [
+        {"while": "(opt = getopt(argc, argv, \"d:i:D:I:c:p:m:M:n:t:Q:a:BSCxqPzvh\")) != -1 ?", "body": [
           {"switch": "opt", "cases": [
             {"case": "'d'", "body": [{"do": "g_bfm_linux_pci_bdf[0] = optarg"}]},
             {"case": "'i'", "body": [
@@ -1756,6 +1765,7 @@
             {"case": "'q'", "body": [{"do": "g_quiet = 1"}]},
             {"case": "'P'", "body": [{"do": "g_perf = 1"}]},
             {"case": "'z'", "body": [{"do": "g_silent = 1"}]},
+            {"case": "'a'", "body": [{"do": "g_bfm_ack_timeout = atoi(optarg)"}]},
             {"case": "'Q'", "body": [{"do": "g_bfm_qdepth = atoi(optarg)"}]},
             {"case": "'v'", "body": [{"do": "g_bfm_verbose = 1"}]},
             {"default": true, "body": [

@@ -87,7 +87,7 @@ static void usage(void)
 {
     printf("使い方: bfmem_test [-d BDF] [-i 自分のIP] [-D ポート1のBDF] [-I ポート1の自分のIP] [-c 接続数/ポート]\n"
            "                   [-t スレッド数] [-p 接続の番号] [-m 経路MTU 1-5] [-M ポートのMTU] [-n 回数]\n"
-           "                   [-Q 多重度 1-64] [-B] [-S] [-C] [-x] [-q] [-P] [-z] [-v]\n"
+           "                   [-Q 多重度 1-64] [-a ack timeout] [-B] [-S] [-C] [-x] [-q] [-P] [-z] [-v]\n"
            "                   run <相手のIP> [ポート1の相手のIP] | serve <相手のIP> [ポート1の相手のIP] |\n"
            "                   bench <相手のIP> | info <相手のIP>\n"
            "  両方のノードで同じものを動かす。IP の小さいほうが掛け側になる(自動)。相手の MAC も自動で取る\n"
@@ -105,8 +105,10 @@ static void usage(void)
            "  -x  最後に公開メモリの範囲の外を読み、相手の NIC が断ることを確かめ、その接続を張り直す\n"
            "  -q  run で、こちらからは転送せず相手からの転送を受けるだけ(片方向の速さを測るとき、受ける側に付ける)\n"
            "  -P  run で一通りの検査を飛ばし、全部の接続での転送と速さ(mt)だけを行う(本数を変えて速さを測るとき)\n"
-           "  -z  run で無応答の試験([10]。両方のノードに付ける)。IP の大きいほうが最後の 3 本の QP を BYE なしで消し、\n"
-           "      小さいほうが ACK・応答の返らない状態で、資源の空き待ち・bfm_check()・bfm_wait() の時間切れを確かめて張り直す\n");
+           "  -z  run で無応答の試験([10]。両方のノードに付ける)。IP の大きいほうが最後の 4 本の QP を BYE なしで消し、\n"
+           "      小さいほうが ACK・応答の返らない状態で、資源の空き待ち・bfm_check()・bfm_wait() の時間切れと、\n"
+           "      NIC の再送の間隔(bfm_write() が BFM_E_RETRY になるまでの時間)を確かめて張り直す\n"
+           "  -a N  RC の ack timeout(g_bfm_ack_timeout。4.096us x 2^N。既定 12)\n");
 }
 
 /* ---------------------------------------------------------------------
@@ -1412,13 +1414,15 @@ static int sync_at(uint64_t stage, const char *what)
 /* ---------------------------------------------------------------------
  * [10] 無応答(-z。両方のノードに付ける)
  *
- * 黙る側(IP の大きいほう)が、ポート p0 の最後の 3 本の接続の QP を、BYE を送らずに消す(張り直しを頼んだ扱いにして
+ * 黙る側(IP の大きいほう)が、ポート p0 の最後の 4 本の接続の QP を、BYE を送らずに消す(張り直しを頼んだ扱いにして
  * 受け側の確立の最初 = REQ 待ちへ戻す)。消された QP 宛てのパケットは相手の NIC が黙って捨てるので、試す側
- * (IP の小さいほう)には ACK も応答も返らない。試す側はその 3 本で次を確かめ、最後に張り直す。
+ * (IP の小さいほう)には ACK も応答も返らない。試す側はその 4 本で次を確かめ、最後に張り直す。
  *   A  ACK を確かめる write で枠を全部(既定 64 個)埋め、次の 1 個が資源の空きを待って、最初を出してから
  *      時間切れ(既定 100ms)で BFM_E_TIMEOUT(待った時間は、ライブラリと同じく最初の操作を出した時刻から測る)
  *   B  ACK を確かめない write を 10 個出し、bfm_check() が 100ms で BFM_E_TIMEOUT を報告する
  *   C  read を 1 個出し、bfm_wait() が 100ms で BFM_E_TIMEOUT を返す
+ *   D  1 回ずつ待つ bfm_write() を出し、NIC が ack timeout ごとに送り直して、尽きると BFM_E_RETRY を返す。
+ *      かかった時間から、NIC が実際に待った ack timeout を求めて表示する(設定以上か。ConnectX-4 Lx は約 0.37 秒以上)
  * ------------------------------------------------------------------- */
 
 /* 待った時間が時間切れ(g_bfm_async_timeout_ms)から、その 5 倍までの間か。 */
@@ -1428,18 +1432,20 @@ static int near_timeout(uint64_t ns)
     return ns >= lim && ns <= lim * 5u;
 }
 
+#define SILENT_N 4u                       /* 黙らせる接続の数(A・B・C・D に 1 本ずつ)*/
+
 static int run_silent(void)
 {
     const unsigned p = first_port(), n = g_bfm_port_conn[p];
     const int tester = g_bfm_local_ip[p] < g_bfm_peer_ip[p];
-    if (n < 4u) {
-        printf("run: [10] 無応答の試験は、ポートの接続が 4 本以上のときだけ行う(%u 本)\n", n);
+    if (n < 5u) {
+        printf("run: [10] 無応答の試験は、ポートの接続が 5 本以上のときだけ行う(%u 本)\n", n);
         return BFM_OK;
     }
     if (!tester) {
-        /* 黙る側: 最後の 3 本の QP を、BYE を送らずに消す(状態を「相手が切った」にしてから張り直しを頼むと、
+        /* 黙る側: 最後の 4 本の QP を、BYE を送らずに消す(状態を「相手が切った」にしてから張り直しを頼むと、
          * BYE を送らずに QP と CQ を消し、受け側の確立の最初 = REQ 待ちに戻る) */
-        for (unsigned j = 0; j < 3u; j++) {
+        for (unsigned j = 0; j < SILENT_N; j++) {
             struct bfm_conn *ci = &g_bfm_conn[p * BFM_MAX_PORT_CONN + n - 1u - j];
             ci->state = BFM_CS_CLOSED;
             (void)bfm_reconnect(p, n - 1u - j);
@@ -1449,11 +1455,11 @@ static int run_silent(void)
         while (!gone && now_ns() - t0 < 5000000000ull) {
             (void)bfm_run();
             gone = 1;
-            for (unsigned j = 0; j < 3u; j++)
+            for (unsigned j = 0; j < SILENT_N; j++)
                 if (g_bfm_conn[p * BFM_MAX_PORT_CONN + n - 1u - j].qp.has_qp) gone = 0;
             idle();
         }
-        printf("run: [10] 黙る側: ポート %u の接続 %u〜%u の QP を、BYE を送らずに消した(%s)\n", p, n - 3u, n - 1u,
+        printf("run: [10] 黙る側: ポート %u の接続 %u〜%u の QP を、BYE を送らずに消した(%s)\n", p, n - SILENT_N, n - 1u,
                gone ? "済んだ" : "消えない");
         return sync_at(210, "無応答の用意");
     }
@@ -1461,7 +1467,7 @@ static int run_silent(void)
     /* 試す側 */
     if (sync_at(210, "無応答の用意") != BFM_OK) return BFM_E_TIMEOUT;
     printf("run: [10] 試す側: 相手はポート %u の接続 %u〜%u の QP を消した(ACK も応答も返らない)。時間切れ %u ms\n", p,
-           n - 3u, n - 1u, g_bfm_async_timeout_ms);
+           n - SILENT_N, n - 1u, g_bfm_async_timeout_ms);
     uint64_t v = 0x5a5a5a5a5a5a5a5aull;
     int rc;
 
@@ -1513,8 +1519,26 @@ static int run_silent(void)
         printf("run: [10] C: read の bfm_wait() は %.1f ms で %s\n", (double)dt / 1e6, bfm_strerror(rc));
         check("[10] C: 応答の返らない read を、bfm_wait() が時間切れで返す", rc == BFM_E_TIMEOUT && near_timeout(dt));
     }
+    /* D: NIC の再送の間隔。1 回ずつ待つ bfm_write()(時間切れ g_bfm_op_timeout_ms = 5 秒)を出すと、NIC は
+     * ack timeout ごとに g_bfm_retry_count 回送り直してから TRANSPORT_RETRY_EXC を返す(BFM_E_RETRY)。
+     * かかった時間 / (再送回数 + 1) が、NIC が実際に待った ack timeout */
+    {
+        bfm_conn_t *c = bfm_conn(p, n - 4u);
+        const uint64_t t0 = now_ns();
+        rc = (c != NULL) ? bfm_write(c, ATOM_OFF + 64u, &v, 8) : BFM_E_STATE;
+        const uint64_t dt = now_ns() - t0;
+        const double set_ms = 4.096e-3 * (double)(1u << g_bfm_ack_timeout);
+        const double per_ms = (double)dt / 1e6 / (double)(g_bfm_retry_count + 1u);
+        printf("run: [10] D: bfm_write() は %.1f ms で %s(ack timeout の設定 %u = %.1f ms、再送 %u 回 → 1 回あたり %.1f ms)\n",
+               (double)dt / 1e6, bfm_strerror(rc), g_bfm_ack_timeout, set_ms, g_bfm_retry_count, per_ms);
+        check("[10] D: ACK の返らない write を NIC が送り直し、尽きると BFM_E_RETRY(TRANSPORT_RETRY_EXC)",
+              rc == BFM_E_RETRY);
+        /* 上限は見ない(ConnectX-4 Lx は設定によらず約 0.37〜0.40 秒待つ。下限の値は装置で違う)*/
+        snprintf(g_mt_msg, sizeof(g_mt_msg), "[10] D: 再送の間隔が ack timeout の設定(%.1f ms)以上", set_ms);
+        check(g_mt_msg, rc == BFM_E_RETRY && per_ms >= set_ms);
+    }
     /* 張り直す(相手の黙らせた側は REQ を待っている)*/
-    for (unsigned j = 0; j < 3u; j++) {
+    for (unsigned j = 0; j < SILENT_N; j++) {
         uint64_t r = 0;
         bfm_conn_t *c = reconnect_wait(p, n - 1u - j);
         snprintf(g_mt_msg, sizeof(g_mt_msg), "[10] 接続 %u を張り直して、読める", n - 1u - j);
@@ -1602,7 +1626,7 @@ int main(int argc, char **argv)
     uint32_t iters = 0, threads = 4, nconn = 0;
     int oob = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "d:i:D:I:c:p:m:M:n:t:Q:BSCxqPzvh")) != -1) {
+    while ((opt = getopt(argc, argv, "d:i:D:I:c:p:m:M:n:t:Q:a:BSCxqPzvh")) != -1) {
         switch (opt) {
         case 'd': g_bfm_linux_pci_bdf[0] = optarg; break;
         case 'i': if (parse_ip(optarg, &g_bfm_local_ip[0]) != 0) { usage(); return 2; } break;
@@ -1621,6 +1645,7 @@ int main(int argc, char **argv)
         case 'q': g_quiet = 1; break;
         case 'P': g_perf = 1; break;
         case 'z': g_silent = 1; break;
+        case 'a': g_bfm_ack_timeout = (uint8_t)atoi(optarg); break;
         case 'Q': g_bfm_qdepth = (uint32_t)atoi(optarg); break;
         case 'v': g_bfm_verbose = 1; break;
         default: usage(); return 2;
