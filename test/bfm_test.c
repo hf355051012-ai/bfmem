@@ -44,6 +44,7 @@ static volatile sig_atomic_t g_dump; /* hash を出す合図(serve で SIGQUIT)*
 static int g_serve;                  /* serve のときだけ SIGQUIT で hash を出す */
 static int g_quiet;                  /* -q: こちらからは転送せず、相手からの転送を受けるだけ(片方向の速さを測るため)*/
 static int g_perf;                   /* -P: run で一通りの検査を飛ばし、mt(全部の接続での転送と速さ)だけを行う */
+static int g_silent;                 /* -z: [10] 無応答の試験(両方のノードに付ける。IP の小さいほうが試し、大きいほうが黙る)*/
 static uint8_t g_model[DATA_BYTES];  /* 相手のデータ領域にあるはずの中身(模型)*/
 
 static void on_sig(int s)
@@ -86,7 +87,7 @@ static void usage(void)
 {
     printf("使い方: bfmem_test [-d BDF] [-i 自分のIP] [-D ポート1のBDF] [-I ポート1の自分のIP] [-c 接続数/ポート]\n"
            "                   [-t スレッド数] [-p 接続の番号] [-m 経路MTU 1-5] [-M ポートのMTU] [-n 回数]\n"
-           "                   [-Q 多重度 1-64] [-B] [-S] [-C] [-x] [-q] [-P] [-v]\n"
+           "                   [-Q 多重度 1-64] [-B] [-S] [-C] [-x] [-q] [-P] [-z] [-v]\n"
            "                   run <相手のIP> [ポート1の相手のIP] | serve <相手のIP> [ポート1の相手のIP] |\n"
            "                   bench <相手のIP> | info <相手のIP>\n"
            "  両方のノードで同じものを動かす。IP の小さいほうが掛け側になる(自動)。相手の MAC も自動で取る\n"
@@ -103,7 +104,9 @@ static void usage(void)
            "  -C  CPU を深い省電力状態に入れない設定(g_bfm_cpu_awake)を切る\n"
            "  -x  最後に公開メモリの範囲の外を読み、相手の NIC が断ることを確かめ、その接続を張り直す\n"
            "  -q  run で、こちらからは転送せず相手からの転送を受けるだけ(片方向の速さを測るとき、受ける側に付ける)\n"
-           "  -P  run で一通りの検査を飛ばし、全部の接続での転送と速さ(mt)だけを行う(本数を変えて速さを測るとき)\n");
+           "  -P  run で一通りの検査を飛ばし、全部の接続での転送と速さ(mt)だけを行う(本数を変えて速さを測るとき)\n"
+           "  -z  run で無応答の試験([10]。両方のノードに付ける)。IP の大きいほうが最後の 3 本の QP を BYE なしで消し、\n"
+           "      小さいほうが ACK・応答の返らない状態で、資源の空き待ち・bfm_check()・bfm_wait() の時間切れを確かめて張り直す\n");
 }
 
 /* ---------------------------------------------------------------------
@@ -1020,7 +1023,8 @@ static void run_dif(bfm_conn_t *c, uint32_t iters)
 #define MT_CNT_OFF (MT_OFF + BFM_MAX_CONN * MT_SPAN)   /* 全スレッドで共有する FAA の語 */
 #define MT_DIF_N   16u
 #define MT_PH      13u                    /* 速さの区間の数(g_mt_ph)*/
-#define MT_SYNC    10u                    /* 速さの区間ごとに相手と足並みをそろえる段の番号の起点 */
+#define MT_SYNC    100u                   /* 速さの区間ごとに相手と足並みをそろえる段の番号の起点(区間の数だけ使う。200 未満)*/
+_Static_assert(MT_SYNC + MT_PH <= 200u, "速さの区間の段の番号が、全部の接続での転送の段(200)と重ならないこと");
 #define MT_BIG     (64u * 1024u)          /* 帯域を測る write / read の長さ */
 
 /* 速さの区間。0〜4 は 1 回ずつ完了を待つ関数、5〜12 は多重度つき(bfm_*_async。g_bfm_qdepth 個まで出しておく)。
@@ -1405,6 +1409,120 @@ static int sync_at(uint64_t stage, const char *what)
     }
 }
 
+/* ---------------------------------------------------------------------
+ * [10] 無応答(-z。両方のノードに付ける)
+ *
+ * 黙る側(IP の大きいほう)が、ポート p0 の最後の 3 本の接続の QP を、BYE を送らずに消す(張り直しを頼んだ扱いにして
+ * 受け側の確立の最初 = REQ 待ちへ戻す)。消された QP 宛てのパケットは相手の NIC が黙って捨てるので、試す側
+ * (IP の小さいほう)には ACK も応答も返らない。試す側はその 3 本で次を確かめ、最後に張り直す。
+ *   A  ACK を確かめる write で枠を全部(既定 64 個)埋め、次の 1 個が資源の空きを待って、最初を出してから
+ *      時間切れ(既定 100ms)で BFM_E_TIMEOUT(待った時間は、ライブラリと同じく最初の操作を出した時刻から測る)
+ *   B  ACK を確かめない write を 10 個出し、bfm_check() が 100ms で BFM_E_TIMEOUT を報告する
+ *   C  read を 1 個出し、bfm_wait() が 100ms で BFM_E_TIMEOUT を返す
+ * ------------------------------------------------------------------- */
+
+/* 待った時間が時間切れ(g_bfm_async_timeout_ms)から、その 5 倍までの間か。 */
+static int near_timeout(uint64_t ns)
+{
+    const uint64_t lim = (uint64_t)g_bfm_async_timeout_ms * 1000000u;
+    return ns >= lim && ns <= lim * 5u;
+}
+
+static int run_silent(void)
+{
+    const unsigned p = first_port(), n = g_bfm_port_conn[p];
+    const int tester = g_bfm_local_ip[p] < g_bfm_peer_ip[p];
+    if (n < 4u) {
+        printf("run: [10] 無応答の試験は、ポートの接続が 4 本以上のときだけ行う(%u 本)\n", n);
+        return BFM_OK;
+    }
+    if (!tester) {
+        /* 黙る側: 最後の 3 本の QP を、BYE を送らずに消す(状態を「相手が切った」にしてから張り直しを頼むと、
+         * BYE を送らずに QP と CQ を消し、受け側の確立の最初 = REQ 待ちに戻る) */
+        for (unsigned j = 0; j < 3u; j++) {
+            struct bfm_conn *ci = &g_bfm_conn[p * BFM_MAX_PORT_CONN + n - 1u - j];
+            ci->state = BFM_CS_CLOSED;
+            (void)bfm_reconnect(p, n - 1u - j);
+        }
+        const uint64_t t0 = now_ns();
+        int gone = 0;
+        while (!gone && now_ns() - t0 < 5000000000ull) {
+            (void)bfm_run();
+            gone = 1;
+            for (unsigned j = 0; j < 3u; j++)
+                if (g_bfm_conn[p * BFM_MAX_PORT_CONN + n - 1u - j].qp.has_qp) gone = 0;
+            idle();
+        }
+        printf("run: [10] 黙る側: ポート %u の接続 %u〜%u の QP を、BYE を送らずに消した(%s)\n", p, n - 3u, n - 1u,
+               gone ? "済んだ" : "消えない");
+        return sync_at(210, "無応答の用意");
+    }
+
+    /* 試す側 */
+    if (sync_at(210, "無応答の用意") != BFM_OK) return BFM_E_TIMEOUT;
+    printf("run: [10] 試す側: 相手はポート %u の接続 %u〜%u の QP を消した(ACK も応答も返らない)。時間切れ %u ms\n", p,
+           n - 3u, n - 1u, g_bfm_async_timeout_ms);
+    uint64_t v = 0x5a5a5a5a5a5a5a5aull;
+    int rc;
+
+    /* A: 枠を全部埋めて、65 個目が資源の空きを待つ */
+    {
+        bfm_conn_t *c = bfm_conn(p, n - 1u);
+        bfm_tag_t tags[BFM_QD_MAX], t65 = 0;
+        int ok = (c != NULL);
+        const uint32_t qd = ok ? ((struct bfm_conn *)c)->aqd : 0u;   /* ライブラリが実際に使う枠の数 */
+        const uint64_t t0 = now_ns();          /* 時間切れの起点 = 最初の操作を出した時刻 */
+        for (uint32_t k = 0; k < qd && ok; k++)
+            if (bfm_write_async(c, ATOM_OFF + 64u + (k & 7u) * 8u, &v, 8, BFM_ACK, &tags[k]) != BFM_OK) ok = 0;
+        uint32_t inflight = 0;
+        if (ok) (void)bfm_check(c, &inflight);
+        snprintf(g_mt_msg, sizeof(g_mt_msg), "[10] A: ACK の返らない write で枠が全部(%u 個)仕掛かり中になる", qd);
+        check(g_mt_msg, ok && inflight == qd);
+        rc = ok ? bfm_write_async(c, ATOM_OFF + 64u, &v, 8, BFM_ACK, &t65) : BFM_E_STATE;
+        const uint64_t dt = now_ns() - t0;
+        printf("run: [10] A: %u 個目は資源の空きを待ち、最初を出してから %.1f ms で %s\n", qd + 1u, (double)dt / 1e6,
+               bfm_strerror(rc));
+        check("[10] A: 枠が埋まった後の 1 個は資源の空きを待ち、時間切れで BFM_E_TIMEOUT", rc == BFM_E_TIMEOUT && near_timeout(dt));
+        check("[10] A: 接続はエラーになり、仕掛かり中の tag も BFM_E_TIMEOUT", ok && !bfm_is_up(c) &&
+              bfm_test(c, tags[0]) == BFM_E_TIMEOUT);
+    }
+    /* B: ACK を確かめない write の時間切れを bfm_check() で知る */
+    {
+        bfm_conn_t *c = bfm_conn(p, n - 2u);
+        int ok = (c != NULL);
+        const uint64_t t0 = now_ns();          /* 時間切れの起点 = 最初の操作を出した時刻 */
+        for (uint32_t k = 0; k < 10u && ok; k++)
+            if (bfm_write_async(c, ATOM_OFF + 64u, &v, 8, BFM_NOACK, NULL) != BFM_OK) ok = 0;
+        uint32_t inflight = 0;
+        rc = BFM_OK;
+        while (ok && rc == BFM_OK && now_ns() - t0 < 2000000000ull) rc = bfm_check(c, &inflight);
+        const uint64_t dt = now_ns() - t0;
+        printf("run: [10] B: bfm_check() は %.1f ms で %s(仕掛かり %u 個)\n", (double)dt / 1e6, bfm_strerror(rc), inflight);
+        check("[10] B: ACK の返らない ACK なし write を、bfm_check() が時間切れで報告する",
+              ok && rc == BFM_E_TIMEOUT && inflight == 10u && near_timeout(dt));
+    }
+    /* C: read の応答が来ない */
+    {
+        bfm_conn_t *c = bfm_conn(p, n - 3u);
+        bfm_tag_t t = 0;
+        uint64_t r = 0;
+        const uint64_t t0 = now_ns();
+        rc = (c != NULL) ? bfm_read_async(c, ATOM_OFF + 8u, &r, 8, &t) : BFM_E_STATE;
+        if (rc == BFM_OK) rc = bfm_wait(c, t);
+        const uint64_t dt = now_ns() - t0;
+        printf("run: [10] C: read の bfm_wait() は %.1f ms で %s\n", (double)dt / 1e6, bfm_strerror(rc));
+        check("[10] C: 応答の返らない read を、bfm_wait() が時間切れで返す", rc == BFM_E_TIMEOUT && near_timeout(dt));
+    }
+    /* 張り直す(相手の黙らせた側は REQ を待っている)*/
+    for (unsigned j = 0; j < 3u; j++) {
+        uint64_t r = 0;
+        bfm_conn_t *c = reconnect_wait(p, n - 1u - j);
+        snprintf(g_mt_msg, sizeof(g_mt_msg), "[10] 接続 %u を張り直して、読める", n - 1u - j);
+        check(g_mt_msg, c != NULL && bfm_read(c, ATOM_OFF + 8u, &r, 8) == BFM_OK);
+    }
+    return BFM_OK;
+}
+
 static int run_all(uint32_t nthreads, uint32_t iters, int oob)
 {
     if (run_up(nthreads) != BFM_OK) return 1;
@@ -1423,7 +1541,14 @@ static int run_all(uint32_t nthreads, uint32_t iters, int oob)
         for (unsigned ph = 0; ph < MT_PH && !g_stop; ph++)
             if (sync_at(MT_SYNC + ph, g_mt_ph[ph].name) != BFM_OK) return 1;
     }
-    if (g_stop || sync_at(20, "全部の接続での転送") != BFM_OK) return 1;
+    if (g_stop || sync_at(200, "全部の接続での転送") != BFM_OK) return 1;
+
+    /* 無応答(-z。両方のノードに付ける)*/
+    if (g_silent) {
+        g_ng = 0;
+        if (run_silent() != BFM_OK) return 1;
+        ret |= g_ng ? 1 : 0;
+    }
 
     /* 範囲の外と張り直し(最後の接続。相手は待つ間に自分の側を張り直す)*/
     if (oob && !g_quiet) {
@@ -1436,7 +1561,7 @@ static int run_all(uint32_t nthreads, uint32_t iters, int oob)
         else check("[7] 最後の接続が使える", 0);
         ret |= g_ng ? 1 : 0;
     }
-    if (g_stop || sync_at(30, "終わり") != BFM_OK) return 1;
+    if (g_stop || sync_at(300, "終わり") != BFM_OK) return 1;
 
     if (!g_quiet)
         printf("run: 模型の hash = %016llx(相手が出す「自分の公開メモリの hash」と同じはず)\n",
@@ -1477,7 +1602,7 @@ int main(int argc, char **argv)
     uint32_t iters = 0, threads = 4, nconn = 0;
     int oob = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "d:i:D:I:c:p:m:M:n:t:Q:BSCxqPvh")) != -1) {
+    while ((opt = getopt(argc, argv, "d:i:D:I:c:p:m:M:n:t:Q:BSCxqPzvh")) != -1) {
         switch (opt) {
         case 'd': g_bfm_linux_pci_bdf[0] = optarg; break;
         case 'i': if (parse_ip(optarg, &g_bfm_local_ip[0]) != 0) { usage(); return 2; } break;
@@ -1495,6 +1620,7 @@ int main(int argc, char **argv)
         case 'x': oob = 1; break;
         case 'q': g_quiet = 1; break;
         case 'P': g_perf = 1; break;
+        case 'z': g_silent = 1; break;
         case 'Q': g_bfm_qdepth = (uint32_t)atoi(optarg); break;
         case 'v': g_bfm_verbose = 1; break;
         default: usage(); return 2;

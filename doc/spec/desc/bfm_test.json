@@ -1,6 +1,6 @@
 {
   "file": "test/bfm_test.c",
-  "summary": "試験プログラム `bfmem_test`(Linux + VFIO)。**両方のノードで同じものを動かす**(双方向)。掛け側・受け側は IP の大小で自動で決まり(小さいほうが掛け側)、相手の MAC も自動で取る。動きはコマンドの引数で選ぶ。\n\n* `run <相手のIP> [ポート1の相手のIP]`: `-t` 本のスレッドから代表 API `bfm_run()` を同時に呼んで全部の接続を張る(`run_up()`)。張れたら、接続 (p0, 0) で相手の公開メモリへ一通りの操作をして確かめ(`run_checks()`)、続けて全部の接続に 1 本ずつスレッドを付けて同時に転送し、1 回ずつ完了を待つ関数と多重度つきの関数(`bfm_write_async()` / `bfm_read_async()`。`-Q` 個まで出しておく)の速さを測る(`run_mt()`)。`-x` なら範囲の外の read と張り直しも確かめる(`run_oob()`)。区切りごとに相手と足並みをそろえ(`sync_at()`)、最後に模型の hash と自分の公開メモリの hash を表示する。相手も同時に、こちらへ同じことをする。\n* `serve <相手のIP> [ポート1の相手のIP]`: 接続を張って保つだけ(bench の相手)。Ctrl-\\(SIGQUIT)で自分の公開メモリの hash を表示する。\n* `bench <相手のIP>`: 接続 1 本で write / read を 4B〜256KiB、多重度 1・4・8・16 で流し、IOPS・MB/s・平均遅延を表示する(相手は `serve -c 1`)。\n* `info <相手のIP>`: ポートを立ち上げて能力を表示するだけ(接続は待たない)。\n\nポート 1 を使うのは、ポート 1 の相手の IP を書いたときだけ(`-D`・`-I` でポート 1 の装置と自分の IP)。\n\n公開メモリの取り決め(どちらのノードも、自分の公開メモリを最初に埋める)は、先頭 64KiB がデータ領域(`(i * 7 + 3) & 0xff` で埋める)、その後ろ 4KiB が 8 バイトの atomic 語 512 個(0 で埋める)、`SYNC_OFF`(3MiB)が足並みをそろえる語(相手が自分の進み具合を書きに来る。0 で埋める)。相手のデータ領域の中身を手元に模型として持ち、「相手の模型の hash」と「自分の公開メモリの hash」が同じことを両方の向きで見る(両側が同じ間違い方をしても気付けるように)。",
+  "summary": "試験プログラム `bfmem_test`(Linux + VFIO)。**両方のノードで同じものを動かす**(双方向)。掛け側・受け側は IP の大小で自動で決まり(小さいほうが掛け側)、相手の MAC も自動で取る。動きはコマンドの引数で選ぶ。\n\n* `run <相手のIP> [ポート1の相手のIP]`: `-t` 本のスレッドから代表 API `bfm_run()` を同時に呼んで全部の接続を張る(`run_up()`)。張れたら、接続 (p0, 0) で相手の公開メモリへ一通りの操作をして確かめ(`run_checks()`)、続けて全部の接続に 1 本ずつスレッドを付けて同時に転送し、1 回ずつ完了を待つ関数と多重度つきの関数(`bfm_write_async()` / `bfm_read_async()`。`-Q` 個まで出しておく)の速さを測る(`run_mt()`)。`-z`(両方のノードに付ける)なら、相手が BYE を送らずに QP を消した接続で、ACK・応答が返らないときの時間切れを確かめる(`run_silent()`)。`-x` なら範囲の外の read と張り直しも確かめる(`run_oob()`)。区切りごとに相手と足並みをそろえ(`sync_at()`)、最後に模型の hash と自分の公開メモリの hash を表示する。相手も同時に、こちらへ同じことをする。\n* `serve <相手のIP> [ポート1の相手のIP]`: 接続を張って保つだけ(bench の相手)。Ctrl-\\(SIGQUIT)で自分の公開メモリの hash を表示する。\n* `bench <相手のIP>`: 接続 1 本で write / read を 4B〜256KiB、多重度 1・4・8・16 で流し、IOPS・MB/s・平均遅延を表示する(相手は `serve -c 1`)。\n* `info <相手のIP>`: ポートを立ち上げて能力を表示するだけ(接続は待たない)。\n\nポート 1 を使うのは、ポート 1 の相手の IP を書いたときだけ(`-D`・`-I` でポート 1 の装置と自分の IP)。\n\n公開メモリの取り決め(どちらのノードも、自分の公開メモリを最初に埋める)は、先頭 64KiB がデータ領域(`(i * 7 + 3) & 0xff` で埋める)、その後ろ 4KiB が 8 バイトの atomic 語 512 個(0 で埋める)、`SYNC_OFF`(3MiB)が足並みをそろえる語(相手が自分の進み具合を書きに来る。0 で埋める)。相手のデータ領域の中身を手元に模型として持ち、「相手の模型の hash」と「自分の公開メモリの hash」が同じことを両方の向きで見る(両側が同じ間違い方をしても気付けるように)。",
   "functions": [
     {
       "func": "on_sig",
@@ -70,7 +70,7 @@
     },
     {
       "func": "usage",
-      "summary": "使い方(オプションと、run / serve / bench / info の書き方、各動きと `-B`・`-S`・`-C`・`-x` の説明)を表示する。",
+      "summary": "使い方(オプションと、run / serve / bench / info の書き方、各動きと `-B`・`-S`・`-C`・`-x`・`-q`・`-P`・`-z` の説明)を表示する。",
       "args": {},
       "ret": "なし",
       "pre": "特になし。",
@@ -241,7 +241,7 @@
     {
       "func": "sync_peer",
       "summary": "相手と足並みをそろえる。相手の公開メモリの `SYNC_OFF` へ `stage` を書き、自分の公開メモリの `SYNC_OFF` の語が `stage` 以上になる(相手もそこまで来た)まで、`bfm_run()` と `reconnect_down()` を 200us おきに回して待つ。",
-      "args": {"c": "相手へ進み具合を書く接続", "stage": "進み具合(区切りごとに 1・2・3 と増やす)", "what": "区切りの名前(表示用)"},
+      "args": {"c": "相手へ進み具合を書く接続", "stage": "進み具合(区切りごとに増やす。番号は `sync_at()` を参照)", "what": "区切りの名前(表示用)"},
       "ret": "`BFM_OK`: 相手もそこまで来た。`bfm_write()` の戻り値(負): 相手へ書けない。`BFM_E_TIMEOUT`: 10 分待っても来ない。`BFM_E_STATE`: 止める合図(`g_stop`)で抜けた。",
       "pre": "c が使える接続であること。どの接続でも転送していないこと(待つ間に `reconnect_down()` を呼ぶ)。",
       "notes": "* 自分の `SYNC_OFF` の語は相手が書きに来る(`fill_area()` が最初に 0 にする)。\n* 待つ間に切れた接続は張り直す(相手が [7] で張り直す接続など)。",
@@ -1501,7 +1501,7 @@
     {
       "func": "sync_at",
       "summary": "相手と足並みをそろえる。接続 (p0, 0)(p0 = `first_port()`)が使えれば `sync_peer()` でそろえ、使えないか `sync_peer()` が失敗したら、`bfm_run()` と `reconnect_down()` を回して 1ms 後にやり直す。60 秒たってもそろわなければあきらめる。",
-      "args": {"stage": "進み具合(`sync_peer()` へ渡す。区切りごとに 1・2・3)", "what": "区切りの名前(表示用)"},
+      "args": {"stage": "進み具合(`sync_peer()` へ渡す。区切りごとに増やす: 一通りの検査 1、速さの区間 `MT_SYNC`(100)+ 区間の番号(100〜112)、全部の接続での転送 200、無応答の用意 210、終わり 300)", "what": "区切りの名前(表示用)"},
       "ret": "`BFM_OK`: 相手もそこまで来た。`BFM_E_TIMEOUT`: そろえられない(60 秒たった、または止める合図 `g_stop`)。",
       "pre": "どの接続でも転送していないこと(`reconnect_down()` を呼ぶ)。",
       "notes": "* 60 秒は最初からの時間で数え、`sync_peer()` の中で待った時間(最大 10 分)も含む。60 秒を過ぎていても、`sync_peer()` から戻るまでは判定しない。\n* 止める合図(`g_stop`)でも `BFM_E_TIMEOUT` を返す。",
@@ -1528,12 +1528,108 @@
       ]
     },
     {
+      "func": "near_timeout",
+      "summary": "待った時間 `ns` が、非同期の操作の時間切れ(`g_bfm_async_timeout_ms`)から、その 5 倍までの間にあるかを返す([10] で、時間切れまで待ったことを確かめる)。",
+      "args": {"ns": "待った時間(ナノ秒)"},
+      "ret": "1: `g_bfm_async_timeout_ms` ミリ秒以上、その 5 倍以下。0: それ以外。",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"do": "lim = g_bfm_async_timeout_ms * 1000000"},
+        {"return": "ns >= lim && ns <= lim * 5"}
+      ]
+    },
+    {
+      "func": "run_silent",
+      "summary": "[10] 無応答の試験(`-z`。両方のノードに付ける)。ポート p0(`first_port()`)の最後の 3 本の接続を使う。IP の大きいほう(黙る側)は、その 3 本の QP を BYE を送らずに消す(状態を「相手が切った」(`BFM_CS_CLOSED`)にしてから張り直しを頼むと、BYE を送らずに QP と CQ を消し、受け側の確立の最初 = REQ 待ちへ戻る)。消された QP 宛てのパケットは相手の NIC が黙って捨てるので、IP の小さいほう(試す側)には ACK も応答も返らない。試す側はその 3 本で次を確かめ、最後に張り直して読めることを確かめる。\n\n* A(最後の接続): ACK を確かめる write(`bfm_write_async()` の `BFM_ACK`)で枠を全部(ライブラリが実際に使う数 `aqd`。既定 64 個)埋め、次の 1 個が資源の空きを待って、時間切れ(100ms)で `BFM_E_TIMEOUT` を返す。接続はエラーになり、仕掛かり中の tag も `bfm_test()` で `BFM_E_TIMEOUT`\n* B(最後から 2 本め): ACK を確かめない write(`BFM_NOACK`)を 10 個出し、`bfm_check()` が時間切れで `BFM_E_TIMEOUT` を報告する(仕掛かり 10 個)\n* C(最後から 3 本め): read を 1 個出し、`bfm_wait()` が時間切れで `BFM_E_TIMEOUT` を返す\n\n待った時間は、ライブラリの時間切れと同じく最初の操作を出した時刻から測り、`near_timeout()` で時間切れからその 5 倍までの間にあることを確かめる。",
+      "args": {},
+      "ret": "`BFM_OK`: 済んだ(結果は `check()` が `g_ng` に数える)。ポートの接続が 4 本より少ないときも、何もせず `BFM_OK`。`BFM_E_TIMEOUT`: 相手と「無応答の用意」(段 210)でそろえられない(黙る側は `sync_at()` の値をそのまま返す)。",
+      "pre": "全部の接続が張れていて、どの接続でも転送していないこと(`run_all()` が段 200 で相手とそろえた後)。相手も `-z` を付けて run を動かしていること。",
+      "notes": "* 黙る側は、内部の構造体 `g_bfm_conn[]` の `state` を直接 `BFM_CS_CLOSED` に書き換えてから `bfm_reconnect()` を呼ぶ(BYE を送らせないため)。QP が消えたか(`qp.has_qp`)を、`bfm_run()` と `idle()` を回して 5 秒まで待つ(消えなくても先へ進み、「消えない」と表示する)。\n* 黙る側は QP を消してから段 210 でそろえる。試す側は段 210 でそろえてから試すので、試すときには相手の QP は消えている。\n* 試す側の張り直しは `reconnect_wait()`(相手の黙らせた側は REQ を待っている)。\n* 時間切れは `g_bfm_async_timeout_ms`(既定 100ms)。`check()` の文言には数を書かない(枠の数は表示する)。",
+      "flow": [
+        {"call": "p = first_port() を呼び、n = g_bfm_port_conn[p]、tester = (g_bfm_local_ip[p] < g_bfm_peer_ip[p])"},
+        {"if": "n < 4 ?", "then": [
+          {"do": "「[10] は接続が 4 本以上のときだけ行う」を表示"},
+          {"return": "BFM_OK"}
+        ]},
+        {"if": "!tester ?(黙る側)", "then": [
+          {"do": "j = 0"},
+          {"while": "j < 3 ?", "body": [
+            {"do": "ci = &g_bfm_conn[p * BFM_MAX_PORT_CONN + n - 1 - j]、ci->state = BFM_CS_CLOSED"},
+            {"call": "bfm_reconnect(p, n - 1 - j) を呼ぶ"},
+            {"do": "j++"}
+          ]},
+          {"call": "t0 = now_ns() を呼ぶ"},
+          {"do": "gone = 0"},
+          {"while": "!gone && now_ns() - t0 < 5 秒 ?", "body": [
+            {"call": "bfm_run() を呼ぶ"},
+            {"do": "gone = 1。最後の 3 本のどれかの qp.has_qp が 0 でなければ gone = 0"},
+            {"call": "idle() を呼ぶ"}
+          ]},
+          {"do": "「QP を、BYE を送らずに消した(済んだ / 消えない)」を表示"},
+          {"call": "rc = sync_at(210, \"無応答の用意\") を呼ぶ"},
+          {"return": "rc"}
+        ]},
+        {"call": "rc = sync_at(210, \"無応答の用意\") を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "BFM_E_TIMEOUT"}]},
+        {"do": "試すことを表示。v = 0x5a5a5a5a5a5a5a5a"},
+        {"call": "c = bfm_conn(p, n - 1) を呼ぶ(A)"},
+        {"do": "ok = (c != NULL)、t65 = 0、qd = ok なら c の aqd(ライブラリが実際に使う枠の数)、そうでなければ 0、k = 0"},
+        {"call": "t0 = now_ns() を呼ぶ(時間切れの起点 = 最初の操作を出した時刻)"},
+        {"while": "k < qd && ok ?", "body": [
+          {"call": "rc = bfm_write_async(c, ATOM_OFF + 64 + (k & 7) * 8, &v, 8, BFM_ACK, &tags[k]) を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [{"do": "ok = 0"}]},
+          {"do": "k++"}
+        ]},
+        {"do": "inflight = 0"},
+        {"if": "ok ?", "then": [{"call": "bfm_check(c, &inflight) を呼ぶ"}]},
+        {"call": "check(\"[10] A: ACK の返らない write で枠が全部(qd 個)仕掛かり中になる\", ok && inflight == qd) を呼ぶ"},
+        {"call": "rc = ok ? bfm_write_async(c, ATOM_OFF + 64, &v, 8, BFM_ACK, &t65) : BFM_E_STATE を呼ぶ(ok でなければ呼ばない)"},
+        {"call": "dt = now_ns() - t0 を呼ぶ"},
+        {"call": "bfm_strerror(rc) を呼び、待った時間と結果を表示"},
+        {"call": "check(\"[10] A: 枠が埋まった後の 1 個は資源の空きを待ち、時間切れで BFM_E_TIMEOUT\", rc == BFM_E_TIMEOUT && near_timeout(dt)) を呼ぶ"},
+        {"call": "check(\"[10] A: 接続はエラーになり、仕掛かり中の tag も BFM_E_TIMEOUT\", ok && !bfm_is_up(c) && bfm_test(c, tags[0]) == BFM_E_TIMEOUT) を呼ぶ(ok でなければ bfm_is_up()・bfm_test() は呼ばない)"},
+        {"call": "c = bfm_conn(p, n - 2) を呼ぶ(B)"},
+        {"do": "ok = (c != NULL)、k = 0"},
+        {"call": "t0 = now_ns() を呼ぶ(時間切れの起点 = 最初の操作を出した時刻)"},
+        {"while": "k < 10 && ok ?", "body": [
+          {"call": "rc = bfm_write_async(c, ATOM_OFF + 64, &v, 8, BFM_NOACK, NULL) を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [{"do": "ok = 0"}]},
+          {"do": "k++"}
+        ]},
+        {"do": "inflight = 0、rc = BFM_OK"},
+        {"while": "ok && rc == BFM_OK && now_ns() - t0 < 2 秒 ?", "body": [
+          {"call": "rc = bfm_check(c, &inflight) を呼ぶ"}
+        ]},
+        {"call": "dt = now_ns() - t0 を呼ぶ"},
+        {"call": "bfm_strerror(rc) を呼び、待った時間・結果・仕掛かりの数を表示"},
+        {"call": "check(\"[10] B: ACK の返らない ACK なし write を、bfm_check() が時間切れ(100ms)で報告する\", ok && rc == BFM_E_TIMEOUT && inflight == 10 && near_timeout(dt)) を呼ぶ"},
+        {"call": "c = bfm_conn(p, n - 3) を呼ぶ(C)"},
+        {"do": "t = 0、r = 0"},
+        {"call": "t0 = now_ns() を呼ぶ"},
+        {"call": "rc = (c != NULL) ? bfm_read_async(c, ATOM_OFF + 8, &r, 8, &t) : BFM_E_STATE を呼ぶ(c が NULL なら呼ばない)"},
+        {"if": "rc == BFM_OK ?", "then": [{"call": "rc = bfm_wait(c, t) を呼ぶ"}]},
+        {"call": "dt = now_ns() - t0 を呼ぶ"},
+        {"call": "bfm_strerror(rc) を呼び、待った時間と結果を表示"},
+        {"call": "check(\"[10] C: 応答の返らない read を、bfm_wait() が時間切れ(100ms)で返す\", rc == BFM_E_TIMEOUT && near_timeout(dt)) を呼ぶ"},
+        {"do": "j = 0"},
+        {"while": "j < 3 ?", "body": [
+          {"do": "r = 0"},
+          {"call": "c = reconnect_wait(p, n - 1 - j) を呼ぶ"},
+          {"call": "snprintf(g_mt_msg, …, \"[10] 接続 %u を張り直して、読める\", n - 1 - j) を呼ぶ"},
+          {"call": "check(g_mt_msg, c != NULL && bfm_read(c, ATOM_OFF + 8, &r, 8) == BFM_OK) を呼ぶ(c が NULL なら bfm_read() は呼ばない)"},
+          {"do": "j++"}
+        ]},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
       "func": "run_all",
-      "summary": "run の本体(両方のノードで同時に動かす)。`run_up()` で全部の接続を張り、接続 (p0, 0) で一通りの検査(`run_checks()`)をして相手とそろえ(段階 1)、全部の接続で同時に転送して(`run_mt()`。速さの区間ごとに段階 10〜19 で相手とそろえる)相手とそろえる(段階 20)。`-q`(`g_quiet`)なら、こちらからは転送せず(一通りの検査・mt・[7] をしない)、段階だけ相手とそろえる(相手の片方向の速さを測るため)。`-P`(`g_perf`)なら一通りの検査を飛ばす(本数を変えて速さを測るため)。oob なら、接続のある最後のポートの最後の接続で範囲の外と張り直しを確かめる(`run_oob()`)。相手とそろえた(段階 30)後、模型の hash・自分の公開メモリの hash(`dump_area()`)・結果を表示する。",
+      "summary": "run の本体(両方のノードで同時に動かす)。`run_up()` で全部の接続を張り、接続 (p0, 0) で一通りの検査(`run_checks()`)をして相手とそろえ(段 1)、全部の接続で同時に転送して(`run_mt()`。速さの区間ごとに段 `MT_SYNC`(100)+ 区間の番号 = 100〜112 で相手とそろえる)相手とそろえる(段 200)。`-q`(`g_quiet`)なら、こちらからは転送せず(一通りの検査・mt・[7] をしない)、段だけ相手とそろえる(相手の片方向の速さを測るため)。`-P`(`g_perf`)なら一通りの検査を飛ばす(本数を変えて速さを測るため)。`-z`(`g_silent`)なら無応答の試験をする(`run_silent()`。中で段 210 でそろえる)。oob なら、接続のある最後のポートの最後の接続で範囲の外と張り直しを確かめる(`run_oob()`)。相手とそろえた(段 300)後、模型の hash・自分の公開メモリの hash(`dump_area()`)・結果を表示する。",
       "args": {"nthreads": "`run_up()` で `bfm_run()` を呼ぶスレッドの数", "iters": "回数(0 なら、`run_checks()` の遅延の測定は 20000、`run_mt()` は 100000)", "oob": "0 以外なら [7](`run_oob()`)を行う"},
-      "ret": "0: すべて OK。1: 接続を張れない、止める合図が来た、相手とそろえられない、または NG があった。",
-      "pre": "自分の公開メモリを埋めてあること(`main()`)。相手も run を動かしていること。",
-      "notes": "* 区切りごとの結果を `ret` に OR で集める。`g_ng` は `run_mt()` と [7] の前に 0 に戻す。\n* 一通りの検査や mt が NG でも、次へ進む(止める合図か、そろえられないときだけ途中で 1 を返す。そのときは hash を表示しない)。\n* [7] に使う接続が使えなければ NG にする。\n* 相手が [7] を行う間、こちらは `sync_at()` の中の `reconnect_down()` で自分の側を張り直す。",
+      "ret": "0: すべて OK。1: 接続を張れない、止める合図が来た、相手とそろえられない(`run_silent()` の中を含む)、または NG があった。",
+      "pre": "自分の公開メモリを埋めてあること(`main()`)。相手も run を動かしていること(`-z` は相手にも付けること)。",
+      "notes": "* 区切りごとの結果を `ret` に OR で集める。`g_ng` は `run_mt()`・`run_silent()`・[7] の前に 0 に戻す。\n* 一通りの検査や mt が NG でも、次へ進む(止める合図か、そろえられないときだけ途中で 1 を返す。そのときは hash を表示しない)。\n* 段の番号は増える順に決めてある(速さの区間の段 `MT_SYNC` + `MT_PH` が 200 を超えないことを、ソースの `_Static_assert` が確かめる)。\n* `-z` は `-q` のときも行う(`g_quiet` を見ない)。\n* [7] に使う接続が使えなければ NG にする。\n* 相手が [7] を行う間、こちらは `sync_at()` の中の `reconnect_down()` で自分の側を張り直す。",
       "flow": [
         {"call": "rc = run_up(nthreads) を呼ぶ"},
         {"if": "rc != BFM_OK ?", "then": [{"return": "1"}]},
@@ -1556,8 +1652,14 @@
           ]}
         ]},
         {"if": "g_stop ?", "then": [{"return": "1"}]},
-        {"call": "rc = sync_at(20, \"全部の接続での転送\") を呼ぶ"},
+        {"call": "rc = sync_at(200, \"全部の接続での転送\") を呼ぶ"},
         {"if": "rc != BFM_OK ?", "then": [{"return": "1"}]},
+        {"if": "g_silent ?", "then": [
+          {"do": "g_ng = 0"},
+          {"call": "rc = run_silent() を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [{"return": "1"}]},
+          {"do": "ret |= g_ng ? 1 : 0"}
+        ]},
         {"if": "oob && !g_quiet ?", "then": [
           {"call": "p = first_port() を呼び、i = g_bfm_port_conn[p] - 1"},
           {"do": "q = 0"},
@@ -1575,7 +1677,7 @@
           {"do": "ret |= g_ng ? 1 : 0"}
         ]},
         {"if": "g_stop ?", "then": [{"return": "1"}]},
-        {"call": "rc = sync_at(30, \"終わり\") を呼ぶ"},
+        {"call": "rc = sync_at(300, \"終わり\") を呼ぶ"},
         {"if": "rc != BFM_OK ?", "then": [{"return": "1"}]},
         {"if": "!g_quiet ?", "then": [{"call": "fnv1a(g_model, DATA_BYTES) を呼び、模型の hash を表示"}]},
         {"call": "dump_area(\"run\", \"終わり\") を呼ぶ"},
@@ -1615,7 +1717,7 @@
     },
     {
       "func": "main",
-      "summary": "オプションと引数を読んで設定の変数を決め、シグナルの受け口を登録し、最初の `bfm_run()` の後で自分の公開メモリを埋めて、引数の動き(run / serve / bench / info)を行い、最後に `do_shutdown()` で止める。\n\n* `-d BDF` / `-D BDF`: `g_bfm_linux_pci_bdf[0]` / `[1]`(ポート 0 / 1 の装置)\n* `-i IP` / `-I IP`: `g_bfm_local_ip[0]` / `[1]`(ポート 0 / 1 の自分の IP)\n* `-c 本数`: ポートごとの接続の数(`g_bfm_port_conn[]`。ポート 1 は使うときだけ)\n* `-t 本数`: `bfm_run()` を同時に呼ぶスレッドの数(既定 4)\n* `-p 番号`: `g_bfm_cm_port`(接続の番号の起点。両方のノードで同じ値にする)\n* `-m 経路MTU`: `g_bfm_path_mtu`\n* `-M ポートのMTU`: `g_bfm_port_mtu`\n* `-n 回数`: run の回数(0 なら一通りの検査の遅延の測定 20000、mt 100000)、bench の回数(既定 100000)\n* `-B` / `-S` / `-C`: `g_bfm_bf_enable` / `g_bfm_scatter_cqe` / `g_bfm_cpu_awake` を 0 にする\n* `-Q 多重度`: `g_bfm_qdepth`(多重度つきの write / read を出しておける数。1〜64)\n* `-x`: run で [7](`run_oob()`)を行う\n* `-v`: `g_bfm_verbose` を 1 にする\n\n引数は `<動き> <相手のIP> [ポート1の相手のIP]`(`g_bfm_peer_ip[0]` / `[1]`)。",
+      "summary": "オプションと引数を読んで設定の変数を決め、シグナルの受け口を登録し、最初の `bfm_run()` の後で自分の公開メモリを埋めて、引数の動き(run / serve / bench / info)を行い、最後に `do_shutdown()` で止める。\n\n* `-d BDF` / `-D BDF`: `g_bfm_linux_pci_bdf[0]` / `[1]`(ポート 0 / 1 の装置)\n* `-i IP` / `-I IP`: `g_bfm_local_ip[0]` / `[1]`(ポート 0 / 1 の自分の IP)\n* `-c 本数`: ポートごとの接続の数(`g_bfm_port_conn[]`。ポート 1 は使うときだけ)\n* `-t 本数`: `bfm_run()` を同時に呼ぶスレッドの数(既定 4)\n* `-p 番号`: `g_bfm_cm_port`(接続の番号の起点。両方のノードで同じ値にする)\n* `-m 経路MTU`: `g_bfm_path_mtu`\n* `-M ポートのMTU`: `g_bfm_port_mtu`\n* `-n 回数`: run の回数(0 なら一通りの検査の遅延の測定 20000、mt 100000)、bench の回数(既定 100000)\n* `-B` / `-S` / `-C`: `g_bfm_bf_enable` / `g_bfm_scatter_cqe` / `g_bfm_cpu_awake` を 0 にする\n* `-Q 多重度`: `g_bfm_qdepth`(多重度つきの write / read を出しておける数。1〜64)\n* `-x`: run で [7](`run_oob()`)を行う\n* `-q` / `-P` / `-z`: `g_quiet` / `g_perf` / `g_silent` を 1 にする(run で、受けるだけ / mt だけ / [10] 無応答の試験 `run_silent()` も行う)\n* `-v`: `g_bfm_verbose` を 1 にする\n\n引数は `<動き> <相手のIP> [ポート1の相手のIP]`(`g_bfm_peer_ip[0]` / `[1]`)。",
       "args": {"argc": "引数の数", "argv": "引数"},
       "ret": "0: 成功。1: 最初の `bfm_run()` が失敗した、公開メモリが小さい、または run / bench / info が失敗を返した。2: 引数が正しくない。",
       "pre": "特になし。",
@@ -1623,7 +1725,7 @@
       "entry_note": "プログラムの開始点(OS から呼ばれる)",
       "flow": [
         {"do": "iters = 0、threads = 4、nconn = 0、oob = 0"},
-        {"while": "(opt = getopt(argc, argv, \"d:i:D:I:c:p:m:M:n:t:Q:BSCxqPvh\")) != -1 ?", "body": [
+        {"while": "(opt = getopt(argc, argv, \"d:i:D:I:c:p:m:M:n:t:Q:BSCxqPzvh\")) != -1 ?", "body": [
           {"switch": "opt", "cases": [
             {"case": "'d'", "body": [{"do": "g_bfm_linux_pci_bdf[0] = optarg"}]},
             {"case": "'i'", "body": [
@@ -1653,6 +1755,7 @@
             {"case": "'x'", "body": [{"do": "oob = 1"}]},
             {"case": "'q'", "body": [{"do": "g_quiet = 1"}]},
             {"case": "'P'", "body": [{"do": "g_perf = 1"}]},
+            {"case": "'z'", "body": [{"do": "g_silent = 1"}]},
             {"case": "'Q'", "body": [{"do": "g_bfm_qdepth = atoi(optarg)"}]},
             {"case": "'v'", "body": [{"do": "g_bfm_verbose = 1"}]},
             {"default": true, "body": [
