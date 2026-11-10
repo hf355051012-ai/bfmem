@@ -547,21 +547,44 @@
       ]
     },
     {
-      "func": "atomic_op",
-      "summary": "8 バイトの atomic(CAS・FAA)を 1 個出して完了を待ち、元の値を `*old` に返す。WQE は制御セグメント・remote address セグメント・atomic セグメント(byte 32 に `swap_add`、byte 40 に `cmp`)・元の値を受けるデータセグメント(中継バッファ)の 64 バイト。",
-      "args": {"c": "操作する接続", "opcode": "`MLX5_OPCODE_ATOMIC_CS` か `MLX5_OPCODE_ATOMIC_FA`", "off": "相手の公開メモリの先頭からのオフセット", "swap_add": "CAS なら置き換える値、FAA なら足す値", "cmp": "CAS なら比べる値(FAA では 0)", "old": "元の値を入れる先(NULL なら返さない)"},
-      "ret": "`BFM_OK`: 終わった。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗、または相手のアドレス(`raddr + off`)が 8 の倍数でない。そのほか `post()` / `wait_done()` の戻り値。",
-      "pre": "`bfm_write()` と同じ。",
-      "notes": "失敗したときは `*old` を書かない。",
+      "func": "bfm_ops_build_atomic",
+      "summary": "atomic の WQE を 1 個(1 WQEBB、完了通知あり)組む。`opcode` が `MLX5_OPCODE_ATOMIC_MASKED_CS` / `MLX5_OPCODE_ATOMIC_MASKED_FA` なら 4 バイト(拡張 atomic = masked atomic。IB の規格には無い mlx5 の拡張)、そうでなければ 8 バイト。範囲・境界と、4 バイトなら自分の装置が対応しているかを確かめてから組む。WQE は制御セグメント・remote address セグメント・atomic セグメント(16 バイト)・元の値を受けるデータセグメント(手元の `addr`)の 64 バイト。\n\n* 8 バイト: atomic セグメントの byte 32 に `swap_add`、byte 40 に `cmp`(各 8 バイト)。\n* 4 バイト: 制御セグメントの opmod に大きさ `MLX5_OPMOD_EXT_ATOMIC(2)` = 0x08 を入れる。atomic セグメントは、CAS なら swap・compare・swap_mask・compare_mask(各 4 バイト。mask は全ビット)、FAA なら add・field_boundary(0 = 32 ビットで 1 つの数)・予約 8 バイト。\n\n同期版の `atomic_op()` / `atomic32_op()` と、多重度つきの `issue_atomic()`(`bfm_async.c`)が使う。",
+      "args": {"c": "接続", "w": "WQE の作業域(64 バイト)", "opcode": "`MLX5_OPCODE_ATOMIC_CS` / `MLX5_OPCODE_ATOMIC_FA` / `MLX5_OPCODE_ATOMIC_MASKED_CS` / `MLX5_OPCODE_ATOMIC_MASKED_FA`", "off": "相手の公開メモリの先頭からのオフセット", "swap_add": "CAS なら置き換える値、FAA なら足す値(4 バイトでは下位 32 ビットを使う)", "cmp": "CAS なら比べる値(4 バイトでは下位 32 ビットを使う。FAA では使わない)", "addr": "元の値を NIC に書かせる手元のアドレス(中継バッファ)"},
+      "ret": "`BFM_OK`: 組んだ。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗。`BFM_E_PARAM`: 相手のアドレス(`raddr + off`)が大きさ(8 か 4)の倍数でない。`BFM_E_NOTSUP`: 4 バイトで、自分の装置が拡張 atomic の 4 バイトに対応していない(接続のポートの装置 `c->dev` の atomic の能力の `atomic_ops` の bit2・3 と `atomic_size_qp` の bit2)。",
+      "pre": "4 バイトなら、相手の装置も拡張 atomic の 4 バイトに対応し、QP の `atomic_mode` が 3 以上であること(bfmem どうしなら `mlx5_hca.c` の `decide_atomic_mode()` がそう決める)。",
+      "notes": "* 失敗したときは `w` を書かない(確かめてから組む)。\n* 制御セグメントの WQE の番号には、組んだときの `qp.sq_pc` を入れる。組んでから `post()` / `bfm_ops_post()` で出すまでの間に、ほかの WQE を出さないこと。\n* NIC が `addr` へ書く元の値は、8 バイトはホスト順、4 バイトはビッグエンディアン。32 バイトまでの応答は CQE に入って返ることもある(そのときは 8 バイトもビッグエンディアン)。\n* 相手が 4 バイトに対応していないと、エラー完了で接続が使えなくなる。\n* 相手のメモリの語はホスト順(リトルエンディアン)で更新される(ConnectX-4 Lx で確認)。",
       "flow": [
-        {"call": "rc = check_range(c, off, 8) を呼ぶ"},
+        {"do": "is32 = opcode が MLX5_OPCODE_ATOMIC_MASKED_CS か MLX5_OPCODE_ATOMIC_MASKED_FA。sz = is32 なら 4、そうでなければ 8"},
+        {"call": "rc = check_range(c, off, sz) を呼ぶ"},
         {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-        {"if": "(raddr + off) & 7 != 0 ?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"if": "(raddr + off) & (sz - 1) != 0 ?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"if": "is32 かつ(拡張 CS / FA が無い、または 4 バイトに対応していない)?", "then": [{"return": "BFM_E_NOTSUP"}]},
         {"do": "w(64 バイト)を 0 で埋める"},
         {"call": "build_ctrl(c, w, opcode, 4, 1) を呼ぶ"},
         {"call": "build_raddr(c, w, off) を呼ぶ"},
-        {"call": "put64(w, 32, swap_add)、put64(w, 40, cmp) を呼ぶ"},
-        {"call": "build_dseg(c, w, 48, 8, bfm_dma_addr(stage)) を呼ぶ"},
+        {"if": "is32 ?", "then": [
+          {"call": "put32(w, 0, opmod 0x08 | sq_pc | opcode) を呼ぶ(大きさを入れる)"},
+          {"call": "put32(w, 32, swap_add) を呼ぶ"},
+          {"if": "opcode == MLX5_OPCODE_ATOMIC_MASKED_CS ?", "then": [
+            {"call": "put32(w, 36, cmp)、put32(w, 40, 0xffffffff)、put32(w, 44, 0xffffffff) を呼ぶ"}
+          ]}
+        ], "else": [
+          {"call": "put64(w, 32, swap_add)、put64(w, 40, cmp) を呼ぶ"}
+        ]},
+        {"call": "build_dseg(c, w, 48, sz, addr) を呼ぶ"},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "atomic_op",
+      "summary": "8 バイトの atomic(CAS・FAA)を 1 個出して完了を待ち、元の値を `*old` に返す。WQE は `bfm_ops_build_atomic()` で組む(元の値は中継バッファで受ける)。",
+      "args": {"c": "操作する接続", "opcode": "`MLX5_OPCODE_ATOMIC_CS` か `MLX5_OPCODE_ATOMIC_FA`", "off": "相手の公開メモリの先頭からのオフセット", "swap_add": "CAS なら置き換える値、FAA なら足す値", "cmp": "CAS なら比べる値(FAA では 0)", "old": "元の値を入れる先(NULL なら返さない)"},
+      "ret": "`BFM_OK`: 終わった。`BFM_E_STATE` / `BFM_E_PARAM`: `bfm_ops_build_atomic()` の失敗(範囲の外、または相手のアドレス `raddr + off` が 8 の倍数でない)。そのほか `post()` / `wait_done()` の戻り値。",
+      "pre": "`bfm_write()` と同じ。",
+      "notes": "失敗したときは `*old` を書かない。",
+      "flow": [
+        {"call": "rc = bfm_ops_build_atomic(c, w, opcode, off, swap_add, cmp, bfm_dma_addr(stage)) を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
         {"call": "rc = post(c, w, 1) を呼ぶ"},
         {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
         {"call": "rc = wait_done(c, qp.sq_pc) を呼ぶ"},
@@ -572,25 +595,14 @@
     },
     {
       "func": "atomic32_op",
-      "summary": "4 バイトの atomic(拡張 atomic = masked atomic。IB の規格には無い mlx5 の拡張)を 1 個出して完了を待ち、元の値を `*old` に返す。WQE は制御セグメント(opmod に大きさ `MLX5_OPMOD_EXT_ATOMIC(2)` = 0x08)・remote address セグメント・atomic セグメント 16 バイト・元の値を受けるデータセグメント(中継バッファ、4 バイト)の 64 バイト。atomic セグメントは、CAS なら swap・compare・swap_mask・compare_mask(mask は全ビット)、FAA なら add・field_boundary(0 = 32 ビットで 1 つの数)。",
+      "summary": "4 バイトの atomic(拡張 atomic = masked atomic。IB の規格には無い mlx5 の拡張)を 1 個出して完了を待ち、元の値を `*old` に返す。WQE は `bfm_ops_build_atomic()` で組む(組み方はそちらを見よ。元の値は中継バッファで受ける)。",
       "args": {"c": "操作する接続", "opcode": "`MLX5_OPCODE_ATOMIC_MASKED_CS` か `MLX5_OPCODE_ATOMIC_MASKED_FA`", "off": "相手の公開メモリの先頭からのオフセット", "swap_add": "CAS なら置き換える値、FAA なら足す値", "cmp": "CAS なら比べる値(FAA では使わない)", "old": "元の値を入れる先(NULL なら返さない)"},
-      "ret": "`BFM_OK`: 終わった。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗。`BFM_E_PARAM`: 相手のアドレス(`raddr + off`)が 4 の倍数でない。`BFM_E_NOTSUP`: 自分の装置が拡張 atomic の 4 バイトに対応していない(接続のポートの装置 `c->dev` の atomic の能力の `atomic_ops` の bit2・3 と `atomic_size_qp` の bit2)。そのほか `post()` / `wait_done()` の戻り値。",
+      "ret": "`BFM_OK`: 終わった。`BFM_E_STATE` / `BFM_E_PARAM`: `bfm_ops_build_atomic()` の失敗(範囲の外、または相手のアドレス `raddr + off` が 4 の倍数でない)。`BFM_E_NOTSUP`: 自分の装置が拡張 atomic の 4 バイトに対応していない(`bfm_ops_build_atomic()` が見る)。そのほか `post()` / `wait_done()` の戻り値。",
       "pre": "`bfm_write()` と同じ。相手の装置も拡張 atomic の 4 バイトに対応し、QP の `atomic_mode` が 3 以上であること(bfmem どうしなら `mlx5_hca.c` の `decide_atomic_mode()` がそう決める)。",
       "notes": "* 失敗したときは `*old` を書かない。\n* 相手のメモリの語はホスト順(リトルエンディアン)で更新される(ConnectX-4 Lx で確認)。\n* 相手が対応していないと、エラー完了で接続が使えなくなる。",
       "flow": [
-        {"call": "rc = check_range(c, off, 4) を呼ぶ"},
+        {"call": "rc = bfm_ops_build_atomic(c, w, opcode, off, swap_add, cmp, bfm_dma_addr(stage)) を呼ぶ"},
         {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-        {"if": "(raddr + off) & 3 != 0 ?", "then": [{"return": "BFM_E_PARAM"}]},
-        {"if": "拡張 CS / FA が無い、または 4 バイトに対応していない?", "then": [{"return": "BFM_E_NOTSUP"}]},
-        {"do": "w(64 バイト)を 0 で埋める"},
-        {"call": "build_ctrl(c, w, opcode, 4, 1) を呼ぶ"},
-        {"call": "put32(w, 0, opmod 0x08 | sq_pc | opcode) を呼ぶ(大きさを入れる)"},
-        {"call": "build_raddr(c, w, off) を呼ぶ"},
-        {"call": "put32(w, 32, swap_add) を呼ぶ"},
-        {"if": "opcode == MLX5_OPCODE_ATOMIC_MASKED_CS ?", "then": [
-          {"call": "put32(w, 36, cmp)、put32(w, 40, 0xffffffff)、put32(w, 44, 0xffffffff) を呼ぶ"}
-        ]},
-        {"call": "build_dseg(c, w, 48, 4, bfm_dma_addr(stage)) を呼ぶ"},
         {"call": "rc = post(c, w, 1) を呼ぶ"},
         {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
         {"call": "rc = wait_done(c, qp.sq_pc) を呼ぶ"},

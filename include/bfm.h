@@ -134,7 +134,7 @@ int bfm_cas32(bfm_conn_t *c, uint64_t off, uint32_t expect, uint32_t desired, ui
 /* 4 バイトの fetch-and-add。off は 4 の倍数。*old に足す前の値が入る。 */
 int bfm_faa32(bfm_conn_t *c, uint64_t off, uint32_t add, uint32_t *old);
 
-/* ---- 多重度つきの write / read(完了を待たずに出しておき、後で確かめる)----
+/* ---- 多重度つきの write / read / atomic(完了を待たずに出しておき、後で確かめる)----
  *
  * 1 本の接続で、完了を待たずに最大 g_bfm_qdepth(既定 64)個まで出しておける。それを超えて出そうと
  * すると、ACK・read の応答を刈り取って資源(枠)を空けてから出す。空いていれば待たずに出す。
@@ -162,6 +162,16 @@ int bfm_write_async(bfm_conn_t *c, uint64_t off, const void *src, uint32_t len, 
 /* 相手の公開メモリ + off から読む。完了を待たずに戻り、*tag を返す。応答は、完了を刈り取ったときに
  * dst へ写す(bfm_test() が BFM_OK を返すまで、dst を変えたり手放したりしないこと)。 */
 int bfm_read_async(bfm_conn_t *c, uint64_t off, void *dst, uint32_t len, bfm_tag_t *tag);
+
+/* atomic(bfm_cas() / bfm_faa() / bfm_cas32() / bfm_faa32() の多重度つき)。完了を待たずに戻り、*tag を返す
+ * (tag は NULL にしない)。元の値は、完了を刈り取ったときに *old へ入れる(old は NULL でもよい。
+ * bfm_test() が BFM_OK を返すまで、*old を変えたり手放したりしないこと)。off の境界は同期版と同じ
+ * (8 バイトは 8 の倍数、4 バイトは 4 の倍数)。4 バイトに対応していない装置では BFM_E_NOTSUP。
+ * 同じ接続で出した atomic は、相手の NIC が出した順に処理する(同じ語への FAA の元の値は出した順に並ぶ)。 */
+int bfm_cas_async(bfm_conn_t *c, uint64_t off, uint64_t expect, uint64_t desired, uint64_t *old, bfm_tag_t *tag);
+int bfm_faa_async(bfm_conn_t *c, uint64_t off, uint64_t add, uint64_t *old, bfm_tag_t *tag);
+int bfm_cas32_async(bfm_conn_t *c, uint64_t off, uint32_t expect, uint32_t desired, uint32_t *old, bfm_tag_t *tag);
+int bfm_faa32_async(bfm_conn_t *c, uint64_t off, uint32_t add, uint32_t *old, bfm_tag_t *tag);
 
 /* tag の操作が済んだか(待たない)。BFM_OK = 済んだ(write は相手が受け取った。read は dst に入った)。
  * BFM_INPROGRESS = まだ。負 = 失敗(出してから時間切れを過ぎた BFM_E_TIMEOUT、エラー完了の値)。 */

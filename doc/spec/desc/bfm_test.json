@@ -662,11 +662,11 @@
     },
     {
       "func": "run_async",
-      "summary": "[9] 多重度つきの write / read(`bfm_write_async()` / `bfm_read_async()` / `bfm_test()` / `bfm_wait()` / `bfm_check()`)を確かめる。相手の公開メモリの `ASYNC_OFF`(2MiB)から `ASYNC_N`(200)x 4KiB を使い、相手の中身を手元の模型 `g_amodel` にも持って突き合わせる。\n\n* ACK を確かめる write を 200 個(長さは 3 個に 1 個が inline に収まる長さ、ほかは 1〜`span` の乱数)出してから(多重度の 64 を超えるので、枠を刈り取りながら出す)、tag ごとに `bfm_wait()` で確かめる\n* read を 200 個(`span` バイトずつ)出してから tag ごとに確かめ、模型と突き合わせる\n* 枠が次の操作に使われた古い tag(`tags[0]`)の `bfm_test()` が `BFM_OK`\n* 8 バイトの write の直後に同じ所を read する組を 100 回(read はその write の中身を読む。応答は CQE に入る)\n* ACK を確かめない write を 2,000 個(1〜64 バイト、乱数の位置)出した後、`bfm_check()` で仕掛かりが 0 になる(1 秒まで)こと、その後に全体を `bfm_read()` で読み戻すと模型と一致すること\n* 枠の中継バッファより長い非同期の read が `BFM_E_PARAM`",
+      "summary": "[9] 多重度つきの write / read / atomic(`bfm_write_async()` / `bfm_read_async()` / `bfm_faa_async()` / `bfm_cas_async()` / `bfm_faa32_async()` / `bfm_cas32_async()` / `bfm_test()` / `bfm_wait()` / `bfm_check()`)を確かめる。相手の公開メモリの `ASYNC_OFF`(2MiB)から `ASYNC_N`(200)x 4KiB を使い、相手の中身を手元の模型 `g_amodel` にも持って突き合わせる。\n\n* ACK を確かめる write を 200 個(長さは 3 個に 1 個が inline に収まる長さ、ほかは 1〜`span` の乱数)出してから(多重度の 64 を超えるので、枠を刈り取りながら出す)、tag ごとに `bfm_wait()` で確かめる\n* read を 200 個(`span` バイトずつ)出してから tag ごとに確かめ、模型と突き合わせる\n* 枠が次の操作に使われた古い tag(`tags[0]`)の `bfm_test()` が `BFM_OK`\n* 8 バイトの write の直後に同じ所を read する組を 100 回(read はその write の中身を読む。応答は CQE に入る)\n* ACK を確かめない write を 2,000 個(1〜64 バイト、乱数の位置)出した後、`bfm_check()` で仕掛かりが 0 になる(1 秒まで)こと、その後に全体を `bfm_read()` で読み戻すと模型と一致すること\n* atomic: 相手の atomic 語 50〜53(最初は 0)へ、FAA(+1)・CAS(k → k + 1)・FAA32・CAS32 をそれぞれ同じ語へ 200 個ずつ出しておき(多重度を超える)、tag ごとに `bfm_wait()` で確かめる。相手の NIC は出した順に処理するので、元の値が 0〜199 の順に並び(CAS は全部成功する)、最後に語を `bfm_read()` で読むと 200 になること\n* 境界の合わない非同期の atomic(8 バイトの語 + 4 への FAA、4 バイトの語 + 2 への CAS32)が `BFM_E_PARAM`\n* 枠の中継バッファより長い非同期の read が `BFM_E_PARAM`",
       "args": {"c": "使う接続(`run_checks()` の接続)"},
       "ret": "なし(結果は `check()` が `g_ng` に数える)",
       "pre": "`run_checks()` の [8] までが済んでいること(相手も同時に、こちらへ同じことをしている)。",
-      "notes": "* `span` は `g_bfm_async_buf_size` と 4KiB の小さいほう。\n* 途中で失敗する(`ok` が 0 になる)と、それ以降のループは回らず、後の検査も NG になる。\n* `ASYNC_OFF` から 800KiB は、T10-DIF の領域と足並みの語(`SYNC_OFF`)の間。",
+      "notes": "* `span` は `g_bfm_async_buf_size` と 4KiB の小さいほう。\n* 途中で失敗する(`ok` が 0 になる)と、それ以降のループは回らず、後の検査も NG になる。\n* `ASYNC_OFF` から 800KiB は、T10-DIF の領域と足並みの語(`SYNC_OFF`)の間。\n* atomic の 4 つの検査は、それぞれ `okf` / `okc` / `okf32` / `okc32` で別々に数える(前の `ok` には左右されない)。元の値は静的な配列 `old64[]` / `old32[]` に受け、tag は `tags[]` を使い回す。\n* 4 バイトの atomic に対応していない装置では、FAA32・CAS32 の検査は NG になる(同期版の [4b] と同じく、対応を見て飛ばすことはしない)。",
       "flow": [
         {"do": "span = g_bfm_async_buf_size と ASYNC_SPAN(4096)の小さいほう。seed = 777、ok = 1"},
         {"do": "多重度・枠の中継バッファの大きさ・時間切れを表示"},
@@ -732,6 +732,64 @@
         {"call": "check(\"[9] ACK を確かめない write 2,000 個 ...\", ok && inflight == 0) を呼ぶ"},
         {"call": "rc = bfm_read(c, ASYNC_OFF, g_aout, ASYNC_N x 4096) を呼ぶ"},
         {"call": "check(\"[9] その後に読み戻すと中身が一致\", ok && rc == BFM_OK && g_aout と g_amodel が一致) を呼ぶ"},
+        {"do": "okf = okc = okf32 = okc32 = 1。wf = ATOM_OFF + 8 x 50、wc = + 8 x 51、wf32 = + 8 x 52、wc32 = + 8 x 53(相手の atomic 語 50〜53。最初は 0)"},
+        {"do": "k = 0"},
+        {"while": "k < ASYNC_N かつ okf ?", "body": [
+          {"call": "bfm_faa_async(c, wf, 1, &old64[k], &tags[k]) を呼ぶ"},
+          {"if": "BFM_OK でない?", "then": [{"do": "okf = 0"}]},
+          {"do": "k++"}
+        ]},
+        {"do": "k = 0"},
+        {"while": "k < ASYNC_N かつ okf ?", "body": [
+          {"call": "bfm_wait(c, tags[k]) を呼ぶ"},
+          {"if": "BFM_OK でない、または old64[k] != k ?", "then": [{"do": "okf = 0"}]},
+          {"do": "k++"}
+        ]},
+        {"call": "okf = okf かつ bfm_read(c, wf, &v, 8) == BFM_OK かつ v == ASYNC_N(bfm_read() は okf が真のときだけ呼ぶ)"},
+        {"call": "check(\"[9] FAA 200 個 ... 元の値が 0〜199 の順に並び、語は 200 になる\", okf) を呼ぶ"},
+        {"do": "k = 0"},
+        {"while": "k < ASYNC_N かつ okc ?", "body": [
+          {"call": "bfm_cas_async(c, wc, k, k + 1, &old64[k], &tags[k]) を呼ぶ"},
+          {"if": "BFM_OK でない?", "then": [{"do": "okc = 0"}]},
+          {"do": "k++"}
+        ]},
+        {"do": "k = 0"},
+        {"while": "k < ASYNC_N かつ okc ?", "body": [
+          {"call": "bfm_wait(c, tags[k]) を呼ぶ"},
+          {"if": "BFM_OK でない、または old64[k] != k ?", "then": [{"do": "okc = 0"}]},
+          {"do": "k++"}
+        ]},
+        {"call": "okc = okc かつ bfm_read(c, wc, &v, 8) == BFM_OK かつ v == ASYNC_N(bfm_read() は okc が真のときだけ呼ぶ)"},
+        {"call": "check(\"[9] CAS i->i+1 を 200 個 ... 全部成功する\", okc) を呼ぶ"},
+        {"do": "k = 0"},
+        {"while": "k < ASYNC_N かつ okf32 ?", "body": [
+          {"call": "bfm_faa32_async(c, wf32, 1, &old32[k], &tags[k]) を呼ぶ"},
+          {"if": "BFM_OK でない?", "then": [{"do": "okf32 = 0"}]},
+          {"do": "k++"}
+        ]},
+        {"do": "k = 0"},
+        {"while": "k < ASYNC_N かつ okf32 ?", "body": [
+          {"call": "bfm_wait(c, tags[k]) を呼ぶ"},
+          {"if": "BFM_OK でない、または old32[k] != k ?", "then": [{"do": "okf32 = 0"}]},
+          {"do": "k++"}
+        ]},
+        {"call": "okf32 = okf32 かつ bfm_read(c, wf32, &v32, 4) == BFM_OK かつ v32 == ASYNC_N(bfm_read() は okf32 が真のときだけ呼ぶ)"},
+        {"call": "check(\"[9] FAA32 200 個 ... 元の値が 0〜199 の順に並ぶ\", okf32) を呼ぶ"},
+        {"do": "k = 0"},
+        {"while": "k < ASYNC_N かつ okc32 ?", "body": [
+          {"call": "bfm_cas32_async(c, wc32, k, k + 1, &old32[k], &tags[k]) を呼ぶ"},
+          {"if": "BFM_OK でない?", "then": [{"do": "okc32 = 0"}]},
+          {"do": "k++"}
+        ]},
+        {"do": "k = 0"},
+        {"while": "k < ASYNC_N かつ okc32 ?", "body": [
+          {"call": "bfm_wait(c, tags[k]) を呼ぶ"},
+          {"if": "BFM_OK でない、または old32[k] != k ?", "then": [{"do": "okc32 = 0"}]},
+          {"do": "k++"}
+        ]},
+        {"call": "okc32 = okc32 かつ bfm_read(c, wc32, &v32, 4) == BFM_OK かつ v32 == ASYNC_N(bfm_read() は okc32 が真のときだけ呼ぶ)"},
+        {"call": "check(\"[9] CAS32 i->i+1 を 200 個 ... 全部成功する\", okc32) を呼ぶ"},
+        {"call": "check(\"[9] 境界の合わない非同期の atomic は BFM_E_PARAM\", bfm_faa_async(c, wf + 4, 1, NULL, &ta) == BFM_E_PARAM かつ bfm_cas32_async(c, wf32 + 2, 0, 1, NULL, &ta) == BFM_E_PARAM) を呼ぶ"},
         {"call": "check(\"[9] 枠の中継バッファより長い非同期の read は BFM_E_PARAM\", bfm_read_async(c, ASYNC_OFF, g_aout, g_bfm_async_buf_size + 1, &t) == BFM_E_PARAM) を呼ぶ"}
       ]
     },
@@ -1140,7 +1198,7 @@
     },
     {
       "func": "mt_worker",
-      "summary": "mt のスレッド 1 本。CPU に固定し、全スレッドがそろったところで、自分の接続(`a->c`。`run_mt()` が `bfm_conn()` で取ったもの)が使えなければ NG にする。スレッド 0 が相手の共有の語を 0 にした後、[1][2](`mt_check()`)、[3] 共有の語への FAA を `g_mt_n` 回、[4](`mt_dif()`)を行う。スレッド 0 が共有の語を読んだ後、速さの区間(`g_mt_ph` の 10 個。回数は `mt_reps()`。0〜4 は 1 回ずつ完了を待つ 8 バイトの write / read / FAA と 64KiB の write / read、5〜9 は多重度つきの区間で `mt_async()` が打つ)ごとに、スレッド 0 が相手と足並みをそろえ(`sync_at()`)、全スレッドで同時に打って時間を測る。相手も同じ区間を同時に打つので、両方向の速さになる。",
+      "summary": "mt のスレッド 1 本。CPU に固定し、全スレッドがそろったところで、自分の接続(`a->c`。`run_mt()` が `bfm_conn()` で取ったもの)が使えなければ NG にする。スレッド 0 が相手の共有の語を 0 にした後、[1][2](`mt_check()`)、[3] 共有の語への FAA を `g_mt_n` 回、[4](`mt_dif()`)を行う。スレッド 0 が共有の語を読んだ後、速さの区間(`g_mt_ph` の 13 個。回数は `mt_reps()`。0〜4 は 1 回ずつ完了を待つ 8 バイトの write / read / FAA と 64KiB の write / read、5〜12 は多重度つきの区間(write / read / FAA / CAS)で `mt_async()` が打つ)ごとに、スレッド 0 が相手と足並みをそろえ(`sync_at()`)、全スレッドで同時に打って時間を測る。相手も同じ区間を同時に打つので、両方向の速さになる。",
       "args": {"p": "スレッドの情報(`struct mt_arg`)"},
       "ret": "NULL",
       "pre": "`g_mt_bar` がスレッドの数で初期化してあること。`a->idx` と `a->c` が入っていること(`run_mt()`)。",
@@ -1214,11 +1272,11 @@
     },
     {
       "func": "mt_async",
-      "summary": "mt の多重度つきの区間(5〜9)を 1 回分打つ。`reps` 回、区間に応じて次を出す(完了は待たない)。\n\n* 5: 8 バイトの ACK を確かめない write(`own` へ)\n* 6: 8 バイトの ACK を確かめる write(`own` へ)\n* 7: 8 バイトの read(`own` から `mt_r8[k & 63]` へ)\n* 8: 4KiB の ACK を確かめる write(`big + (k & 15) x 4KiB` へ)\n* 9: 4KiB の read(`big + (k & 15) x 4KiB` から `mt_rbuf` の同じ位置へ)\n\n出し終えたら、5 以外は最後に出したものの tag を `bfm_wait()` で待つ(完了は出した順に来るので、それで全部済んでいる)。5 は `bfm_check()` で仕掛かりが 0 になるまで見る。",
-      "args": {"c": "使う接続", "ph": "区間の番号(5〜9)", "own": "8 バイトの区間で使う相手の公開メモリの位置", "big": "4KiB の区間で使う相手の公開メモリの位置(64KiB の区画の先頭)", "reps": "回数"},
+      "summary": "mt の多重度つきの区間(5〜12)を 1 回分打つ。`reps` 回、区間に応じて次を出す(完了は待たない)。\n\n* 5: 8 バイトの ACK を確かめない write(`own` へ)\n* 6: 8 バイトの ACK を確かめる write(`own` へ)\n* 7: 8 バイトの read(`own` から `mt_r8[k & 63]` へ)\n* 8: 4KiB の ACK を確かめる write(`big + (k & 15) x 4KiB` へ)\n* 9(default): 4KiB の read(`big + (k & 15) x 4KiB` から `mt_rbuf` の同じ位置へ)\n* 10: FAA(+1)を同じ 1 つの語(`own + 24`)へ(元の値は `mt_r8[k & 63]` へ)\n* 11: CAS(k → k + 1)を同じ 1 つの語(`own + 32`)へ(元の値は `mt_r8[k & 63]` へ)\n* 12: FAA(+1)を 64 バイトおきの 64 個の語(`big + (k & 63) x 64`)へ順に(元の値は `mt_r8[k & 63]` へ)\n\n出し終えたら、5 以外は最後に出したものの tag を `bfm_wait()` で待つ(完了は出した順に来るので、それで全部済んでいる)。5 は `bfm_check()` で仕掛かりが 0 になるまで見る。",
+      "args": {"c": "使う接続", "ph": "区間の番号(5〜12)", "own": "8 バイトの区間で使う相手の公開メモリの位置", "big": "4KiB の区間と区間 12 で使う相手の公開メモリの位置(64KiB の区画の先頭)", "reps": "回数"},
       "ret": "`BFM_OK`: 全部済んだ。負: 出すのに失敗した値、`bfm_wait()` / `bfm_check()` の失敗の値。",
       "pre": "`c` が使える接続であること。",
-      "notes": "* 出すのに失敗したら、そこで止めてその値を返す。\n* 枠が全部仕掛かり中なら、`bfm_*_async()` の中で完了を刈り取ってから出す(多重度は `g_bfm_qdepth`。`-Q`)。",
+      "notes": "* 出すのに失敗したら、そこで止めてその値を返す。\n* 枠が全部仕掛かり中なら、`bfm_*_async()` の中で完了を刈り取ってから出す(多重度は `g_bfm_qdepth`。`-Q`)。\n* atomic の区間(10〜12)は速さを測るだけで、元の値や CAS が成功したかは見ない(区間 11 は語が k でなければ置き換わらないが、完了は `BFM_OK`)。",
       "flow": [
         {"do": "tag = 0、rc = BFM_OK、k = 0"},
         {"while": "k < reps かつ rc == BFM_OK ?", "body": [
@@ -1228,6 +1286,9 @@
             {"case": "6", "body": [{"call": "rc = bfm_write_async(c, own, &v, 8, BFM_ACK, &tag) を呼ぶ"}]},
             {"case": "7", "body": [{"call": "rc = bfm_read_async(c, own, &mt_r8[k & 63], 8, &tag) を呼ぶ"}]},
             {"case": "8", "body": [{"call": "rc = bfm_write_async(c, big + (k & 15) x 4096, g_mt_big, 4096, BFM_ACK, &tag) を呼ぶ"}]},
+            {"case": "10", "body": [{"call": "rc = bfm_faa_async(c, own + 24, 1, &mt_r8[k & 63], &tag) を呼ぶ"}]},
+            {"case": "11", "body": [{"call": "rc = bfm_cas_async(c, own + 32, k, k + 1, &mt_r8[k & 63], &tag) を呼ぶ"}]},
+            {"case": "12", "body": [{"call": "rc = bfm_faa_async(c, big + (k & 63) x 64, 1, &mt_r8[k & 63], &tag) を呼ぶ"}]},
             {"default": true, "body": [{"call": "rc = bfm_read_async(c, big + (k & 15) x 4096, mt_rbuf + (k & 15) x 4096, 4096, &tag) を呼ぶ"}]}
           ]},
           {"do": "k++"}

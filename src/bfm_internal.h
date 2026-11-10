@@ -318,12 +318,12 @@ struct bfm_aslot {
     uint8_t  busy;                   /* 1 = 仕掛かり中(完了をまだ刈り取っていない)*/
     uint8_t  kind;                   /* BFM_AK_*(ACK を確かめる write / 確かめない write / read)*/
     int      rc;                     /* 刈り取った結果(BFM_OK か負)。次にこの枠を使うまで残す */
-    void    *dst;                    /* read: 刈り取ったときに写す先 */
+    void    *dst;                    /* read: 刈り取ったときに写す先。atomic: 元の値を入れる先(NULL = 要らない)*/
     uint32_t len;                    /* 操作の長さ */
     uint64_t off;                    /* 相手の公開メモリの中の位置(表示用)*/
     uint64_t t;                      /* 出した時刻(ns。時間切れを見る)*/
 };
-enum { BFM_AK_WRITE = 0, BFM_AK_WRITE_NOACK = 1, BFM_AK_READ = 2 };
+enum { BFM_AK_WRITE = 0, BFM_AK_WRITE_NOACK = 1, BFM_AK_READ = 2, BFM_AK_ATOMIC = 3, BFM_AK_ATOMIC32 = 4 };
 
 /* 接続 1 本 = 接続の表(g_bfm_conn)の 1 行。行ごとに状態機械(step)を持ち、bfm_run() は鍵(lock)を
  * 取れた行の状態を 1 つ進める。コアごとに別の接続を使うので、隣の接続とキャッシュラインを分ける。 */
@@ -477,6 +477,8 @@ int  bfm_ops_post(struct bfm_conn *c, const uint64_t *w, uint32_t bbs);
 int  bfm_ops_reap(struct bfm_conn *c);
 int  bfm_ops_reap_all(struct bfm_conn *c);
 uint32_t bfm_ops_build_write_inline(struct bfm_conn *c, uint64_t *w, uint64_t off, const void *src, uint32_t len);
+int  bfm_ops_build_atomic(struct bfm_conn *c, uint64_t *w, uint32_t opcode, uint64_t off, uint64_t swap_add,
+                          uint64_t cmp, uint64_t addr);
 void bfm_ops_ctrl(struct bfm_conn *c, uint64_t *w, uint32_t opcode, uint32_t ds, uint8_t fm_ce_se,
                   uint32_t imm);
 void bfm_ops_build_rdma(struct bfm_conn *c, uint64_t *w, int is_read, uint64_t off, uint32_t lkey,

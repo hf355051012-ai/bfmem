@@ -1,12 +1,14 @@
-/* 多重度つきの write / read(完了を待たずに出しておき、後で確かめる)。
+/* 多重度つきの write / read / atomic(完了を待たずに出しておき、後で確かめる)。
  *
- * 1 本の接続で、完了を待たずに最大 g_bfm_qdepth(既定 64。上限 BFM_QD_MAX)個の write / read を
+ * 1 本の接続で、完了を待たずに最大 g_bfm_qdepth(既定 64。上限 BFM_QD_MAX)個の write / read / atomic を
  * 出しておける。仕掛かり中の 1 個ごとに「枠」を 1 つ使う。枠は、送り元 / 着地点にする中継バッファ
  * (g_bfm_async_buf_size。既定 4KiB)を 1 つずつ持つ。
  *
  *   bfm_write_async(c, off, src, len, BFM_ACK, &tag)    ACK を確かめる write。tag で 1 個ずつ確かめる
  *   bfm_write_async(c, off, src, len, BFM_NOACK, NULL)  ACK を確かめない write(tag なし)
  *   bfm_read_async(c, off, dst, len, &tag)              read。完了を刈り取ったときに dst へ写す
+ *   bfm_cas_async / bfm_faa_async / bfm_cas32_async / bfm_faa32_async(c, …, &old, &tag)
+ *                                                       atomic。元の値は刈り取ったときに *old へ入れる
  *   bfm_test(c, tag) / bfm_wait(c, tag)                 その 1 個が済んだか(待たない / 済むまで待つ)
  *   bfm_check(c, &inflight)                             完了を刈り取り、時間切れ・エラーを報告する
  *
@@ -53,9 +55,25 @@ void bfm_async_attach(struct bfm_conn *c)
     c->aerr = 0;
 }
 
+/* 枠の操作の名前(表示用)。 */
+static const char *kind_name(uint8_t kind)
+{
+    switch (kind) {
+    case BFM_AK_READ:     return "read";
+    case BFM_AK_WRITE:    return "write";
+    case BFM_AK_ATOMIC:   return "atomic(8 バイト)";
+    case BFM_AK_ATOMIC32: return "atomic(4 バイト)";
+    default:              return "write(ACK を確かめない)";
+    }
+}
+
 /*=================================================================
- * 位置 pc の WQE の完了を、その枠に入れる(poll_one() から)。read が成功なら、応答を手元の dst へ写す
- * (32 バイトまでは CQE に入っている = scat、それより長ければ枠の中継バッファ)。枠を空きに戻す。
+ * 位置 pc の WQE の完了を、その枠に入れる(poll_one() から)。成功なら、read は応答を手元の dst へ写し、
+ * atomic は元の値を dst へ入れる(32 バイトまでは CQE に入っている = scat、そうでなければ枠の中継バッファ)。
+ * atomic の元の値のバイト順(ConnectX-4 Lx で確認。同期版の atomic_result() / atomic32_result() と同じ):
+ *   8 バイト: CQE に入ればビッグエンディアン、中継バッファならホスト順(HCA をホスト順に設定してある)
+ *   4 バイト: どちらもビッグエンディアン
+ * 枠を空きに戻す。
  * ===============================================================*/
 void bfm_async_done(struct bfm_conn *c, uint32_t pc, const volatile uint8_t *scat, int rc)
 {
@@ -65,13 +83,21 @@ void bfm_async_done(struct bfm_conn *c, uint32_t pc, const volatile uint8_t *sca
     const uint32_t k = k1 - 1u;
     struct bfm_aslot *s = &c->as[k];
     if (!s->busy) return;
+    const volatile uint8_t *buf = c->abuf + (uint64_t)k * c->abuf_slot;
     if (rc == BFM_OK && s->kind == BFM_AK_READ) {
         uint8_t *d = (uint8_t *)s->dst;
         if (scat != NULL && s->len <= SCAT_MAX) {
             for (uint32_t i = 0; i < s->len; i++) d[i] = scat[i];
         } else {
-            memcpy(d, (const void *)(uintptr_t)(c->abuf + (uint64_t)k * c->abuf_slot), s->len);
+            memcpy(d, (const void *)(uintptr_t)buf, s->len);
         }
+    } else if (rc == BFM_OK && s->kind == BFM_AK_ATOMIC && s->dst != NULL) {
+        uint64_t v;
+        if (scat != NULL) v = bfm_rd64be(scat);
+        else memcpy(&v, (const void *)(uintptr_t)buf, 8);
+        *(uint64_t *)s->dst = v;
+    } else if (rc == BFM_OK && s->kind == BFM_AK_ATOMIC32 && s->dst != NULL) {
+        *(uint32_t *)s->dst = bfm_rd32be(scat != NULL ? scat : buf);
     }
     s->rc = rc;
     s->busy = 0;
@@ -80,7 +106,7 @@ void bfm_async_done(struct bfm_conn *c, uint32_t pc, const volatile uint8_t *sca
     if (rc != BFM_OK) {
         if (c->aerr == 0) c->aerr = rc;
         BFM_LOG("bfm: 接続 %d: 非同期の %s(tag 0x%08x、+0x%llx、%u バイト)がエラーで終わった: %s\n", c->index,
-                s->kind == BFM_AK_READ ? "read" : s->kind == BFM_AK_WRITE ? "write" : "write(ACK を確かめない)",
+                kind_name(s->kind),
                 (s->seq << TAG_SLOT) | k, (unsigned long long)s->off, s->len, bfm_strerror(rc));
     }
 }
@@ -105,7 +131,7 @@ static int fail_timeout(struct bfm_conn *c, int k, const char *why)
     const struct bfm_aslot *s = &c->as[k];
     BFM_LOG("bfm: 接続 %d: %s(%u ms)。仕掛かり中の %s(tag 0x%08x、+0x%llx、%u バイト)に ACK・応答が無い。"
             "接続は使えなくなった\n", c->index, why, g_bfm_async_timeout_ms,
-            s->kind == BFM_AK_READ ? "read" : s->kind == BFM_AK_WRITE ? "write" : "write(ACK を確かめない)",
+            kind_name(s->kind),
             (s->seq << TAG_SLOT) | (uint32_t)k, (unsigned long long)s->off, s->len);
     if (c->state == BFM_CS_UP) c->state = BFM_CS_ERROR;
     if (c->aerr == 0) c->aerr = BFM_E_TIMEOUT;
@@ -147,6 +173,27 @@ static int get_slot(struct bfm_conn *c, uint32_t bbs, uint32_t *slot)
     }
 }
 
+/* 出した操作を枠 k に記録する(位置 pc の WQE と枠を結び、通し番号を振って tag を返す)。
+ * 出した後(bfm_ops_post() が位置の枠の番号を 0 にした後)に呼ぶ。 */
+static void commit(struct bfm_conn *c, uint32_t k, uint32_t pc, uint8_t kind, void *dst, uint32_t len, uint64_t off,
+                   bfm_tag_t *tag)
+{
+    struct bfm_aslot *s = &c->as[k];
+    s->seq = c->aseq++ & SEQ_MASK;
+    if (s->seq == 0u) s->seq = c->aseq++ & SEQ_MASK;   /* 26 ビットで回ったとき、0 は飛ばす */
+    s->busy = 1;
+    s->kind = kind;
+    s->rc = BFM_INPROGRESS;
+    s->dst = dst;
+    s->len = len;
+    s->off = off;
+    s->t = bfm_port_time_ns();
+    c->wqe_slot[pc & (SQ_N - 1u)] = (uint8_t)(k + 1u);
+    c->afree &= ~(1ull << k);
+    c->ainflight++;
+    if (tag != NULL) *tag = (s->seq << TAG_SLOT) | k;
+}
+
 /*=================================================================
  * 非同期の操作を 1 個出す(write は src を WQE に埋め込むか枠の中継バッファへ写してから出すので、
  * 戻った後に src を変えてよい。read は刈り取ったときに dst へ写す)。tag が NULL でなければ tag を返す。
@@ -172,20 +219,30 @@ static int issue(struct bfm_conn *c, uint8_t kind, uint64_t off, const void *src
         bfm_ops_build_rdma(c, w, kind == BFM_AK_READ, off, c->dev->lkey, bfm_dma_addr(buf), len, 0);
     }
     if ((rc = bfm_ops_post(c, w, bbs)) != BFM_OK) return rc;
-    struct bfm_aslot *s = &c->as[k];
-    s->seq = c->aseq++ & SEQ_MASK;
-    if (s->seq == 0u) s->seq = c->aseq++ & SEQ_MASK;   /* 26 ビットで回ったとき、0 は飛ばす */
-    s->busy = 1;
-    s->kind = kind;
-    s->rc = BFM_INPROGRESS;
-    s->dst = dst;
-    s->len = len;
-    s->off = off;
-    s->t = bfm_port_time_ns();
-    c->wqe_slot[pc & (SQ_N - 1u)] = (uint8_t)(k + 1u);
-    c->afree &= ~(1ull << k);
-    c->ainflight++;
-    if (tag != NULL) *tag = (s->seq << TAG_SLOT) | k;
+    commit(c, k, pc, kind, dst, len, off, tag);
+    return BFM_OK;
+}
+
+/*=================================================================
+ * 非同期の atomic を 1 個出す(opcode は MLX5_OPCODE_ATOMIC_CS / FA / MASKED_CS / MASKED_FA)。
+ * 元の値は枠の中継バッファ(か CQE)に返り、刈り取ったときに old へ入れる(old は NULL でもよい)。
+ * ===============================================================*/
+static int issue_atomic(struct bfm_conn *c, uint32_t opcode, uint64_t off, uint64_t swap_add, uint64_t cmp,
+                        void *old, bfm_tag_t *tag)
+{
+    uint64_t w[8];
+    const int is32 = (opcode == MLX5_OPCODE_ATOMIC_MASKED_CS || opcode == MLX5_OPCODE_ATOMIC_MASKED_FA);
+    int rc;
+    if (c->aerr != 0) return c->aerr;
+    /* 範囲・境界・未対応は、枠の空きを待つ前に断る(一度組んでみる。着地点は枠が決まってから組み直す)*/
+    if ((rc = bfm_ops_build_atomic(c, w, opcode, off, swap_add, cmp, 0)) != BFM_OK) return rc;
+    uint32_t k = 0;
+    if ((rc = get_slot(c, 1u, &k)) != BFM_OK) return rc;
+    const uint32_t pc = c->qp.sq_pc;
+    rc = bfm_ops_build_atomic(c, w, opcode, off, swap_add, cmp, bfm_dma_addr(c->abuf + (uint64_t)k * c->abuf_slot));
+    if (rc != BFM_OK) return rc;
+    if ((rc = bfm_ops_post(c, w, 1u)) != BFM_OK) return rc;
+    commit(c, k, pc, is32 ? BFM_AK_ATOMIC32 : BFM_AK_ATOMIC, old, is32 ? 4u : 8u, off, tag);
     return BFM_OK;
 }
 
@@ -239,4 +296,28 @@ int bfm_check(bfm_conn_t *c, uint32_t *inflight)
     if (k >= 0) return fail_timeout(c, k, "時間切れ");
     if (c->state != BFM_CS_UP) return BFM_E_STATE;
     return BFM_OK;
+}
+
+int bfm_cas_async(bfm_conn_t *c, uint64_t off, uint64_t expect, uint64_t desired, uint64_t *old, bfm_tag_t *tag)
+{
+    if (c == NULL || tag == NULL) return BFM_E_PARAM;
+    return issue_atomic(c, MLX5_OPCODE_ATOMIC_CS, off, desired, expect, old, tag);
+}
+
+int bfm_faa_async(bfm_conn_t *c, uint64_t off, uint64_t add, uint64_t *old, bfm_tag_t *tag)
+{
+    if (c == NULL || tag == NULL) return BFM_E_PARAM;
+    return issue_atomic(c, MLX5_OPCODE_ATOMIC_FA, off, add, 0, old, tag);
+}
+
+int bfm_cas32_async(bfm_conn_t *c, uint64_t off, uint32_t expect, uint32_t desired, uint32_t *old, bfm_tag_t *tag)
+{
+    if (c == NULL || tag == NULL) return BFM_E_PARAM;
+    return issue_atomic(c, MLX5_OPCODE_ATOMIC_MASKED_CS, off, desired, expect, old, tag);
+}
+
+int bfm_faa32_async(bfm_conn_t *c, uint64_t off, uint32_t add, uint32_t *old, bfm_tag_t *tag)
+{
+    if (c == NULL || tag == NULL) return BFM_E_PARAM;
+    return issue_atomic(c, MLX5_OPCODE_ATOMIC_MASKED_FA, off, add, 0, old, tag);
 }

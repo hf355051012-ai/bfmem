@@ -95,7 +95,7 @@ static void usage(void)
            "       8 バイトの write / read / FAA を -n 回(既定 100000)ずつ、64KiB の write / read を -n/50 回ずつ\n"
            "       同時に打って合計の速さを出す(区間ごとに相手と足並みをそろえるので、相手も同時に打つ = 両方向)。\n"
            "       続けて多重度つき(bfm_*_async。-Q 個まで出しておく)の 8 バイトの write(ACK なし / あり)・read を\n"
-           "       -n 回ずつ、4KiB の write / read を -n/10 回ずつ打つ\n"
+           "       -n 回ずつ、4KiB の write / read を -n/10 回ずつ、FAA・CAS を -n 回ずつ打つ\n"
            "  bench: write / read を 4B〜256KiB、多重度 1・4・8・16 で -n 回(既定 100000)ずつ流し、\n"
            "         IOPS・MB/s・平均遅延を出す(接続 1 本。相手は serve -c 1)\n"
            "  -B  BlueFlame を使わない(8 バイトのドアベルだけ。比べるため)\n"
@@ -547,6 +547,44 @@ static void run_async(bfm_conn_t *c)
     check("[9] ACK を確かめない write 2,000 個の後、bfm_check() で仕掛かりが 0 になる", ok && inflight == 0);
     rc = bfm_read(c, ASYNC_OFF, g_aout, ASYNC_N * ASYNC_SPAN);
     check("[9] その後に読み戻すと中身が一致", ok && rc == BFM_OK && memcmp(g_aout, g_amodel, sizeof(g_amodel)) == 0);
+    /* atomic: 同じ語へ 200 個(多重度を超えて)出しておく。相手の NIC は出した順に処理するので、FAA の元の値は
+     * 0, 1, 2, ... と並び、i -> i + 1 の CAS は全部成功する(atomic 語 50〜53 を使う。最初は 0)。 */
+    {
+        static uint64_t old64[ASYNC_N];
+        static uint32_t old32[ASYNC_N];
+        int okf = 1, okc = 1, okf32 = 1, okc32 = 1;
+        const uint64_t wf = ATOM_OFF + 8u * 50u, wc = ATOM_OFF + 8u * 51u, wf32 = ATOM_OFF + 8u * 52u,
+                       wc32 = ATOM_OFF + 8u * 53u;
+        uint64_t v = 0;
+        uint32_t v32 = 0;
+        for (uint32_t k = 0; k < ASYNC_N && okf; k++)
+            if (bfm_faa_async(c, wf, 1, &old64[k], &tags[k]) != BFM_OK) okf = 0;
+        for (uint32_t k = 0; k < ASYNC_N && okf; k++)
+            if (bfm_wait(c, tags[k]) != BFM_OK || old64[k] != k) okf = 0;
+        okf = okf && bfm_read(c, wf, &v, 8) == BFM_OK && v == ASYNC_N;
+        check("[9] FAA 200 個を出しておくと、元の値が 0〜199 の順に並び、語は 200 になる", okf);
+        for (uint32_t k = 0; k < ASYNC_N && okc; k++)
+            if (bfm_cas_async(c, wc, k, k + 1u, &old64[k], &tags[k]) != BFM_OK) okc = 0;
+        for (uint32_t k = 0; k < ASYNC_N && okc; k++)
+            if (bfm_wait(c, tags[k]) != BFM_OK || old64[k] != k) okc = 0;
+        okc = okc && bfm_read(c, wc, &v, 8) == BFM_OK && v == ASYNC_N;
+        check("[9] CAS i->i+1 を 200 個出しておくと、全部成功する(元の値 = 比較値)", okc);
+        for (uint32_t k = 0; k < ASYNC_N && okf32; k++)
+            if (bfm_faa32_async(c, wf32, 1, &old32[k], &tags[k]) != BFM_OK) okf32 = 0;
+        for (uint32_t k = 0; k < ASYNC_N && okf32; k++)
+            if (bfm_wait(c, tags[k]) != BFM_OK || old32[k] != k) okf32 = 0;
+        okf32 = okf32 && bfm_read(c, wf32, &v32, 4) == BFM_OK && v32 == ASYNC_N;
+        check("[9] FAA32 200 個を出しておくと、元の値が 0〜199 の順に並ぶ", okf32);
+        for (uint32_t k = 0; k < ASYNC_N && okc32; k++)
+            if (bfm_cas32_async(c, wc32, k, k + 1u, &old32[k], &tags[k]) != BFM_OK) okc32 = 0;
+        for (uint32_t k = 0; k < ASYNC_N && okc32; k++)
+            if (bfm_wait(c, tags[k]) != BFM_OK || old32[k] != k) okc32 = 0;
+        okc32 = okc32 && bfm_read(c, wc32, &v32, 4) == BFM_OK && v32 == ASYNC_N;
+        check("[9] CAS32 i->i+1 を 200 個出しておくと、全部成功する", okc32);
+        bfm_tag_t ta;
+        check("[9] 境界の合わない非同期の atomic は BFM_E_PARAM",
+              bfm_faa_async(c, wf + 4u, 1, NULL, &ta) == BFM_E_PARAM && bfm_cas32_async(c, wf32 + 2u, 0, 1, NULL, &ta) == BFM_E_PARAM);
+    }
     bfm_tag_t t;
     check("[9] 枠の中継バッファより長い非同期の read は BFM_E_PARAM",
           bfm_read_async(c, ASYNC_OFF, g_aout, g_bfm_async_buf_size + 1u, &t) == BFM_E_PARAM);
@@ -981,11 +1019,11 @@ static void run_dif(bfm_conn_t *c, uint32_t iters)
 #define MT_SPAN    (64u * 1024u)
 #define MT_CNT_OFF (MT_OFF + BFM_MAX_CONN * MT_SPAN)   /* 全スレッドで共有する FAA の語 */
 #define MT_DIF_N   16u
-#define MT_PH      10u                    /* 速さの区間の数(g_mt_ph)*/
+#define MT_PH      13u                    /* 速さの区間の数(g_mt_ph)*/
 #define MT_SYNC    10u                    /* 速さの区間ごとに相手と足並みをそろえる段の番号の起点 */
 #define MT_BIG     (64u * 1024u)          /* 帯域を測る write / read の長さ */
 
-/* 速さの区間。0〜4 は 1 回ずつ完了を待つ関数、5〜9 は多重度つき(bfm_*_async。g_bfm_qdepth 個まで出しておく)。
+/* 速さの区間。0〜4 は 1 回ずつ完了を待つ関数、5〜12 は多重度つき(bfm_*_async。g_bfm_qdepth 個まで出しておく)。
  * 回数 = -n / div。bytes が 4KiB 以上の区間は MB/s で、それ以外は Mops で出す。 */
 static const struct {
     const char *name;                     /* 区間の名前(表示と相手との足並み)*/
@@ -996,6 +1034,7 @@ static const struct {
     {"write 64KiB", 50u, MT_BIG}, {"read 64KiB", 50u, MT_BIG},
     {"aw 8B NOACK", 1u, 8u}, {"aw 8B ACK", 1u, 8u}, {"ar 8B", 1u, 8u},
     {"aw 4KiB ACK", 10u, 4096u}, {"ar 4KiB", 10u, 4096u},
+    {"aFAA", 1u, 8u}, {"aCAS", 1u, 8u}, {"aFAA 64語", 1u, 8u},
 };
 static uint8_t g_mt_big[MT_BIG];          /* 帯域を測る write の元(どのスレッドも読むだけ)*/
 static __thread uint8_t mt_rbuf[MT_BIG];  /* 帯域を測る read の着地点(スレッドごと)*/
@@ -1007,7 +1046,7 @@ static uint32_t mt_reps(unsigned ph, uint32_t n)
     return (n / g_mt_ph[ph].div) ? n / g_mt_ph[ph].div : 1u;
 }
 
-/* 多重度つきの区間を 1 回分打つ(区間 5〜9)。最後に出したものが済むまで待つ(完了は出した順に来るので、
+/* 多重度つきの区間を 1 回分打つ(区間 5〜12。aFAA / aCAS は同じ 1 つの語へ、aFAA 64語 は 64 バイトおきの 64 個の語へ順に)。最後に出したものが済むまで待つ(完了は出した順に来るので、
  * それで全部済んでいる)。ACK を確かめない write は bfm_check() で仕掛かりが 0 になるまで見る。 */
 static int mt_async(bfm_conn_t *c, unsigned ph, uint64_t own, uint64_t big, uint32_t reps)
 {
@@ -1020,6 +1059,9 @@ static int mt_async(bfm_conn_t *c, unsigned ph, uint64_t own, uint64_t big, uint
         case 6: rc = bfm_write_async(c, own, &v, 8, BFM_ACK, &tag); break;
         case 7: rc = bfm_read_async(c, own, &mt_r8[k & 63u], 8, &tag); break;
         case 8: rc = bfm_write_async(c, big + (k & 15u) * 4096u, g_mt_big, 4096, BFM_ACK, &tag); break;
+        case 10: rc = bfm_faa_async(c, own + 24u, 1, &mt_r8[k & 63u], &tag); break;
+        case 11: rc = bfm_cas_async(c, own + 32u, k, k + 1u, &mt_r8[k & 63u], &tag); break;
+        case 12: rc = bfm_faa_async(c, big + (k & 63u) * 64u, 1, &mt_r8[k & 63u], &tag); break;
         default: rc = bfm_read_async(c, big + (k & 15u) * 4096u, mt_rbuf + (k & 15u) * 4096u, 4096, &tag); break;
         }
     }

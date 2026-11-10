@@ -453,51 +453,63 @@ static uint32_t atomic32_result(struct bfm_conn *c)
     return bfm_rd32be((const volatile void *)(uintptr_t)c->stage);
 }
 
+/*=================================================================
+ * atomic の WQE を 1 個組む(1 WQEBB、完了通知あり)。元の値は手元の addr へ NIC が書く
+ * (8 バイトはホスト順、4 バイトはビッグエンディアン。32 バイトまでの応答は CQE に入ることもある)。
+ * opcode が MLX5_OPCODE_ATOMIC_MASKED_* なら 4 バイト(拡張 atomic = masked atomic。IB の規格には無い
+ * mlx5 の拡張)。ctrl の opmod で大きさを指定し、atomic セグメントは 16 バイト:
+ *   CAS: swap・compare・swap_mask・compare_mask(各 4 バイト。mask は全ビット)
+ *   FAA: add・field_boundary(0 = 32 ビットで 1 つの数)・予約 8 バイト
+ * 両端の装置が拡張 atomic の 4 バイトに対応していること(相手の QP の atomic_mode も)。
+ * 戻り値: BFM_OK = 組んだ。BFM_E_STATE・BFM_E_PARAM(範囲・境界)・BFM_E_NOTSUP(4 バイトに対応していない)。
+ * ===============================================================*/
+int bfm_ops_build_atomic(struct bfm_conn *c, uint64_t *w, uint32_t opcode, uint64_t off, uint64_t swap_add,
+                         uint64_t cmp, uint64_t addr)
+{
+    const int is32 = (opcode == MLX5_OPCODE_ATOMIC_MASKED_CS || opcode == MLX5_OPCODE_ATOMIC_MASKED_FA);
+    const uint32_t sz = is32 ? 4u : 8u;
+    int rc = check_range(c, off, sz);
+    if (rc != BFM_OK) return rc;
+    if (((c->raddr + off) & (sz - 1u)) != 0) return BFM_E_PARAM;
+    if (is32 && ((c->dev->atomic_ops & 0x0cu) != 0x0cu || (c->dev->atomic_size_qp & 0x04u) == 0)) return BFM_E_NOTSUP;
+    memset(w, 0, 64);
+    build_ctrl(c, w, opcode, 4u, 1);
+    build_raddr(c, w, off);
+    if (is32) {
+        put32(w, 0, (MLX5_OPMOD_EXT_ATOMIC(2u) << 24) | ((c->qp.sq_pc & 0xffffu) << 8) | opcode);
+        put32(w, 32, (uint32_t)swap_add);
+        if (opcode == MLX5_OPCODE_ATOMIC_MASKED_CS) {
+            put32(w, 36, (uint32_t)cmp);
+            put32(w, 40, 0xffffffffu);
+            put32(w, 44, 0xffffffffu);
+        }
+    } else {
+        put64(w, 32, swap_add);
+        put64(w, 40, cmp);
+    }
+    build_dseg(c, w, 48, sz, addr);
+    return BFM_OK;
+}
+
 static int atomic_op(struct bfm_conn *c, uint32_t opcode, uint64_t off, uint64_t swap_add,
                      uint64_t cmp, uint64_t *old)
 {
     uint64_t w[8];
-    int rc = check_range(c, off, 8u);
+    int rc = bfm_ops_build_atomic(c, w, opcode, off, swap_add, cmp, bfm_dma_addr(c->stage));
     if (rc != BFM_OK) return rc;
-    if (((c->raddr + off) & 7u) != 0) return BFM_E_PARAM;
-    memset(w, 0, sizeof(w));
-    build_ctrl(c, w, opcode, 4u, 1);
-    build_raddr(c, w, off);
-    put64(w, 32, swap_add);
-    put64(w, 40, cmp);
-    build_dseg(c, w, 48, 8u, bfm_dma_addr(c->stage));
     if ((rc = post(c, w, 1u)) != BFM_OK) return rc;
     if ((rc = wait_done(c, c->qp.sq_pc)) != BFM_OK) return rc;
     if (old) *old = atomic_result(c);
     return BFM_OK;
 }
 
-/*=================================================================
- * 4 バイトの atomic(拡張 atomic = masked atomic。IB の規格には無い mlx5 の拡張)。
- * ctrl の opmod で大きさを指定し、atomic セグメントは 16 バイト:
- *   CAS: swap・compare・swap_mask・compare_mask(各 4 バイト。mask は全ビット)
- *   FAA: add・field_boundary(0 = 32 ビットで 1 つの数)・予約 8 バイト
- * 両端の装置が拡張 atomic の 4 バイトに対応していること(相手の QP の atomic_mode も)。
- * ===============================================================*/
+/* 4 バイトの atomic(組み方は bfm_ops_build_atomic())。 */
 static int atomic32_op(struct bfm_conn *c, uint32_t opcode, uint64_t off, uint32_t swap_add,
                        uint32_t cmp, uint32_t *old)
 {
     uint64_t w[8];
-    int rc = check_range(c, off, 4u);
+    int rc = bfm_ops_build_atomic(c, w, opcode, off, swap_add, cmp, bfm_dma_addr(c->stage));
     if (rc != BFM_OK) return rc;
-    if (((c->raddr + off) & 3u) != 0) return BFM_E_PARAM;
-    if ((c->dev->atomic_ops & 0x0cu) != 0x0cu || (c->dev->atomic_size_qp & 0x04u) == 0) return BFM_E_NOTSUP;
-    memset(w, 0, sizeof(w));
-    build_ctrl(c, w, opcode, 4u, 1);
-    put32(w, 0, (MLX5_OPMOD_EXT_ATOMIC(2u) << 24) | ((c->qp.sq_pc & 0xffffu) << 8) | opcode);
-    build_raddr(c, w, off);
-    put32(w, 32, swap_add);
-    if (opcode == MLX5_OPCODE_ATOMIC_MASKED_CS) {
-        put32(w, 36, cmp);
-        put32(w, 40, 0xffffffffu);
-        put32(w, 44, 0xffffffffu);
-    }
-    build_dseg(c, w, 48, 4u, bfm_dma_addr(c->stage));
     if ((rc = post(c, w, 1u)) != BFM_OK) return rc;
     if ((rc = wait_done(c, c->qp.sq_pc)) != BFM_OK) return rc;
     if (old) *old = atomic32_result(c);

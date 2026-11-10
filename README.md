@@ -61,6 +61,8 @@ bfm_tag_t tw, tr;
 bfm_write_async(c, off, src, len, BFM_ACK, &tw);     /* ACK を確かめる write。tag を返す */
 bfm_write_async(c, off, src, len, BFM_NOACK, NULL);  /* ACK を確かめない write(tag なし)*/
 bfm_read_async(c, off, dst, len, &tr);               /* read。応答は刈り取ったときに dst へ */
+bfm_faa_async(c, off, add, &old, &ta);               /* atomic も同じ(bfm_cas_async・bfm_cas32_async・bfm_faa32_async)。
+                                                        元の値は刈り取ったときに old へ */
 bfm_test(c, tw);                                     /* 済んだか(待たない)。bfm_wait(c, tw) なら済むまで */
 bfm_check(c, &inflight);                             /* ときどき呼ぶ(ACK なしの write の時間切れ・エラー)*/
 
@@ -84,10 +86,11 @@ while (bfm_shutdown() == BFM_INPROGRESS) { }
 - 接続の数は `g_bfm_port_conn[ポート]`(既定 16。上限 `BFM_MAX_PORT_CONN` = 16)。ポートは `BFM_MAX_PORT` = 2 個まで
   (合計 32 本)。0 のポートは使わない。両方のノードで同じ値にする。
 
-### 多重度(完了を待たずに出す write / read)
+### 多重度(完了を待たずに出す write / read / atomic)
 
 `bfm_write()` / `bfm_read()` は 1 回ずつ ACK・応答を待つ(1 回 約 1.4〜1.7µs = 往復の時間)。`bfm_write_async()` /
-`bfm_read_async()` は待たずに戻り、**1 本の接続で最大 64 個(`g_bfm_qdepth`)まで出しておける**。
+`bfm_read_async()` と、CAS / FAA の `bfm_cas_async()` / `bfm_faa_async()` / `bfm_cas32_async()` / `bfm_faa32_async()` は
+待たずに戻り、**1 本の接続で、種類を混ぜて最大 64 個(`g_bfm_qdepth`)まで出しておける**。
 
 - 仕掛かり中の 1 個ごとに「枠」を 1 つ使う。枠は送り元 / 着地点の中継バッファ(`g_bfm_async_buf_size`、既定 4KiB)を
   1 つずつ持つので、1 回の長さはその大きさまで(inline に収まる 220 バイトまでの write は WQE に埋め込む)。
@@ -452,7 +455,7 @@ sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -D 0000:01:00.0 -I 192.1
    (相手の公開メモリの 3MiB の語へ進み具合を書き、自分の同じ語に相手の進み具合が来るのを待つ)。
 3. 全部の接続に 1 本ずつスレッドを付け、次を確かめてから、8 バイトの write / read / FAA を `-n` 回(既定 100,000)ずつ、
    64KiB の write / read を `-n` / 50 回ずつ、続けて多重度つき(`bfm_*_async()`。`-Q` 個まで出しておく)の 8 バイトの
-   write(ACK なし / あり)・read を `-n` 回ずつ、4KiB の write / read を `-n` / 10 回ずつ、
+   write(ACK なし / あり)・read と FAA・CAS(同じ語へ / 64 個の語へ)を `-n` 回ずつ、4KiB の write / read を `-n` / 10 回ずつ、
    全スレッドで同時に打って合計の速さ(Mops・MB/s)を出す。**区間ごとに相手と
    足並みをそろえる**ので、相手も同じ区間を同時に打つ(= 両方向の速さ)。片方向の速さは、受ける側に `-q` を付けて測る
    (`-q` の側は転送せず、足並みだけそろえる)。本数を変えて速さだけ測るときは、両方に `-P -c <本数>` を付ける
@@ -489,7 +492,7 @@ sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -D 0000:01:00.0 -I 192.1
 | [5] | データ領域を読み戻して模型と比べる |
 | [5b] | 相手の公開メモリの最後の 64KiB と 8 バイトを write して読み戻す。はみ出す操作は手元で断る(`BFM_E_PARAM`)|
 | [6] | 遅延(write / read 8・64 バイト、FAA、CAS、FAA32、CAS32)と write_post の速さ。測った後にもう一度読み戻して比べる |
-| [9] | 多重度つき: ACK を確かめる write 200 個(64 を超えて出し、刈り取りながら出す)を tag ごとに確かめる、read 200 個を tag ごとに確かめて中身を比べる、使い回された古い tag が `BFM_OK`、write の直後の同じ所の read がその中身を読む、ACK を確かめない write 2,000 個の後に `bfm_check()` で仕掛かりが 0 になり中身が一致、長すぎる操作は `BFM_E_PARAM` |
+| [9] | 多重度つき: ACK を確かめる write 200 個(64 を超えて出し、刈り取りながら出す)を tag ごとに確かめる、read 200 個を tag ごとに確かめて中身を比べる、使い回された古い tag が `BFM_OK`、write の直後の同じ所の read がその中身を読む、ACK を確かめない write 2,000 個の後に `bfm_check()` で仕掛かりが 0 になり中身が一致、FAA / FAA32 を同じ語へ 200 個出しておくと元の値が 0〜199 の順に並ぶ、CAS / CAS32 の i→i+1 を 200 個出しておくと全部成功する、長すぎる操作・境界の合わない atomic は `BFM_E_PARAM` |
 | [8] | T10-DIF: 4 つの操作を write / read の両方(8 通り)で、相手のメモリ・手元の結果と独立に作った期待値を比べる。誤りの検出(guard・ref tag・app tag)。起動と完了確認を分けた使い方(途中の 2 本目の起動が `BFM_E_BUSY`、途中で普通の write / read、`bfm_dif_poll()` で完了、3 つ目の分の誤りを `bfm_dif_wait()` で受け取る)。SW は常に、HW は使えるときだけ。使えなければ `BFM_E_NOTSUP` を確かめる。DIF の遅延とスループット |
 | 最後 | 模型の hash を出す(相手が止める前に出す「自分の公開メモリの hash」と同じであること)|
 
@@ -534,6 +537,8 @@ sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -D 0000:01:00.0 -I 192.1
   - **接続の数を変えると**(双方向、`run -P -c <本数>`): 帯域は 1 ポートなら 2 本で頭打ち(合計 5.4〜5.8 GB/s)、2 ポートなら
     各 2 本(合計 4 本)で最も高い(合計 10.6 / 11.2 GB/s)。8 バイトの操作は本数にほぼ比例して伸び(1 本あたり write 約 0.7 Mops)、
     打つ側の CPU の数で頭打ちになる(OptiPlex は 4 本で約 2.6 Mops、Precision は 8 本で 5.5 Mops)。
+  - **atomic の多重度つき**: 1 本の接続で、FAA / CAS が多重度 1 の 0.57 Mops から多重度 4 で約 2.1〜2.6 Mops に伸び、そこで頭打ち
+    (受ける NIC の atomic の速さ。1 回 約 380〜470ns。同じ語へ打っても 64 個の語へ散らしても同じ)。32 本でも合計は同じところで止まる。
   - **多重度つき(`bfm_*_async()`)**: 1 本の接続・1 つのコアで、8 バイトの write が多重度 1 の 0.75 Mops から 64 で 9.5 Mops、
     read が 0.6 → 7.4 Mops(多重度 8 まではほぼ比例)。4KiB は多重度 4 で 1 ポートの片方向の線速近く(2.7〜2.8 GB/s)。
     2 ポート × 16 本・双方向では 8 バイトの write が合計 24〜47 Mops(1 回ずつ待つ形の 2.6〜10.6 Mops から)。
