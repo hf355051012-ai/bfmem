@@ -36,24 +36,35 @@
 #define MAP_FIXED_NOREPLACE 0x100000
 #endif
 
-static int s_container = -1;        /* VFIO のコンテナ(/dev/vfio/vfio)の fd */
-static int s_group = -1;            /* VFIO のグループ(/dev/vfio/<番号>)の fd */
-static int s_device = -1;           /* VFIO の装置の fd(設定空間と BAR0 の読み書き)*/
+static int s_container = -1;        /* VFIO のコンテナ(/dev/vfio/vfio)の fd。全部のポートで 1 つ */
 static int s_dma_latency_fd = -1;   /* /dev/cpu_dma_latency(開いている間だけ効く)*/
 static int s_msr_fd = -1;           /* /dev/cpu/N/msr(modprobe msr が要る)*/
-static uint64_t s_cfg_off;          /* 装置の fd の中の設定空間の位置(VFIO の region の offset)*/
-static uint8_t *s_bar0;             /* BAR0 を張った先(UC)*/
-static uint64_t s_bar0_size;        /* BAR0 の大きさ(VFIO から聞いた値)*/
-static int s_bar0_sysfs;            /* 1 = BAR0 を sysfs の resource0 から張った(WC に張り替えられる)*/
-static uint64_t s_bar0_vfio_off;    /* 装置の fd の中の BAR0 の位置(sysfs で張れないときに使う)*/
 static void *s_dma_va;              /* DMA 領域を張った先(= g_bfm_dma_base)*/
 static void *s_mr_va;               /* 公開メモリを張った先(= g_bfm_mr_base)*/
 
+/* VFIO のグループ。同じカードの 2 つの PF は同じグループのことがある(OptiPlex)ので、
+ * 開いたグループを覚えておき、同じ番号なら使い回す。 */
+static struct {
+    int id;                          /* IOMMU グループの番号 */
+    int fd;                          /* /dev/vfio/<番号> の fd */
+} s_grp[BFM_MAX_PORT];
+static int s_ngrp;                   /* s_grp の使っている数 */
+
 /* UC の窓を作っている mmap の一覧(BAR0 内のオフセット)。PAT の登録は mmap 単位で、
  * その mmap のページが全部外れるまで残るので、どの mmap に入っているかを覚えておく。 */
-#define SEG_MAX ((int)(2u * BFM_MAX_CONN + 8u))   /* WC に張る UAR(接続の枠ごとに 1 つ)1 つで区間が最大 2 つ増える */
-static struct { uint64_t off, len; } s_seg[SEG_MAX];   /* UC の mmap の区間(off = BAR0 内の位置、len = 長さ)*/
-static int s_nseg;                                      /* s_seg の使っている数 */
+#define SEG_MAX ((int)(2u * BFM_MAX_PORT_CONN + 8u))   /* WC に張る UAR(接続の枠ごとに 1 つ)1 つで区間が最大 2 つ増える */
+
+/* ポートごとの装置。 */
+static struct {
+    int device;                      /* VFIO の装置の fd(設定空間と BAR0 の読み書き。-1 = 掴んでいない)*/
+    uint64_t cfg_off;                /* 装置の fd の中の設定空間の位置(VFIO の region の offset)*/
+    uint8_t *bar0;                   /* BAR0 を張った先(UC)*/
+    uint64_t bar0_size;              /* BAR0 の大きさ(VFIO から聞いた値)*/
+    int bar0_sysfs;                  /* 1 = BAR0 を sysfs の resource0 から張った(WC に張り替えられる)*/
+    uint64_t bar0_vfio_off;          /* 装置の fd の中の BAR0 の位置(sysfs で張れないときに使う)*/
+    struct { uint64_t off, len; } seg[SEG_MAX];   /* UC の mmap の区間(off = BAR0 内の位置、len = 長さ)*/
+    int nseg;                        /* seg の使っている数 */
+} s_dev[BFM_MAX_PORT];
 
 void bfm_port_log(const char *fmt, ...)
 {
@@ -118,9 +129,60 @@ static void cpu_init(void)
  * VFIO
  * ------------------------------------------------------------------- */
 
-static int vfio_open_device(const char *bdf)
+/* コンテナを開く(最初のポートのときだけ)。 */
+static int vfio_open_container(void)
 {
+    if (s_container >= 0) return 0;
+    s_container = open("/dev/vfio/vfio", O_RDWR);
+    if (s_container < 0 || ioctl(s_container, VFIO_GET_API_VERSION) != VFIO_API_VERSION ||
+        !ioctl(s_container, VFIO_CHECK_EXTENSION, VFIO_TYPE1_IOMMU)) {
+        bfm_port_log("port: /dev/vfio/vfio が使えない (errno=%d)\n", errno);
+        return -1;
+    }
+    return 0;
+}
+
+/* IOMMU グループ grp を開いてコンテナに入れる(開いてあれば使い回す)。戻り値: グループの fd(-1 = 失敗)。 */
+static int vfio_open_group(int grp)
+{
+    char path[64];
+    for (int i = 0; i < s_ngrp; i++)
+        if (s_grp[i].id == grp) return s_grp[i].fd;
+    snprintf(path, sizeof(path), "/dev/vfio/%d", grp);
+    const int fd = open(path, O_RDWR);
+    if (fd < 0) {
+        bfm_port_log("port: %s が開けない (errno=%d)。vfio-pci に結びつけたか\n", path, errno);
+        return -1;
+    }
+    s_grp[s_ngrp].id = grp;
+    s_grp[s_ngrp].fd = fd;
+    s_ngrp++;
+    struct vfio_group_status st = { .argsz = sizeof(st) };
+    if (ioctl(fd, VFIO_GROUP_GET_STATUS, &st) < 0 || !(st.flags & VFIO_GROUP_FLAGS_VIABLE)) {
+        bfm_port_log("port: IOMMU グループ %d が使えない(同じグループの装置を全部 vfio-pci に結びつけること)\n", grp);
+        return -1;
+    }
+    if (ioctl(fd, VFIO_GROUP_SET_CONTAINER, &s_container) < 0) {
+        bfm_port_log("port: IOMMU グループ %d をコンテナに入れられない (errno=%d)\n", grp, errno);
+        return -1;
+    }
+    /* IOMMU の型は、最初のグループを入れた後に 1 回だけ決める */
+    if (s_ngrp == 1 && ioctl(s_container, VFIO_SET_IOMMU, VFIO_TYPE1_IOMMU) < 0) {
+        bfm_port_log("port: VFIO のコンテナを作れない (errno=%d)\n", errno);
+        return -1;
+    }
+    return fd;
+}
+
+/* ポート port の装置(g_bfm_linux_pci_bdf[port])を掴む。 */
+static int vfio_open_device(unsigned port)
+{
+    const char *bdf = g_bfm_linux_pci_bdf[port];
     char path[256], link[256];
+    if (bdf == NULL) {
+        bfm_port_log("port: g_bfm_linux_pci_bdf[%u] が NULL(PCI の BDF を入れること)\n", port);
+        return -1;
+    }
     snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/iommu_group", bdf);
     const ssize_t n = readlink(path, link, sizeof(link) - 1);
     if (n < 0) {
@@ -130,47 +192,28 @@ static int vfio_open_device(const char *bdf)
     link[n] = '\0';
     const char *slash = strrchr(link, '/');
     const int grp = atoi(slash ? slash + 1 : link);
-
-    s_container = open("/dev/vfio/vfio", O_RDWR);
-    if (s_container < 0 || ioctl(s_container, VFIO_GET_API_VERSION) != VFIO_API_VERSION ||
-        !ioctl(s_container, VFIO_CHECK_EXTENSION, VFIO_TYPE1_IOMMU)) {
-        bfm_port_log("port: /dev/vfio/vfio が使えない (errno=%d)\n", errno);
-        return -1;
-    }
-    snprintf(path, sizeof(path), "/dev/vfio/%d", grp);
-    s_group = open(path, O_RDWR);
-    if (s_group < 0) {
-        bfm_port_log("port: %s が開けない (errno=%d)。vfio-pci に結びつけたか\n", path, errno);
-        return -1;
-    }
-    struct vfio_group_status st = { .argsz = sizeof(st) };
-    if (ioctl(s_group, VFIO_GROUP_GET_STATUS, &st) < 0 || !(st.flags & VFIO_GROUP_FLAGS_VIABLE)) {
-        bfm_port_log("port: IOMMU グループ %d が使えない(同じグループの装置を全部 vfio-pci に結びつけること)\n", grp);
-        return -1;
-    }
-    if (ioctl(s_group, VFIO_GROUP_SET_CONTAINER, &s_container) < 0 ||
-        ioctl(s_container, VFIO_SET_IOMMU, VFIO_TYPE1_IOMMU) < 0) {
-        bfm_port_log("port: VFIO のコンテナを作れない (errno=%d)\n", errno);
-        return -1;
-    }
-    s_device = ioctl(s_group, VFIO_GROUP_GET_DEVICE_FD, bdf);
-    if (s_device < 0) {
+    if (vfio_open_container() != 0) return -1;
+    const int gfd = vfio_open_group(grp);
+    if (gfd < 0) return -1;
+    s_dev[port].device = ioctl(gfd, VFIO_GROUP_GET_DEVICE_FD, bdf);
+    if (s_dev[port].device < 0) {
         bfm_port_log("port: %s を掴めない (errno=%d)\n", bdf, errno);
         return -1;
     }
     struct vfio_region_info ri = { .argsz = sizeof(ri), .index = VFIO_PCI_CONFIG_REGION_INDEX };
-    if (ioctl(s_device, VFIO_DEVICE_GET_REGION_INFO, &ri) < 0) return -1;
-    s_cfg_off = ri.offset;
+    if (ioctl(s_dev[port].device, VFIO_DEVICE_GET_REGION_INFO, &ri) < 0) return -1;
+    s_dev[port].cfg_off = ri.offset;
     struct vfio_region_info rb = { .argsz = sizeof(rb), .index = VFIO_PCI_BAR0_REGION_INDEX };
-    if (ioctl(s_device, VFIO_DEVICE_GET_REGION_INFO, &rb) < 0) return -1;
-    s_bar0_vfio_off = rb.offset;
-    s_bar0_size = rb.size;
+    if (ioctl(s_dev[port].device, VFIO_DEVICE_GET_REGION_INFO, &rb) < 0) return -1;
+    s_dev[port].bar0_vfio_off = rb.offset;
+    s_dev[port].bar0_size = rb.size;
+    if (g_bfm_verbose) bfm_port_log("port: ポート %u = %s(IOMMU グループ %d)\n", port, bdf, grp);
     return 0;
 }
 
 /*=================================================================
  * va の位置に size バイトを張り(2MiB の境界・倍数なら hugepage を先に試す)、
- * 同じ値を IOVA にして NIC から見えるようにする。
+ * 同じ値を IOVA にして NIC から見えるようにする(コンテナの中の全部の装置から見える)。
  * ===============================================================*/
 static void *map_region(uint64_t va, uint64_t size, const char *what)
 {
@@ -202,12 +245,24 @@ static void *map_region(uint64_t va, uint64_t size, const char *what)
 
 int bfm_port_init(void)
 {
-    if (g_bfm_linux_pci_bdf == NULL) {
-        bfm_port_log("port: g_bfm_linux_pci_bdf が NULL(PCI の BDF を入れること)\n");
-        return -1;
+    int used = 0;
+    for (unsigned p = 0; p < BFM_MAX_PORT; p++) {
+        s_dev[p].device = -1;
+        s_dev[p].bar0 = NULL;
+        s_dev[p].nseg = 0;
     }
-    if (vfio_open_device(g_bfm_linux_pci_bdf) != 0) {
-        bfm_port_fini();
+    s_ngrp = 0;
+    /* 使うポートの装置を全部掴んでから(グループがコンテナに入ってから)DMA 領域を張る */
+    for (unsigned p = 0; p < BFM_MAX_PORT; p++) {
+        if (g_bfm_port_conn[p] == 0) continue;
+        used = 1;
+        if (vfio_open_device(p) != 0) {
+            bfm_port_fini();
+            return -1;
+        }
+    }
+    if (!used) {
+        bfm_port_log("port: 使うポートが無い(g_bfm_port_conn[] が全部 0)\n");
         return -1;
     }
     s_dma_va = map_region(g_bfm_dma_base, g_bfm_dma_size, "DMA 領域");
@@ -233,11 +288,16 @@ int bfm_port_init(void)
 
 void bfm_port_fini(void)
 {
-    if (s_bar0) bfm_port_bar0_unmap();
-    if (s_device >= 0) close(s_device);
-    if (s_group >= 0) close(s_group);
+    for (unsigned p = 0; p < BFM_MAX_PORT; p++) {
+        if (s_dev[p].bar0) bfm_port_bar0_unmap(p);
+        if (s_dev[p].device > 0)   /* 0 = まだ掴んでいない(静的な初期値)*/
+            close(s_dev[p].device);
+        s_dev[p].device = -1;
+    }
+    for (int i = 0; i < s_ngrp; i++) close(s_grp[i].fd);
+    s_ngrp = 0;
     if (s_container >= 0) close(s_container);   /* IOMMU の対応づけもここで外れる */
-    s_device = s_group = s_container = -1;
+    s_container = -1;
     if (s_dma_va) munmap(s_dma_va, g_bfm_dma_size);
     if (s_mr_va) munmap(s_mr_va, g_bfm_mr_size);
     s_dma_va = s_mr_va = NULL;
@@ -247,109 +307,108 @@ void bfm_port_fini(void)
     s_msr_fd = -1;
 }
 
-uint32_t bfm_port_pci_read32(uint32_t off)
+uint32_t bfm_port_pci_read32(unsigned port, uint32_t off)
 {
     uint32_t v = 0xffffffffu;
-    if (pread(s_device, &v, 4, (off_t)(s_cfg_off + off)) != 4)
-        bfm_port_log("port: 設定空間 0x%x を読めない (errno=%d)\n", off, errno);
+    if (pread(s_dev[port].device, &v, 4, (off_t)(s_dev[port].cfg_off + off)) != 4)
+        bfm_port_log("port: ポート %u の設定空間 0x%x を読めない (errno=%d)\n", port, off, errno);
     return v;
 }
 
-void bfm_port_pci_write32(uint32_t off, uint32_t val)
+void bfm_port_pci_write32(unsigned port, uint32_t off, uint32_t val)
 {
-    if (pwrite(s_device, &val, 4, (off_t)(s_cfg_off + off)) != 4)
-        bfm_port_log("port: 設定空間 0x%x へ書けない (errno=%d)\n", off, errno);
+    if (pwrite(s_dev[port].device, &val, 4, (off_t)(s_dev[port].cfg_off + off)) != 4)
+        bfm_port_log("port: ポート %u の設定空間 0x%x へ書けない (errno=%d)\n", port, off, errno);
 }
 
 /* ---------------------------------------------------------------------
  * BAR0
  * ------------------------------------------------------------------- */
 
-/* [off, off+len) を UC(sysfs の resource0、だめなら VFIO)で va に張る。 */
-static void *bar_map_uc(void *va, uint64_t off, uint64_t len, int fixed)
+/* ポート port の BAR0 の [off, off+len) を UC(sysfs の resource0、だめなら VFIO)で va に張る。 */
+static void *bar_map_uc(unsigned port, void *va, uint64_t off, uint64_t len, int fixed)
 {
     void *p = MAP_FAILED;
     const int flags = MAP_SHARED | (fixed ? MAP_FIXED : 0);
-    if (s_bar0_sysfs) {
+    if (s_dev[port].bar0_sysfs) {
         char path[128];
-        snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/resource0", g_bfm_linux_pci_bdf);
+        snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/resource0", g_bfm_linux_pci_bdf[port]);
         const int fd = open(path, O_RDWR | O_SYNC);
         if (fd >= 0) {
             p = mmap(va, len, PROT_READ | PROT_WRITE, flags, fd, (off_t)off);
             close(fd);
         }
     } else {
-        p = mmap(va, len, PROT_READ | PROT_WRITE, flags, s_device, (off_t)(s_bar0_vfio_off + off));
+        p = mmap(va, len, PROT_READ | PROT_WRITE, flags, s_dev[port].device,
+                 (off_t)(s_dev[port].bar0_vfio_off + off));
     }
     return p;
 }
 
-volatile uint8_t *bfm_port_bar0_map(uint64_t bar_phys, uint64_t bar_size)
+volatile uint8_t *bfm_port_bar0_map(unsigned port, uint64_t bar_phys, uint64_t bar_size)
 {
     (void)bar_phys;
-    if (bar_size != 0 && bar_size != s_bar0_size)
-        bfm_port_log("port: 注意: BAR0 の大きさが VFIO(0x%llx)と設定空間(0x%llx)で違う\n",
-                     (unsigned long long)s_bar0_size, (unsigned long long)bar_size);
-    s_bar0_sysfs = 1;
-    void *p = bar_map_uc(NULL, 0, s_bar0_size, 0);
+    if (bar_size != 0 && bar_size != s_dev[port].bar0_size)
+        bfm_port_log("port: 注意: ポート %u の BAR0 の大きさが VFIO(0x%llx)と設定空間(0x%llx)で違う\n", port,
+                     (unsigned long long)s_dev[port].bar0_size, (unsigned long long)bar_size);
+    s_dev[port].bar0_sysfs = 1;
+    void *p = bar_map_uc(port, NULL, 0, s_dev[port].bar0_size, 0);
     if (p == MAP_FAILED) {
         bfm_port_log("port: sysfs の resource0 が張れない。VFIO から張る(BlueFlame は使えない)\n");
-        s_bar0_sysfs = 0;
-        p = bar_map_uc(NULL, 0, s_bar0_size, 0);
+        s_dev[port].bar0_sysfs = 0;
+        p = bar_map_uc(port, NULL, 0, s_dev[port].bar0_size, 0);
     }
     if (p == MAP_FAILED) return NULL;
-    s_bar0 = (uint8_t *)p;
-    return s_bar0;
+    s_dev[port].bar0 = (uint8_t *)p;
+    s_dev[port].nseg = 0;
+    return s_dev[port].bar0;
 }
 
-void bfm_port_bar0_unmap(void)
+void bfm_port_bar0_unmap(unsigned port)
 {
-    if (s_bar0) munmap(s_bar0, s_bar0_size);
-    s_bar0 = NULL;
-    s_nseg = 0;
+    if (s_dev[port].bar0) munmap(s_dev[port].bar0, s_dev[port].bar0_size);
+    s_dev[port].bar0 = NULL;
+    s_dev[port].nseg = 0;
 }
 
 /* UC で張った区間を表に足す(表が一杯なら足さない。その区間は WC に張り替えられなくなるだけ)。 */
-static void seg_add(uint64_t off, uint64_t len)
+static void seg_add(unsigned port, uint64_t off, uint64_t len)
 {
-    if (s_nseg >= SEG_MAX) return;
-    s_seg[s_nseg].off = off;
-    s_seg[s_nseg].len = len;
-    s_nseg++;
+    if (s_dev[port].nseg >= SEG_MAX) return;
+    s_dev[port].seg[s_dev[port].nseg].off = off;
+    s_dev[port].seg[s_dev[port].nseg].len = len;
+    s_dev[port].nseg++;
 }
 
 /*=================================================================
- * BAR0 の [off, off+len) を同じ仮想アドレスのまま write-combining に張り替える。
+ * ポート port の BAR0 の [off, off+len) を同じ仮想アドレスのまま write-combining に張り替える。
  * そのページを含む mmap の前と後を張り直して、元の mmap をそのページだけに縮め、
  * そのページを外してから resource0_wc で張る。失敗したら UC に戻して NULL。
  * ===============================================================*/
-volatile uint8_t *bfm_port_bar0_wc(uint64_t off, uint64_t len)
+volatile uint8_t *bfm_port_bar0_wc(unsigned port, uint64_t off, uint64_t len)
 {
-    if (!s_bar0 || !s_bar0_sysfs || off + len > s_bar0_size) return NULL;
-    if (s_nseg == 0) {
-        s_seg[0].off = 0;
-        s_seg[0].len = s_bar0_size;
-        s_nseg = 1;
-    }
+    uint8_t *const bar0 = s_dev[port].bar0;
+    if (!bar0 || !s_dev[port].bar0_sysfs || off + len > s_dev[port].bar0_size) return NULL;
+    if (s_dev[port].nseg == 0) seg_add(port, 0, s_dev[port].bar0_size);
     int k = -1;
-    for (int i = 0; i < s_nseg; i++)
-        if (off >= s_seg[i].off && off + len <= s_seg[i].off + s_seg[i].len) k = i;
-    if (k < 0 || s_nseg + 2 > SEG_MAX) return NULL;
-    uint8_t *va = s_bar0 + off;
-    const uint64_t s0 = s_seg[k].off, s1 = s_seg[k].off + s_seg[k].len;
-    if (off > s0 && bar_map_uc(s_bar0 + s0, s0, off - s0, 1) != (void *)(s_bar0 + s0)) return NULL;
-    if (off + len < s1 && bar_map_uc(va + len, off + len, s1 - off - len, 1) != (void *)(va + len)) return NULL;
+    for (int i = 0; i < s_dev[port].nseg; i++)
+        if (off >= s_dev[port].seg[i].off && off + len <= s_dev[port].seg[i].off + s_dev[port].seg[i].len) k = i;
+    if (k < 0 || s_dev[port].nseg + 2 > SEG_MAX) return NULL;
+    uint8_t *va = bar0 + off;
+    const uint64_t s0 = s_dev[port].seg[k].off, s1 = s_dev[port].seg[k].off + s_dev[port].seg[k].len;
+    if (off > s0 && bar_map_uc(port, bar0 + s0, s0, off - s0, 1) != (void *)(bar0 + s0)) return NULL;
+    if (off + len < s1 && bar_map_uc(port, va + len, off + len, s1 - off - len, 1) != (void *)(va + len)) return NULL;
     /* ここまでで前後は別の mmap になった。表もそのとおりに分ける
      * (前後の張り直しに失敗したときは、全部 UC のままなので表は変えない)。 */
-    s_seg[k] = s_seg[--s_nseg];
-    if (off > s0) { s_seg[s_nseg].off = s0; s_seg[s_nseg].len = off - s0; s_nseg++; }
-    if (off + len < s1) { s_seg[s_nseg].off = off + len; s_seg[s_nseg].len = s1 - off - len; s_nseg++; }
+    s_dev[port].seg[k] = s_dev[port].seg[--s_dev[port].nseg];
+    if (off > s0) seg_add(port, s0, off - s0);
+    if (off + len < s1) seg_add(port, off + len, s1 - off - len);
     if (munmap(va, len) != 0) {
-        seg_add(off, len);                                   /* 外せなかった = UC のまま残っている */
+        seg_add(port, off, len);                             /* 外せなかった = UC のまま残っている */
         return NULL;
     }
     char path[128];
-    snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/resource0_wc", g_bfm_linux_pci_bdf);
+    snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/resource0_wc", g_bfm_linux_pci_bdf[port]);
     const int fd = open(path, O_RDWR | O_SYNC);
     void *p = MAP_FAILED;
     if (fd >= 0) {
@@ -358,13 +417,13 @@ volatile uint8_t *bfm_port_bar0_wc(uint64_t off, uint64_t len)
     }
     if (p == (void *)va) return va;
     bfm_port_log("port: %s が張れない (errno=%d)。UC に戻す\n", path, errno);
-    if (bar_map_uc(va, off, len, 1) == (void *)va) seg_add(off, len);
+    if (bar_map_uc(port, va, off, len, 1) == (void *)va) seg_add(port, off, len);
     return NULL;
 }
 
-void bfm_port_bar0_wc_release(uint64_t off, uint64_t len)
+void bfm_port_bar0_wc_release(unsigned port, uint64_t off, uint64_t len)
 {
-    if (!s_bar0 || off + len > s_bar0_size) return;
-    uint8_t *va = s_bar0 + off;
-    if (munmap(va, len) == 0 && bar_map_uc(va, off, len, 1) == (void *)va) seg_add(off, len);
+    if (!s_dev[port].bar0 || off + len > s_dev[port].bar0_size) return;
+    uint8_t *va = s_dev[port].bar0 + off;
+    if (munmap(va, len) == 0 && bar_map_uc(port, va, off, len, 1) == (void *)va) seg_add(port, off, len);
 }

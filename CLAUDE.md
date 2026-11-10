@@ -28,13 +28,23 @@ ConnectX(mlx5)の BlueFlame で、ノード間のメモリへ write / read / ato
 - **前提を絞って簡単にしてある(ユーザの指示)。** 外れる場合のコードを足し戻さない:
   CPU は x86-64 だけ(リトルエンディアン・DMA はキャッシュと一貫・TSO。他の CPU の分岐やキャッシュ操作は持たない)、
   **相手は常に bfmem**(接続は bfmem だけの REQ / REP / BYE。IB CM・Linux の rdma_cm とは繋がらない)、
-  VxWorks の設定空間は ECAM だけ、atomic は常にホスト順(できない装置は `bfm_init()` が断る)。
+  VxWorks の設定空間は ECAM だけ、atomic は常にホスト順(できない装置はポートの立ち上げで断る)。
+- **代表 API は `bfm_run()`(ユーザの指示)。** 外からはこれを周期的に呼び続けるだけで、初期化・init・connect・転送の準備・
+  メモリの公開まで進む。複数のコアから同時に呼べる。**状態機械は接続ごと**で、接続の表 `g_bfm_conn[]`(ポート × 16。
+  `g_bfm_port_conn[]` で数を決める。合計 32)の行ごとに状態(`step`)と鍵(`lock`)を持ち、`bfm_run()` は鍵を取れた行の
+  状態を 1 つ進める(最初に鍵を取ったコアが最初の状態を、次の状態もそのとき鍵を取ったコアが処理する)。
+  ポートの立ち上げは、そのポートの行が `K_PORT` の間に `bfm_dev_step()` で進める。
+- **ConnectX はポートごとに別の PCIe の function。** 装置は `g_bfm_dev[ポート]`、移植層の関数はポートの番号を取る。
+  両ノードで同じものを動かし(双方向)、ポートごとに IP の小さいほうが掛け側になる。
 - **立ち上げ・接続・切断・停止では回って待たない**(ユーザの指示)。待つところでは `BFM_INPROGRESS` を返し、呼び出し側が
   同じ関数を呼び続けて進める(状態機械)。FW のコマンドは `mlx5_cmd_run()`(出したかを `bfm_cmd_t` が覚える。entry は 1 つで
   持ち主がいる間はほかは出せない)。時間で待つところは `bfm_port_time_ns()` を見て `BFM_INPROGRESS` を返す。
-  `bfm_port_delay_us()` を本体に戻さない。データ経路(ACK を待つ write など)は同期のまま。
+  `bfm_port_delay_us()` を本体に戻さない。データ経路(ACK を待つ write など)は同期のまま。`bfm_run()` は鍵も回って待たない(trylock)。
 - **データ経路(write / read / atomic / T10-DIF)に、接続をまたいで書き換えるものを持ち込まない**(複数のコアが
-  別々の接続で同時に転送する)。接続をまたぐ状態(GSI・接続の枠・FW のコマンド・EQ)は `g_bfm_ctl_lock` の中で触る。
+  別々の接続で同時に転送する)。接続をまたぐ状態(GSI・接続の枠・FW のコマンド・EQ・DMA 領域の切り出し)は
+  `g_bfm_ctl_lock` の中で触る(ポートが 2 つでも鍵は 1 つ。ファイルの static の作業域を、ポートをまたいで使い回しているため)。
+- エラー・切断になった接続(`K_DOWN`)を `bfm_run()` が勝手に畳まない(データ経路で使っているかもしれない)。
+  張り直しはアプリケーションの `bfm_reconnect(port, i)`。
 - コードのコメントは日本語。
 
 ## ビルド
@@ -65,7 +75,7 @@ wsl.exe -d Ubuntu-22.04 -- bash -c "cd /mnt/c/Users/fukud/Documents/bfmem && pyt
 - ヘッダに `static inline` の関数を置いたら、そのヘッダを gen.py の `FILES` に入れて記述を書く
   (入れないと、呼ぶ側の使用関数で「外部」になる。今は `include/bfm_port.h` と `src/bfm_internal.h`)。
 - 関数ポインタ経由の呼び出しは解析で拾えないので、記述の `indirect` / `entry_note` で書く。
-- 状態機械の関数(`bfm_init()`・`mlx5_hca_init_step()`・`conn_step()` など)には、記述の `states` で状態遷移図を付ける
+- 状態機械の関数(`bfm_dev_step()`・`mlx5_hca_init_step()`・`bfm_cm_conn_step()` など)には、記述の `states` で状態遷移図を付ける
   (書き方は `desc/README.md`)。状態の enum や遷移を変えたら直すこと(検査は行き先の名前だけ)。
 - アセンブラの関数は `.globl` から拾い、宣言と説明は `port/x86/bfm_x86.h` の宣言と直前のコメントから取る
   (`port/x86/bfm_x86.c` の章の表)。関数ポインタの変数(引数でないもの)は gen.py の `FUNC_PTR_VARS` に足す。
@@ -74,7 +84,10 @@ wsl.exe -d Ubuntu-22.04 -- bash -c "cd /mnt/c/Users/fukud/Documents/bfmem && pyt
 
 手順・結果は `TEST_PLAN.md` の最後の「bfmem どうしの試験」(OptiPlex と Precision の両方の ConnectX-4 Lx を
 vfio-pci にして bfmem_test どうし)。OptiPlex の 2 つの PF は同じ IOMMU グループなので、**両方**を vfio-pci にする。
-Precision は PF0(`0000:b3:00.0`)だけでよい。終わったら mlx5_core に戻す。
+Precision は 1 ポートなら PF0(`0000:b3:00.0`)だけでよい。**2 本目のケーブルも繋がっている**(OptiPlex `01:00.0` ↔
+Precision `b3:00.1`、ポート 1 は 192.168.102.11 / .21)ので、2 ポートで試すときは Precision の PF1(グループ 3)も vfio-pci にする
+(その前に VM・VF が PF1 を使っていないことを確かめる)。終わったら mlx5_core に戻す。
+両方で同じ `run` を同時に動かす(`setsid nohup … < /dev/null &` で後ろに置き、ログを待つ)。片方向の速さは受ける側に `-q`。
 ホストへの入り方は `kvcache_cmp/CLAUDE.md` と同じ(`ganesha_pnfs/tools/r.sh`)。
 
 ## このプロジェクトで踏んだ落とし穴

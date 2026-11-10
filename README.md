@@ -22,12 +22,12 @@ WQE を UAR の BlueFlame の窓へ MMIO で書き込んで送る。相手の CP
 | `include/bfm_config.h` | **移植のときに設定する変数を全部ここに集めてある**(実体と既定値は `src/bfm_config.c`)|
 | `include/bfm.h` | アプリケーションが使う API |
 | `include/bfm_port.h` | 移植層の関数の宣言と、x86-64 のバリア・バイト順の道具 |
-| `src/bfm_core.c` | `bfm_init()` / `bfm_shutdown()`(全体の状態機械)/ `bfm_poll()` |
+| `src/bfm_core.c` | 代表 API `bfm_run()`・ポートの立ち上げの状態機械 `bfm_dev_step()`・`bfm_shutdown()` |
 | `src/bfm_pci.c` | PCIe の設定空間の設定(FLR・BAR0・Bus Master・MRRS)|
 | `src/mlx5_cmd.c` | コマンドキュー(待たずに出して完了を見る)、FW へのページの受け渡し、EQ |
 | `src/mlx5_hca.c` | HCA の立ち上げ、UAR・PD・MKey・CQ、ポート、RoCE のアドレス |
 | `src/mlx5_qp.c` | QP(RC と GSI)の作成と状態遷移 |
-| `src/bfm_cm.c` | 接続の確立と切断(GSI の上の bfmem だけの REQ / REP / BYE。接続の枠ごとの状態機械)|
+| `src/bfm_cm.c` | 接続の表と接続ごとの状態機械(GSI の上の bfmem だけの REQ / REP / BYE で確立・張り直し・切断)|
 | `src/bfm_ops.c` | データ経路(BlueFlame で WQE を送る、完了を拾う)|
 | `src/bfm_dif.c` | T10-DIF の読み書き(CPU で行う SW と、NIC の署名オフロードを使う HW)|
 | `src/bfm_mem.c` | DMA 領域からの静的な切り出し |
@@ -35,7 +35,7 @@ WQE を UAR の BlueFlame の窓へ MMIO で書き込んで送る。相手の CP
 | `port/vxworks/port_vxworks.c` | 移植層: VxWorks(**未検証**。VxWorks 固有の関数は使わない)|
 | `port/x86/bfm_x86_asm.S` | x86-64 の命令の関数(`rdtsc`・`cpuid`・`rdmsr`・`wrmsr`・`pause`)。アセンブラ |
 | `port/x86/bfm_x86.c` | TSC の周波数を CPUID / MSR から求め、TSC で時刻と待ちを作る。CPU の周波数を MSR で読んで表示する |
-| `test/bfm_test.c` | 試験プログラム(server / client / bench / info)|
+| `test/bfm_test.c` | 試験プログラム(run / serve / bench / info。両方のノードで同じものを動かす)|
 | `doc/spec/bfmem_spec.adoc` | **関数仕様書**(全ソースの全関数。表・フロー図・関係図、待たずに進める関数には状態遷移図。図は `doc/spec/images/*.drawio.svg`)。`doc/spec/gen.py` で作る。HTML 版は `docs/spec.html`(図を埋め込んだ 1 ファイル。asciidoctor があれば gen.py が一緒に作る)。**Web で見られる: https://hf355051012-ai.github.io/bfmem/spec.html**(GitHub Pages、master の `docs/`)|
 
 ## API
@@ -43,13 +43,10 @@ WQE を UAR の BlueFlame の窓へ MMIO で書き込んで送る。相手の CP
 ```c
 #include "bfm.h"
 
-/* 立ち上げ・接続・切断・停止は待たない(下の「待たない API」)。BFM_INPROGRESS の間は呼び続ける。 */
-while ((rc = bfm_init()) == BFM_INPROGRESS) { /* ほかの仕事 */ }   /* PCIe・HCA・RoCE の準備 */
-bfm_conn_t *c = NULL;
-while ((rc = bfm_accept(&c, 0, 0)) == BFM_INPROGRESS) { }        /* 受け側(ポートは g_bfm_cm_port)*/
-bfm_conn_t *c = NULL;
-while ((rc = bfm_connect(&c, ip, NULL, 0, 0)) == BFM_INPROGRESS) { }  /* 掛け側(相手の MAC は自動)*/
+/* 代表 API。どのコアから何本同時に呼んでもよい。BFM_OK になるまで(なった後も、ときどき)呼び続ける。 */
+while (bfm_run() != BFM_OK) { /* ほかの仕事 */ }   /* 初期化・init・connect・転送の準備・メモリの公開 */
 
+bfm_conn_t *c = bfm_conn(port, i);            /* ポート port の接続 i(使えなければ NULL)*/
 bfm_write(c, off, src, len);                  /* 相手の公開メモリ + off へ。ACK まで待つ */
 bfm_write_post(c, off, src, len);             /* 待たない(inline に収まる長さだけ)*/
 bfm_flush(c);                                 /* bfm_write_post() の分を待つ */
@@ -65,63 +62,67 @@ bfm_dif_read(c, off, dst, nblocks, &d, &err);
 bfm_dif_write_start(c, off, src, nblocks, &d); /* 起動だけして戻る */
 while (bfm_dif_poll(c, &err) == BFM_DIF_INPROGRESS) { /* ほかの仕事 */ }   /* か bfm_dif_wait(c, &err) */
 
-bfm_poll();                                   /* ときどき呼ぶ(切断要求・FW のページ要求)*/
-while (bfm_disconnect(c) == BFM_INPROGRESS) { }
+if (bfm_conn_state(port, i) == BFM_ST_DOWN)   /* エラー・相手が切った */
+    bfm_reconnect(port, i);                   /* 張り直しを頼む(bfm_run() が進める)*/
 while (bfm_shutdown() == BFM_INPROGRESS) { }
 ```
 
-- 1 本の接続で、**両方のノードが互いのメモリを触れる**(接続のときに両方向へ公開メモリの情報を渡す)。
+- **両方のノードで同じものを動かす(双方向)。** ポートごとに、IPv4 の小さいほうのノードが掛け側、大きいほうが受け側に
+  自動でなり、接続 (ポート p, 番号 i) どうしが対になる。1 本の接続で、**どちらのノードからも相手のメモリを触れる**
+  (接続のときに両方向へ公開メモリの情報を渡し、両側の QP が相手からの write / read / atomic を許す)。
 - `off` は相手が公開した範囲(`g_bfm_mr_base` から `g_bfm_mr_size`)の先頭からのオフセット。
   範囲の外は手元で断り(`BFM_E_PARAM`)、相手の NIC も MKey の範囲で断る。
 - `src` / `dst` はどこにあってもよい(NIC が直接読み書きするのは中継バッファで、CPU が写す)。
-- **複数のコアから同時に転送できる(64 コアまで)。** 下の「複数のコア」。
+- 接続の数は `g_bfm_port_conn[ポート]`(既定 16。上限 `BFM_MAX_PORT_CONN` = 16)。ポートは `BFM_MAX_PORT` = 2 個まで
+  (合計 32 本)。0 のポートは使わない。両方のノードで同じ値にする。
 
-### 待たない API(立ち上げ・接続・切断・停止)
+### 代表 API `bfm_run()`
 
-`bfm_init()`・`bfm_connect()`・`bfm_accept()`・`bfm_disconnect()`・`bfm_shutdown()` は、中で回って待たない。
-待つところに来ると `BFM_INPROGRESS`(正の値 1)を返すので、**`BFM_INPROGRESS` でなくなるまで同じ関数を定期的に呼び続ける**
-(呼ぶたびに先へ進み、呼ばなければ進まない)。間にほかの仕事をしてよい。
+外から `bfm_run()` を**周期的に呼び続けるだけで、初期化(PCIe)→ init(HCA)→ connect → 転送の準備 →
+メモリの公開(相手からのアクセスを受ける準備)まで進む**。中で回って待たない(待つところでは戻る)。
 
-| 関数 | 待つところ |
-|---|---|
-| `bfm_init()` | FLR の後の 100ms と設定空間が読めるまで、FW の初期化(最大 120 秒)、コマンドキューの登録の後の 10ms、FW のコマンド 1 つずつの完了、リンク(10ms おきに PAOS を読む)、`INIT_HCA` の後のページ要求(100ms 来なくなるまで、最大 2 秒)|
-| `bfm_connect(&c, …)` | FW のコマンド(CQ・QP を作る・状態を進める)の完了、REP(1 秒ごとに REQ を送り直す。`timeout_ms` で時間切れ)|
-| `bfm_accept(&c, …)` | REQ(`timeout_ms`、0 なら待ち続ける)、FW のコマンドの完了、REP を送る GSI の空き |
-| `bfm_disconnect(c)` | BYE を送る GSI の空き(100ms まで)、`DESTROY_QP` / `DESTROY_CQ` の完了 |
-| `bfm_shutdown()` | 全部の接続を畳む、GSI の送信が出ていく(100ms まで)、出したままのコマンドの完了、`TEARDOWN_HCA` の完了 |
+- **接続ごとに状態機械を持つ。** 接続の表(`g_bfm_conn[]`。ポート × 16 行)の行ごとに、どの状態にいるか(`step`)と
+  鍵(`lock`)を持つ。`bfm_run()` は表を回り、**鍵を取れた行の状態を 1 つ進める**(取れなければ待たずに次の行へ)。
+  最初に鍵を取ったコアが最初の状態を処理し、次の状態も、そのとき鍵を取ったコアが処理する。回り始める行はコアごとにずらす。
+- ポートの立ち上げ(PCIe・HCA・公開メモリの MKey・GSI・接続の枠)は、そのポートの行が `K_PORT` の間に、
+  その行を進めたコアが進める(ポートの状態機械 `bfm_dev_step()`)。
+- 行の状態を進めるときは、行の鍵に加えて全体の鍵 `g_bfm_ctl_lock` も取る(FW のコマンドの入口・GSI・EQ はポートで 1 つ、
+  DMA 領域の切り出しは全体で 1 つなので)。こちらも取れなければ待たずに次へ行く。
+- **データ経路(write / read / atomic / T10-DIF)は鍵を使わない。** 使えるようになった接続は、そのコアが鍵なしで使う。
 
-- `bfm_connect()` / `bfm_accept()` は、最初に `*pc = NULL` で呼ぶ(接続の枠を取って `*pc` に入れる)。2 回目からは同じ `pc` で呼ぶ
-  (`pc` 以外の引数は見ない)。`BFM_OK` なら `*pc` が使える。失敗なら `*pc` は `NULL` に戻る。
-- 途中で失敗したときも、作りかけたもの(QP・CQ、立ち上げなら HCA)を消し終えるまでは `BFM_INPROGRESS` を返し、その後に失敗の理由を返す。
-- 受け付けを待つのをやめるとき・確立の途中でやめるときは、`bfm_disconnect(*pc)` を `BFM_OK` まで呼ぶ。
-- **FW のコマンドの入口は 1 つ**なので、コマンドを出している途中の接続・切断を呼ばなくなると、ほかの接続の確立も進まない。
-  接続・切断は最後まで呼び続けること。FW のページ要求への答え(`MANAGE_PAGES`)も同じ入口を使い、`bfm_poll()` と
-  接続・切断の呼び出しの中で進む。
-- 各関数の状態と移り方は、関数仕様書の状態遷移図(`bfm_init()`・`mlx5_hca_init_step()`・`conn_step()` など)。
-- データ経路(write / read / atomic)は今までどおり、完了(ACK・応答)を待ってから戻る。T10-DIF は起動と完了確認を分けられる(下の「T10-DIF」)。
+| 接続の状態(`bfm_conn_state()`)| 中の手順(`step`)| 待つところ |
+|---|---|---|
+| `BFM_ST_INIT` | `K_PORT` | FLR の後の 100ms、FW の初期化(最大 120 秒)、コマンド 1 つずつの完了、リンク、`INIT_HCA` の後のページ要求(最大 2 秒)、GSI と接続の枠の用意 |
+| `BFM_ST_CONNECT` | `K_WAIT_REQ`(受け側)・`K_CQ`・`K_QP`・`K_INIT`・`K_WAIT_REP`(掛け側)・`K_RTR`・`K_RTS`・`K_REP`(受け側)| REQ、FW のコマンドの完了、REP(`g_bfm_req_retry_ms` = 1 秒ごとに REQ を送り直す。**相手のノードが立ち上がるまで続ける**)|
+| `BFM_ST_UP` | `K_UP` | 使える(`K_RTS` で相手からのアクセスを許し、データ経路を準備した後)|
+| `BFM_ST_DOWN` | `K_DOWN` | エラー・相手の BYE。`bfm_reconnect()` を待つ(データ経路で使っているかもしれないので、勝手には畳まない)|
+| `BFM_ST_FAILED` | `K_FAILED` | ポートの立ち上げの失敗・FW のコマンドの失敗。`bfm_shutdown()` の後にやり直す |
+
+- `bfm_run()` の戻り値は全体の様子: `BFM_OK` = 全部の接続が使える、`BFM_INPROGRESS` = 途中、
+  負 = 失敗した接続がある、`BFM_E_STATE` = エラー・切断のままの接続がある。どの値でも呼び続けてよい(ほかの接続は進む)。
+- **使えるようになった後も、ときどき呼び続けること。** 相手からの切断の知らせ(BYE)と FW のページ要求に答える。
+- `bfm_reconnect(port, i)` は、使える・エラーのままの接続を畳んで(相手へ BYE を送り)、確立からやり直すよう頼む。
+  その接続で転送しているコアが無いときに呼ぶ。相手のノードでは、その接続が `BFM_ST_DOWN` になるので、相手も `bfm_reconnect()` を呼ぶ。
+- 各状態と移り方は、関数仕様書の状態遷移図(`bfm_cm_conn_step()`・`bfm_dev_step()`・`mlx5_hca_init_step()` など)。
 
 ### 複数のコア
 
-**コアごとに別の接続を作って使う。** 1 つの接続 = RC QP 1 本と、その CQ・UAR(BlueFlame の窓)・中継バッファ・
-T10-DIF 用の中継バッファで、データ経路(write / read / atomic / T10-DIF)はその接続の資源しか触らない。
-鍵も使わないので、別の接続どうしは互いを待たない。
+**コアごとに別の接続を使う。** 1 つの接続 = RC QP 1 本と、その CQ・UAR(BlueFlame の窓)・中継バッファ・
+T10-DIF 用の中継バッファで、データ経路はその接続の資源しか触らない。鍵も使わないので、別の接続どうしは互いを待たない。
 
 | 呼んでよいもの | 同時に呼べるか |
 |---|---|
 | データ経路(`bfm_write()`・`bfm_read()`・atomic・`bfm_dif_*()` など)| 別の接続なら、どのコアから同時に呼んでもよい。**1 つの接続を複数のコアから同時に使わないこと** |
-| `bfm_connect()` / `bfm_accept()` / `bfm_disconnect()` / `bfm_poll()` | どのコアから同時に呼んでもよい(中で鍵 `g_bfm_ctl_lock` を取る)。`bfm_disconnect(c)` は、`c` で転送しているコアと同時に呼ばない |
-| `bfm_init()` / `bfm_shutdown()` | ほかのコアが bfmem を使っていないときに、1 つのコアから |
+| `bfm_run()` / `bfm_conn()` / `bfm_conn_state()` / `bfm_reconnect()` | どのコアから同時に呼んでもよい。`bfm_run()` は鍵を回って待たない(取れた行だけ進める)。`bfm_reconnect()` は、その接続で転送しているコアと同時に呼ばない |
+| `bfm_shutdown()` | ほかのコアが bfmem を使っていないときに、1 つのコアから |
 
-- 接続の枠は `BFM_MAX_CONN`(既定 64)個まで。実際に用意する数は `g_bfm_max_conn`(既定 64)で減らせる。
-  枠 1 つで DMA 領域を約 230KiB と UAR を 1 つ使う(64 個で約 14MiB)。
-- 鍵は接続管理(GSI の QP と、受けた REQ の待ち行列)・接続の枠の取り外し・FW のコマンド・EQ の処理を 1 つずつにする。
-  x86-64 の `xchg` で取り、取れなければ `pause` しながら回って待つ(OS の機能は使わない)。持つのは 1 回の呼び出しの間だけ
-  (REP や REQ を待つ間は持たない)。**回って待つので、同じ CPU の上で、鍵を持つタスクより優先度の高いタスクから
-  接続・切断・`bfm_poll()` を呼ばないこと**(タスクはコアに 1 つずつ置くか、優先度をそろえる)。
-- 受け側は、受けた REQ を接続の枠の数まで取っておく(同じ掛け側の送り直しは 1 つにまとめる)。64 本が同時に
-  掛かってきても、`bfm_accept()` で受けるたびに古い順に受けられる。受け付けを待つ間は接続の枠を 1 つ使う。
-- どの接続も相手の同じ公開メモリを触る。別の接続から同じ場所へ書いたときの順は決まらない
-  (atomic はどの接続から打っても不可分。試験 `mt` の [3] で確かめた)。
+- 接続 1 本で DMA 領域を約 230KiB と UAR を 1 つ使う(32 本で約 7MiB)。
+- 鍵は x86-64 の `xchg` で取る(OS の機能は使わない)。`bfm_run()` は取れなければ次へ行くので、優先度の違うタスクから
+  呼んでも止まらない。回って取るのは `bfm_reconnect()`(行の鍵。持たれるのは状態 1 つを進める間だけ)と
+  `bfm_shutdown()`(全体の鍵)だけ。
+- 受け側は、受けた REQ をポートの接続の数まで取っておく(同じ掛け側の送り直しは 1 つにまとめる)。
+- どの接続も相手の同じ公開メモリを触る(どちらのポートから来ても)。別の接続から同じ場所へ書いたときの順は決まらない
+  (atomic はどの接続から打っても不可分。試験 `run` の mt の [3] で確かめる)。
 - 接続は CPU に縛られない。どのコアがどの接続を使うかはアプリケーションが決める
   (`struct bfm_conn` は 64 バイトの境界にそろえ、隣の接続とキャッシュラインを分けてある)。
 
@@ -178,11 +179,11 @@ Linux でも `bfm_x86_init()` を呼ぶので、`-v` を付けると同じ表示
 
 | 区画 | 変数 | 中身 |
 |---|---|---|
-| DMA 領域 | `g_bfm_dma_base` / `g_bfm_dma_size` | コマンドキュー・メールボックス・**FW に渡すページ**・EQ / CQ / QP のリング・接続ごとの中継バッファ。`bfm_init()` のときに静的に切り出す(返さない)|
+| DMA 領域 | `g_bfm_dma_base` / `g_bfm_dma_size` | コマンドキュー・メールボックス・**FW に渡すページ**・EQ / CQ / QP のリング・接続ごとの中継バッファ。ポートの立ち上げのときに静的に切り出す(返さない。全部のポートで共有)|
 | 公開メモリ | `g_bfm_mr_base` / `g_bfm_mr_size` | 相手が直接触る範囲。この範囲だけを許した MKey(PA モード)を作る |
 
-既定の大きさは DMA 領域 96MiB(そのうち FW のページが `g_bfm_fw_pages_max` = 16,384 ページ = 64MiB)、
-公開メモリ 1GiB。DMA 領域が足りなければ `bfm_init()` が必要な量を表示して失敗する。
+既定の大きさは DMA 領域 160MiB(そのうち FW のページがポートごとに `g_bfm_fw_pages_max` = 16,384 ページ = 64MiB)、
+公開メモリ 1GiB。DMA 領域が足りなければ立ち上げ(`bfm_run()`)が必要な量を表示して失敗する。公開メモリは全部のポートで同じもので、ポートごとに MKey を作る。
 公開メモリの大きさは 64bit で扱い、PA モードの MKey 1 つで覆うので、大きくしても NIC の資源は増えない
 (VxWorks では、その範囲が OS に使われない RAM であること。Linux では起動のたびに確保して VFIO に登録する)。
 
@@ -214,9 +215,9 @@ IP のスタックを持たないので、交換は **RoCE v2 の UD で相手�
 なので、IB CM ではなく 64 バイトの短いメッセージを 3 種類だけ使う。
 
 ```
-掛け側 bfm_connect():    REQ ->(REP が来るまで 1 秒ごとに送り直す) <- REP
-受け側 bfm_accept():     <- REQ  QP を RTS にしてから REP ->
-切断   bfm_disconnect(): BYE ->(返事は待たない。相手は bfm_poll() で受けて閉じた扱いにする)
+掛け側(IP の小さいほう): REQ ->(REP が来るまで 1 秒ごとに送り直す。相手が立ち上がるまで続ける) <- REP
+受け側(IP の大きいほう): <- REQ  QP を RTS にしてから REP ->
+張り直し・停止:          BYE ->(返事は待たない。相手は bfm_run() の中で受けて BFM_ST_DOWN にする)
 
 [0..3] 'BFM2'  [4] 種類  [5] 経路 MTU  [6..7] 待ち受けの番号
 [8..11] 送り手の接続の id  [12..15] 受け手の接続の id  [16..19] QPN  [20..23] 開始 PSN
@@ -227,12 +228,14 @@ IP のスタックを持たないので、交換は **RoCE v2 の UD で相手�
 
 受け側は REP を送る前に RTS にするので、掛け側は REP を受けて RTS にすればすぐ使える(RTU は要らない)。
 REP が落ちたら掛け側が REQ を送り直し、受け側は確立済みの接続への REQ に REP を送り直す。
+GSI はポートごとにあり、接続 (ポート p, 番号 i) は待ち受けの番号 `g_bfm_cm_port + i` で対になる
+(受け側は、その番号宛てで `g_bfm_peer_ip[p]` から来た REQ だけを受ける)。
 
-**ARP を使わない。相手の MAC は自動で取る。** 掛け側は相手の IP を引数(か `g_bfm_peer_ip`)で知る。
-相手の MAC を知らなければ(引数が NULL で `g_bfm_peer_mac` が全部 0、または渡した MAC が全部 0)、
+**ARP を使わない。相手の MAC は自動で取る。** 相手の IP は `g_bfm_peer_ip[ポート]` で知る。
+掛け側が相手の MAC を知らなければ(`g_bfm_peer_mac[ポート]` が全部 0)、
 REQ を **同報**(宛先の MAC が ff:ff:ff:ff:ff:ff。GRH の宛先 GID は相手の IP のもの)で送り、REP に入った相手の MAC を
 RC QP と BYE に使う。同報は同じ L2 の別の bfmem にも届くので、受け手は [56..59] の宛先の IPv4 が
-自分のものでないメッセージを捨てる。同報が届かない網(L2 を越える経路)では、相手の MAC を引数か `g_bfm_peer_mac` で渡す。
+自分のものでないメッセージを捨てる。同報が届かない網(L2 を越える経路)では、相手の MAC を `g_bfm_peer_mac[]` に書く。
 受け側は相手の MAC を REQ から知る。GID は IP から作る(`::ffff:a.b.c.d`、RoCE v2)。
 同報の REQ は ConnectX-4 Lx どうしで受け取られることを確かめた(`TEST_PLAN.md`、2026-11-09)。
 ConnectX-7 では確かめていない。
@@ -240,7 +243,7 @@ ConnectX-7 では確かめていない。
 ### atomic のバイト順
 
 立ち上げのときに、**8 バイトの atomic をホストのバイト順で扱う設定**にする
-(`atomic_req_8B_endianness_mode`、Linux の mlx5_core と同じ)。できない装置では `bfm_init()` が失敗する。
+(`atomic_req_8B_endianness_mode`、Linux の mlx5_core と同じ)。できない装置ではポートの立ち上げが失敗する。
 両端とも bfmem なので、相手のメモリの中の atomic の語は常にホスト順(リトルエンディアン)になる。
 **CQE に入って返る元の値だけは、この設定によらずビッグエンディアン**なので、`bfm_cas()` / `bfm_faa()` が直して返す。
 
@@ -304,7 +307,7 @@ PI は guard(データの CRC16、多項式 0x8BB7)・app tag・ref tag(ブロ�
 | 実機での確認 | ConnectX-4 Lx で確認(2026-11-07)| **未確認**(ConnectX-4 Lx に `sho` が無い)|
 
 - HW の作りは Linux の mlx5_ib の署名 MR(`IB_WR_REG_MR_INTEGRITY`、`set_sig_umr_wr()`・`mlx5_set_bsf()`・`set_psv_wr()`)と
-  `rdma_rw_ctx_signature_init()` に合わせた。接続・面ごとに署名つき MKey 1 個と PSV 2 個を `bfm_init()` で作る。
+  `rdma_rw_ctx_signature_init()` に合わせた。接続・面ごとに署名つき MKey 1 個と PSV 2 個をポートの立ち上げで作る。
   QP は `fre`(UMR を出せる)を立てて作る。UMR の fence は能力の `umr_fence` に従う。
 - どちらのモードも、DIF 用の中継バッファの 1 面に入るブロック数ずつ運ぶ。
 - 遅延(ConnectX-4 Lx、OptiPlex → Precision、4KiB = 8 ブロック、中央値): SW の write INSERT 5,555ns・
@@ -329,26 +332,27 @@ PI は guard(データの CRC16、多項式 0x8BB7)・app tag・ref tag(ブロ�
 
 ### 変数(`include/bfm_config.h`)
 
-`bfm_init()` の前に代入する。既定値は `src/bfm_config.c`(VxWorks の値は置き場所の例で、
+最初の `bfm_run()` の前に代入する。既定値は `src/bfm_config.c`(VxWorks の値は置き場所の例で、
 **そのままでは動かない**)。
 
 | 変数 | 意味 |
 |---|---|
-| `g_bfm_pci_bus` / `_dev` / `_func` | 使う PCIe の function |
+| `g_bfm_port_conn[ポート]` | **ポートに張る接続の数**(0〜16、既定 16。0 ならそのポートは使わない)。両方のノードで同じ値にする |
+| `g_bfm_pci_bus` / `_dev` / `_func[ポート]` | ポートの PCIe の function(ConnectX はポートごとに別の PF)|
 | `g_bfm_pcie_ecam_base` | ECAM の先頭(設定空間を直接読み書きする)|
-| `g_bfm_bar0_addr` | BAR0 に書き込むアドレス(BAR0 の大きさの境界に合わせる。0 なら今の値)|
-| `g_bfm_bar0_wc_va` | BAR0 全体を WC で張った別名の先頭(0 なら BlueFlame なし)|
+| `g_bfm_bar0_addr[ポート]` | BAR0 に書き込むアドレス(BAR0 の大きさの境界に合わせる。0 なら今の値)|
+| `g_bfm_bar0_wc_va[ポート]` | BAR0 全体を WC で張った別名の先頭(0 なら BlueFlame なし)|
 | `g_bfm_pcie_flr` | 立ち上げの前に FLR をかける(VxWorks は 1)|
 | `g_bfm_pcie_mrrs` | Max Read Request Size(0 なら触らない)|
-| `g_bfm_dma_base` / `_size` | DMA 領域 |
-| `g_bfm_mr_base` / `_size` | 公開メモリ(既定 1GiB)|
-| `g_bfm_fw_pages_max` | FW に渡すページの上限 |
+| `g_bfm_dma_base` / `_size` | DMA 領域(全部のポートで共有。既定 160MiB)|
+| `g_bfm_mr_base` / `_size` | 公開メモリ(全部のポートで共有。既定 1GiB)|
+| `g_bfm_fw_pages_max` | FW に渡すページの上限(ポートごと)|
 | `g_bfm_stage_size` | 接続ごとの中継バッファ |
 | `g_bfm_dif_buf_size` | 接続ごとの T10-DIF 用の中継バッファ(2 面に分けて交互に使う。既定 128KiB)|
-| `g_bfm_max_conn` | 用意する接続の枠の数(1〜`BFM_MAX_CONN`、既定 64。コアごとに 1 本使う)|
-| `g_bfm_local_ip` / `g_bfm_local_mac` | 自分の IPv4 / MAC(MAC が全部 0 なら NIC の固有の MAC)|
-| `g_bfm_peer_ip` / `g_bfm_peer_mac` | 既定の相手(MAC が全部 0 なら自動。REQ を同報で送り、REP から取る)|
-| `g_bfm_cm_port` | 接続の番号 |
+| `g_bfm_local_ip` / `g_bfm_local_mac[ポート]` | ポートの IPv4 / MAC(MAC が全部 0 なら NIC の固有の MAC)|
+| `g_bfm_peer_ip` / `g_bfm_peer_mac[ポート]` | ポートの相手(相手のノードの同じ番号のポート)。**IP の小さいほうが掛け側**。MAC が全部 0 なら自動(REQ を同報で送り、REP から取る)|
+| `g_bfm_cm_port` | 接続の番号の起点(接続 i は +i)|
+| `g_bfm_req_retry_ms` | 掛け側が REQ を送り直す間隔(既定 1 秒。相手が立ち上がるまで続ける)|
 | `g_bfm_path_mtu` / `g_bfm_port_mtu` | RoCE の経路 MTU(1〜5)/ ポートの MTU |
 | `g_bfm_bf_enable` / `g_bfm_scatter_cqe` | 機能の入り切り |
 | `g_bfm_ack_timeout` / `g_bfm_retry_count` / `g_bfm_op_timeout_ms` | 再送と時間切れ |
@@ -356,17 +360,18 @@ PI は guard(データの CRC16、多項式 0x8BB7)・app tag・ref tag(ブロ�
 | `g_bfm_tsc_hz` | TSC の周波数(Hz)。0 なら CPUID / MSR から求める。求められない CPU では入れる |
 | `g_bfm_link_wait_ms` / `g_bfm_signal_every` / `g_bfm_verbose` | そのほか |
 
-`BFM_MAX_CONN`(接続の枠の数の上限。既定 64)は配列の大きさになるのでコンパイル時の定数。
+`BFM_MAX_PORT`(ポートの数の上限。既定 2)と `BFM_MAX_PORT_CONN`(1 ポートの接続の数の上限。既定 16)は
+配列の大きさになるのでコンパイル時の定数。接続の表は `BFM_MAX_CONN` = 2 × 16 = 32 行。
 
 ### BSP 側で用意すること
 
 1. DMA 領域と公開メモリの物理メモリを OS に使わせず、論理 = 物理・ライトバックで張る
    (x86 の DMA はキャッシュと一貫しているので、キャッシュの操作は要らない)。
-2. BAR0(`g_bfm_bar0_addr` から BAR0 の大きさぶん)を論理 = 物理・キャッシュしない属性で張る。
+2. 使うポートごとに、BAR0(`g_bfm_bar0_addr[]` から BAR0 の大きさぶん)を論理 = 物理・キャッシュしない属性で張る。
 3. BlueFlame を使うなら、BAR0 全体を **write-combining**(PAT の WC)で張った別名を作り、
-   `g_bfm_bar0_wc_va` に入れる。
+   ポートごとに `g_bfm_bar0_wc_va[]` に入れる。
 4. PCIe の設定空間は ECAM(`g_bfm_pcie_ecam_base`)で読み書きする。ECAM の位置を入れること。
-5. **`bfm_init()` が設定するのは ConnectX の function だけ。** 途中のブリッジ(ルートポートやスイッチ)の
+5. **bfmem が設定するのは ConnectX の function(使うポートの PF)だけ。** 途中のブリッジ(ルートポートやスイッチ)の
    バス番号・メモリの窓(Memory Base / Limit に BAR0 が入ること)・Memory Space / Bus Master は、
    BSP か呼び出し側で先に設定しておくこと。
 6. **受け側の CPU の深い C-state(パッケージの C-state、C1E)を BIOS / BSP で止める。** 相手からの read / atomic は
@@ -388,39 +393,52 @@ VxWorks のヘッダは使わないので、手元の `make vxcheck` で gcc の
 
 - 両方の機械で ConnectX を `vfio-pci` に結びつける(同じ IOMMU グループの装置は全部)。
   root で動かす(sysfs の `resource0` / `resource0_wc` を開くため)。hugepage は要らない。
-- 相手も bfmem(`bfmem_test server`)。Linux のカーネルの mlx5 とは繋がらない。
+- **両方の機械で同じ `bfmem_test run` を動かす**(相手も bfmem。Linux のカーネルの mlx5 とは繋がらない)。
+  IP の小さいほうが掛け側になる。どちらを先に立ち上げてもよい(掛け側は相手が立ち上がるまで REQ を送り直す)。
 
-### 手順(例: 掛け側 192.168.101.11、受け側 192.168.101.21)
+### 手順(例: OptiPlex 192.168.101.11、Precision 192.168.101.21)
 
 ```bash
 make
-# 受け側の機械
-sudo build/bfmem_test -d 0000:b3:00.0 -i 192.168.101.21 server
-# 掛け側の機械
-sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 client 192.168.101.21
-# 受け側が切断のときに出す hash と、client の「模型の hash」が同じことを見る
-# 複数のコア: 16 本のスレッドが別々の接続で同時に転送する(受け側の server はそのまま)
-sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -t 16 mt 192.168.101.21
-# 相手の MAC は自動で取る(REQ を同報)。同報が届かない網では IP の後ろに相手の MAC を書く
+# Precision(PF0 だけ)
+sudo build/bfmem_test -d 0000:b3:00.0 -i 192.168.101.21 run 192.168.101.11
+# OptiPlex
+sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 run 192.168.101.21
+# 2 ポートとも繋いであれば、ポート 1 の装置・自分の IP・相手の IP も書く(合計 32 本)
+sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -D 0000:01:00.0 -I 192.168.102.11 run 192.168.101.21 192.168.102.21
+# 両方の「模型の hash」が、相手の「自分の公開メモリの hash」と同じことを見る
 ```
 
-`mt` は、スレッドごとに別の接続を同時に張り、次を確かめてから、8 バイトの write / read / FAA を全スレッドで同時に
-`-n` 回(既定 100,000)ずつ打って合計の速さを出す。間ずっと別のスレッドが `bfm_poll()` を回し、最後に全スレッドが同時に切断する。
-スレッドは CPU に 1 つずつ固定する(CPU の数より多ければ重ねる)。
+`run` は次の順に進む(両方のノードが同時に、相手へ同じことをする = 両方向)。
 
-| 検査 | 内容 |
-|---|---|
-| [1] | スレッドの区画(相手の公開メモリの 4MiB + 番号 × 64KiB)へ 4KiB を write して read で読み戻す(64 回)|
-| [2] | 8 バイトの write と read で読み戻す(1,000 回)|
-| [3] | 全スレッドが同じ語へ FAA を `-n` 回ずつ打ち、最後に `-n` × スレッド数になる(接続をまたいだ atomic)|
-| [4] | T10-DIF(SW)の write INSERT(`bfm_dif_poll()` で回す)と read CHECK_DELETE(`bfm_dif_wait()`)で元のデータに戻る |
+1. `-t` 本(既定 4)のスレッドが `bfm_run()` を同時に呼び続け、全部の接続(`-c` 本 × ポート。既定 16)が使えるまで待つ。
+   スレッドごとの呼び出しの回数とかかった時間を出す。
+2. 接続 (0, 0) で、相手の公開メモリへ一通りの検査(下の表)。終わったら相手と足並みをそろえる
+   (相手の公開メモリの 3MiB の語へ進み具合を書き、自分の同じ語に相手の進み具合が来るのを待つ)。
+3. 全部の接続に 1 本ずつスレッドを付け、次を確かめてから、8 バイトの write / read / FAA を `-n` 回(既定 100,000)ずつ、
+   64KiB の write / read を `-n` / 50 回ずつ、全スレッドで同時に打って合計の速さ(Mops・MB/s)を出す。**区間ごとに相手と
+   足並みをそろえる**ので、相手も同じ区間を同時に打つ(= 両方向の速さ)。片方向の速さは、受ける側に `-q` を付けて測る
+   (`-q` の側は転送せず、足並みだけそろえる)。本数を変えて速さだけ測るときは、両方に `-P -c <本数>` を付ける
+   (`-P` は 2. の一通りの検査を飛ばす)。間ずっと別のスレッドが `bfm_run()` を回す。
+   スレッドは CPU に 1 つずつ固定する(CPU の数より多ければ重ねる)。
 
+   | 検査 | 内容 |
+   |---|---|
+   | [1] | 接続の区画(相手の公開メモリの 4MiB + 番号 × 64KiB)へ 4KiB を write して read で読み戻す(64 回)|
+   | [2] | 8 バイトの write と read で読み戻す(1,000 回)|
+   | [3] | 全スレッドが同じ語へ FAA を `-n` 回ずつ打ち、最後に `-n` × スレッド数になる(接続・ポートをまたいだ atomic)|
+   | [4] | T10-DIF(SW)の write INSERT(`bfm_dif_poll()` で回す)と read CHECK_DELETE(`bfm_dif_wait()`)で元のデータに戻る |
+
+4. (`-x`)最後の接続で公開メモリの外を読み、相手の NIC が断ること、その接続が `BFM_ST_DOWN` になること、
+   `bfm_reconnect()` で張り直して読めることを確かめる(相手は BYE を受けて、自分の側を張り直す)。
+5. 相手と足並みをそろえてから、模型の hash と自分の公開メモリの hash を出して止める。
+
+- `serve` は接続を張って保つだけ(`bench` の相手。`serve -c 1`)。`info` はポートを立ち上げて能力を表示する。
 - **同じカードの 2 ポートの間では試せない。** 宛先の GID か MAC が自分のカードのものだと、
   FW が内部で処理しようとしてワイヤに出ない(vfio_nvme で確認。ConnectX-4 Lx)。別の機械と繋ぐこと。
-- `-B` で BlueFlame を止めて比べられる。`-x` で最後に公開メモリの外を読み、相手が断ることを確かめる
-  (相手の MKey が範囲を持っていることの確認。接続はエラーになる)。
+- `-B` で BlueFlame を止めて比べられる。
 
-### client の検査
+### 一通りの検査(接続 (0, 0))
 
 | | 内容 |
 |---|---|
@@ -432,9 +450,8 @@ sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -t 16 mt 192.168.101.21
 | [5] | データ領域を読み戻して模型と比べる |
 | [5b] | 相手の公開メモリの最後の 64KiB と 8 バイトを write して読み戻す。はみ出す操作は手元で断る(`BFM_E_PARAM`)|
 | [6] | 遅延(write / read 8・64 バイト、FAA、CAS、FAA32、CAS32)と write_post の速さ。測った後にもう一度読み戻して比べる |
-| 最後 | 模型の hash を出す(相手が切断のときに出す hash と同じであること)|
 | [8] | T10-DIF: 4 つの操作を write / read の両方(8 通り)で、相手のメモリ・手元の結果と独立に作った期待値を比べる。誤りの検出(guard・ref tag・app tag)。起動と完了確認を分けた使い方(途中の 2 本目の起動が `BFM_E_BUSY`、途中で普通の write / read、`bfm_dif_poll()` で完了、3 つ目の分の誤りを `bfm_dif_wait()` で受け取る)。SW は常に、HW は使えるときだけ。使えなければ `BFM_E_NOTSUP` を確かめる。DIF の遅延とスループット |
-| [7] | (`-x`)公開メモリの外を読むと相手の NIC が REMOTE_ACCESS で断る |
+| 最後 | 模型の hash を出す(相手が止める前に出す「自分の公開メモリの hash」と同じであること)|
 
 ## 確かめたこと / まだのこと
 
@@ -465,3 +482,16 @@ sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -t 16 mt 192.168.101.21
   (1 本では 0.76 / 0.61 Mops)。FAA は 8 本以上で約 2.55 Mops で頭打ち(受け側の OptiPlex。原因は確かめていない)。
 - まだ: VxWorks、ConnectX-7、T10-DIF のオフロード(`BFM_DIF_HW`)。VxWorks の上で複数のコアから使うこと。`write_post` は BlueFlame なしのほうが速い
   (11.4 → 13.1 Mops)ので、続けて出すときの扱いは見直しの余地がある。
+- **2026-11-10: 代表 API `bfm_run()`・接続の表(ポート × 16)・2 ポート・両ノード同じプログラム(双方向)に作り直し、
+  実機(OptiPlex ↔ Precision、2 ポートとも 25G で直結)で 2 ポート × 16 本 = 32 本を双方向に通した。** 4 本のスレッドから
+  `bfm_run()` を呼んで 32 本が張れ(OptiPlex 0.45 秒、Precision 約 2.6 秒)、両方向とも一通りの検査・mt が全部 OK、hash も一致。
+  `-x` で切れた接続を `bfm_reconnect()` で張り直せることも確かめた。
+  - **帯域は双方向でほぼ倍。** 64KiB の write の合計は、片方向 約 5.0 GB/s → 双方向 9.7 GB/s(77 Gbit/s)、read は
+    約 5.1 → 10.1 GB/s(81 Gbit/s)。1 ポートでも双方向の合計は 5.4〜5.8 GB/s(ポートの全二重が効く)。
+  - 8 バイトの write / read の Mops は打つ側の CPU で決まり、双方向でも変わらない(OptiPlex 約 2.7 / 2.1、Precision 約 10.5 / 8.3)。
+    双方向で落ちたのは、CPU 4 個の OptiPlex が打つ write 64KiB(5.1 → 4.2 GB/s)と FAA(2.2 → 1.7 Mops)。
+  - 遅延(中央値)は双方向にすると 30〜70ns 延びる(write 8B 約 1.37µs、read 8B・FAA 約 1.70µs)。
+  - **接続の数を変えると**(双方向、`run -P -c <本数>`): 帯域は 1 ポートなら 2 本で頭打ち(合計 5.4〜5.8 GB/s)、2 ポートなら
+    各 2 本(合計 4 本)で最も高い(合計 10.6 / 11.2 GB/s)。8 バイトの操作は本数にほぼ比例して伸び(1 本あたり write 約 0.7 Mops)、
+    打つ側の CPU の数で頭打ちになる(OptiPlex は 4 本で約 2.6 Mops、Precision は 8 本で 5.5 Mops)。
+  - 数字の表は `TEST_PLAN.md` の最後。

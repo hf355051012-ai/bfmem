@@ -5,44 +5,40 @@
  * bfmem -- ConnectX(mlx5)の BlueFlame で、ノード間のメモリへ直接
  * write / read / atomic(CAS・FAA)を打つためのライブラリ。
  *
- * 使い方(どちらのノードも同じ):
+ * 使い方(どちらのノードも同じ。設定は bfm_config.h の変数):
  *
- *   while (bfm_init() == BFM_INPROGRESS) 別の仕事;   // PCIe と HCA を立ち上げる
- *   c = NULL;                                       // 受け側: 相手からの接続を待つ
- *   while ((rc = bfm_accept(&c, port, ms)) == BFM_INPROGRESS) 別の仕事;
- *   c = NULL;                                       // 掛け側: 相手へ接続する
- *   while ((rc = bfm_connect(&c, ip, mac, port, ms)) == BFM_INPROGRESS) 別の仕事;
- *   bfm_write(c, off, src, len);        // 相手の公開メモリ + off へ書く
+ *   while (bfm_run() != BFM_OK) 別の仕事;     // 代表 API。どのコアから何本同時に呼んでもよい
+ *   c = bfm_conn(port, i);                      // ポート port の接続 i(使えなければ NULL)
+ *   bfm_write(c, off, src, len);                // 相手の公開メモリ + off へ書く
  *   bfm_read(c, off, dst, len);
  *   bfm_cas(c, off, expect, desired, &old);
  *   bfm_faa(c, off, add, &old);
- *   bfm_cas32(c, off, expect, desired, &old32);   // 4 バイト(拡張 atomic)
+ *   bfm_cas32(c, off, expect, desired, &old32); // 4 バイト(拡張 atomic)
  *   bfm_faa32(c, off, add, &old32);
- *   bfm_poll();                         // ときどき呼ぶ(相手からの切断と FW のページ要求に答える)
- *   while (bfm_disconnect(c) == BFM_INPROGRESS) 別の仕事;
+ *   bfm_run();                                  // 使える後も、ときどき呼び続ける
  *   while (bfm_shutdown() == BFM_INPROGRESS) 別の仕事;
  *
- * **立ち上げ・接続・切断・停止は待たない。** bfm_init() / bfm_connect() / bfm_accept() /
- * bfm_disconnect() / bfm_shutdown() は、待つところ(FW の初期化やコマンドの完了・リンク・
- * 相手の返事)に来ると BFM_INPROGRESS を返す。BFM_INPROGRESS でなくなるまで、同じ関数を
- * 定期的に呼び続けると最後まで進む(呼ばなければ進まない)。FW のコマンドの入口は 1 つなので、
- * 途中の接続・切断を呼ぶのを止めると、ほかの接続の確立も進まなくなる。
- * データ経路(write / read / atomic)は今までどおり、完了を待ってから戻る(T10-DIF は起動と完了確認を分けられる)。
+ * **代表 API bfm_run()** は、呼ぶたびに次を待たずに少しずつ進める(待つところでは戻る)。
+ * 呼び続けると、初期化(PCIe)→ HCA の立ち上げ(init)→ 接続(connect)→ 転送の準備 →
+ * メモリの公開(相手からの write / read / atomic を受ける準備)まで済み、BFM_OK を返す。
+ *   - 接続の表(ポート x g_bfm_port_conn[] 本。既定 2 ポート x 16 本 = 32 本)の行ごとに状態機械を持つ。
+ *     bfm_run() は表を回り、**鍵を取れた行の状態を 1 つ進める**(取れなければ待たずに次の行へ)。
+ *     最初に鍵を取ったコアが最初の状態を処理し、次の状態も、そのとき鍵を取ったコアが処理する。
+ *     ポートの立ち上げ(PCIe・HCA・GSI)は、そのポートの行を進めたコアが行う。
+ *   - 使えるようになった後も、ときどき呼び続けること(相手からの切断の知らせ・FW のページ要求に答える)。
  *
- * 1 本の接続(RC QP)で、両方のノードが互いのメモリを触れる。触れるのは
- * 相手が g_bfm_mr_base / g_bfm_mr_size で公開した範囲だけで、off はその先頭からの
- * オフセット。相手の CPU は何もしない(相手の NIC が応答する)。
+ * **双方向。** 両方のノードで同じものを動かす。ポートごとに、IPv4 の小さいほうのノードが掛け側、
+ * 大きいほうが受け側になって、接続 (ポート p, 番号 i) どうしが対になる。1 本の接続(RC QP)で、
+ * どちらのノードからも相手のメモリを触れる。触れるのは相手が g_bfm_mr_base / g_bfm_mr_size で
+ * 公開した範囲だけで、off はその先頭からのオフセット。相手の CPU は何もしない(相手の NIC が応答する)。
  *
- * **複数のコアから同時に転送できる(64 コアまで)。** コアごとに別の接続を作って使うこと。
- * データ経路(write / read / atomic / T10-DIF)は鍵を使わず接続ごとの資源だけを触るので、
- * 別の接続どうしは互いを待たない。**1 つの接続を複数のコアから同時に使わないこと**
- * (その接続の bfm_disconnect() も、その接続で転送しているコアと同時に呼ばないこと)。
- *   - bfm_connect() / bfm_accept() / bfm_disconnect() / bfm_poll() は、どのコアから同時に呼んでもよい
- *     (中で鍵を取る)。鍵は回って待つので、同じ CPU の上で、鍵を持つタスクより優先度の高い
- *     タスクから呼ばないこと(タスクはコアに 1 つずつ置くか、優先度をそろえる)。
- *   - bfm_init() / bfm_shutdown() は、ほかのコアが bfmem を使っていないときに 1 つのコアから呼ぶこと。
- *   - 同時に張れる接続の数は g_bfm_max_conn(既定 64)。どの接続も相手の同じ公開メモリを触るので、
- *     別の接続から同じ場所へ書いたときの順は決まらない(atomic はどの接続から打っても不可分)。
+ * **複数のコアから同時に転送できる。** コアごとに別の接続を使うこと。データ経路
+ * (write / read / atomic / T10-DIF)は鍵を使わず接続ごとの資源だけを触るので、別の接続どうしは
+ * 互いを待たない。**1 つの接続を複数のコアから同時に使わないこと。**
+ *   - bfm_run() / bfm_conn() / bfm_conn_state() / bfm_reconnect() は、どのコアから同時に呼んでもよい。
+ *   - bfm_shutdown() は、ほかのコアが bfmem を使っていないときに 1 つのコアから呼ぶこと。
+ *   - どの接続も相手の同じ公開メモリを触るので、別の接続から同じ場所へ書いたときの順は決まらない
+ *     (atomic はどの接続から打っても不可分)。
  * ===================================================================== */
 
 #include <stdint.h>
@@ -67,44 +63,42 @@
 
 typedef struct bfm_conn bfm_conn_t;
 
-/* ---- 立ち上げ ---- */
+/* ---- 代表 API(立ち上げ・接続・公開をまとめて進める)---- */
 
-/* PCIe の設定(FLR・BAR0・Bus Master)と HCA の立ち上げ、RoCE の準備
- * (GID の登録・GSI QP)までを行う。待つところで BFM_INPROGRESS を返すので、BFM_OK か
- * 失敗が返るまで呼び続ける。済んだ後に呼んでも BFM_OK。途中で失敗したら、取ったものを返し終える
- * まで BFM_INPROGRESS を返し、その後に失敗の理由を返す(次の呼び出しは最初からやり直す)。 */
-int  bfm_init(void);
+/* 接続の状態(bfm_conn_state() の値)。 */
+enum {
+    BFM_ST_UNUSED  = 0,   /* 使わない(g_bfm_port_conn[] の外)*/
+    BFM_ST_INIT    = 1,   /* ポートの立ち上げ中(PCIe・HCA・公開メモリの MKey・GSI)*/
+    BFM_ST_CONNECT = 2,   /* 接続の確立中(相手を待っている間もここ)*/
+    BFM_ST_UP      = 3,   /* 使える(転送の準備とメモリの公開まで済んだ)*/
+    BFM_ST_DOWN    = 4,   /* エラーになった・相手が切った(bfm_reconnect() で張り直す)*/
+    BFM_ST_FAILED  = 5    /* 失敗した(ポートの立ち上げの失敗など。bfm_shutdown() の後にやり直す)*/
+};
 
-/* 全部の接続を畳み、FW を止め(TEARDOWN_HCA)、Bus Master を落とす。待つところで
- * BFM_INPROGRESS を返すので、BFM_OK が返るまで呼び続ける。立ち上げの途中でも呼べる(そこで止める)。 */
+/* 全部を待たずに少しずつ進める(上の説明)。どのコアから何本同時に呼んでもよい。
+ * 戻り値: BFM_OK = 全部の接続が使える。BFM_INPROGRESS = 途中(呼び続ける)。
+ *         負 = 失敗した接続がある(BFM_ST_FAILED。理由は表示する)。BFM_E_STATE = 止めている途中か、
+ *         エラー・切断のままの接続がある(BFM_ST_DOWN)。どの値でも、呼び続けてよい(ほかの接続は進む)。 */
+int  bfm_run(void);
+
+/* ポート port の接続 i。使える(BFM_ST_UP)ときだけ返し、それ以外は NULL。 */
+bfm_conn_t *bfm_conn(unsigned port, unsigned i);
+
+/* ポート port の接続 i の状態(BFM_ST_*)。 */
+int  bfm_conn_state(unsigned port, unsigned i);
+
+/* ポート port の接続 i が、エラーになった・相手が切った(BFM_ST_DOWN)か使える(BFM_ST_UP)とき、張り直すよう
+ * 頼む(相手へ BYE を送って畳み、bfm_run() が確立からやり直す)。その接続で転送しているコアが無いときに
+ * 呼ぶこと。相手のノードでは、その接続が BFM_ST_DOWN になるので、相手も bfm_reconnect() を呼ぶこと。
+ * 戻り値: BFM_OK = 頼んだ。BFM_E_STATE = 確立の途中・失敗した接続。BFM_E_PARAM = 使わない接続。 */
+int  bfm_reconnect(unsigned port, unsigned i);
+
+/* 全部の接続を畳み(相手へ BYE を送る)、FW を止め(TEARDOWN_HCA)、Bus Master を落とす。待つところで
+ * BFM_INPROGRESS を返すので、BFM_OK が返るまで呼び続ける。立ち上げの途中でも呼べる(そこで止める)。
+ * 止めた後に bfm_run() を呼ぶと、最初から立ち上げ直す。 */
 int  bfm_shutdown(void);
 
-/* 相手からの切断の知らせ(BYE)と FW の非同期イベント(ページ要求など)を処理する。
- * データの経路では呼ばれないので、アプリケーションがときどき呼ぶこと。
- * 戻り値: 処理したイベントの数。 */
-int  bfm_poll(void);
-
-/* ---- 接続 ---- */
-
-/* 相手へ接続する。最初は *pc = NULL で呼ぶ(接続の枠を取って *pc に入れる)。BFM_INPROGRESS の間は
- * 同じ pc で呼び続ける(2 回目からは pc 以外の引数を見ない)。BFM_OK なら *pc が使える。失敗なら
- * *pc は NULL に戻る(理由は表示する。途中まで作ったものを消し終えるまでは BFM_INPROGRESS を返す)。
- * peer_ip が 0 なら g_bfm_peer_ip を、peer_mac が NULL なら g_bfm_peer_mac を、
- * port が 0 なら g_bfm_cm_port を使う。相手の MAC が全部 0 なら、REQ を同報で送って
- * 相手の MAC を REP から取る(自動)。timeout_ms は最初の呼び出しからの上限(0 なら 5 秒)。 */
-int  bfm_connect(bfm_conn_t **pc, uint32_t peer_ip, const uint8_t peer_mac[6], uint16_t port,
-                 uint32_t timeout_ms);
-
-/* port 宛ての接続要求を受ける。最初は *pc = NULL で呼ぶ(接続の枠を取って REQ を待つ)。
- * BFM_INPROGRESS の間は同じ pc で呼び続ける。BFM_OK なら *pc が使える。失敗・時間切れなら *pc は NULL。
- * timeout_ms は REQ を待つ上限(0 なら待ち続ける)。待つのをやめるときは bfm_disconnect(*pc)。 */
-int  bfm_accept(bfm_conn_t **pc, uint16_t port, uint32_t timeout_ms);
-
-/* 相手へ切断の知らせ(BYE)を送って畳み、QP などを返す。BFM_INPROGRESS の間は呼び続ける。
- * BFM_OK が返ったら c はもう使えない。確立の途中の接続にも使える(そこでやめて畳む)。 */
-int  bfm_disconnect(bfm_conn_t *c);
-
-/* 1 = 使える。0 = エラーか相手から切断された(bfm_disconnect() で返すこと)。 */
+/* 1 = 使える。0 = エラーか相手から切断された(bfm_reconnect() で張り直すこと)。 */
 int  bfm_is_up(const bfm_conn_t *c);
 
 /* 相手の公開メモリの大きさ(off の上限)。 */
@@ -231,7 +225,8 @@ int bfm_dif_poll(bfm_conn_t *c, bfm_dif_err_t *err);
  * g_bfm_op_timeout_ms の間まったく進まなければ BFM_E_TIMEOUT(接続はエラーにする)。 */
 int bfm_dif_wait(bfm_conn_t *c, bfm_dif_err_t *err);
 
-/* 1 = BFM_DIF_HW が使える(装置に署名オフロード(sho)があり、資源を用意できた)。 */
+/* 1 = BFM_DIF_HW が使える(使う全部のポートに署名オフロード(sho)があり、資源を用意できた)。
+ * ポートの立ち上げが済む前は 0。 */
 int bfm_dif_hw_supported(void);
 
 /* データ 512 バイトの PI(8 バイト)を作る(アプリケーションが PI つきのデータを用意するため)。 */

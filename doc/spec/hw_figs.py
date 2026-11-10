@@ -268,7 +268,7 @@ def ladder(g, steps):
 LADDER_BOOT = [
     ("phase", "FW の起動を待つ"),
     ("msg", "cpu", "nic", "MMIO 読み: 初期化セグメント 0x1fc(initializing)"),
-    ("msg", "nic", "cpu", "bit31 が 0 になるまで、bfm_init() が呼ばれるたびに読み直す", "ret"),
+    ("msg", "nic", "cpu", "bit31 が 0 になるまで、bfm_run() が呼ばれるたびに読み直す", "ret"),
     ("phase", "コマンドを 1 つ出す(例: ENABLE_HCA。コマンドキューは先に 0x010 / 0x014 で登録してある)"),
     ("msg", "cpu", "mem", "書く: entry 0 に入力の先頭 16 バイト、メールボックスに残り。最後に ownership = 1"),
     ("msg", "cpu", "nic", "MMIO 書き: 0x018 コマンドのドアベル(bit0 = entry 0)"),
@@ -282,7 +282,7 @@ LADDER_BOOT = [
     ("msg", "cpu", "nic", "コマンド MANAGE_PAGES(GIVE): ページの物理アドレスの並び"),
     ("msg", "nic", "mem", "DMA: 渡されたページを ICM(コンテキストの置き場)として使う"),
     ("msg", "nic", "mem", "DMA 書き: EQE(ページ要求のイベント)"),
-    ("msg", "cpu", "mem", "読む: EQE の owner と中身(bfm_poll())"),
+    ("msg", "cpu", "mem", "読む: EQE の owner と中身(bfm_run())"),
     ("msg", "cpu", "nic", "MMIO 書き: UAR + 0x048 EQ のドアベル(読んだ数)"),
     ("msg", "cpu", "nic", "コマンド MANAGE_PAGES(GIVE)"),
     ("phase", "資源を作る(例: 接続ごとの CQ と RC の QP)"),
@@ -331,7 +331,7 @@ LADDER_DATA = [
 # ---------------------------------------------------------------------------
 
 BOOT = [
-    {"do": "PCIe: FLR(g_bfm_pcie_flr)→ BAR0 の大きさを測って g_bfm_bar0_addr を書く → MRRS → "
+    {"do": "PCIe: FLR(g_bfm_pcie_flr)→ BAR0 の大きさを測って g_bfm_bar0_addr[port] を書く → MRRS → "
            "Command に Memory Space・Bus Master・INTx 無効"},
     {"do": "BAR0 を張る(UC。UAR のページは後で WC の別名も)"},
     {"do": "fw_rev(0x000)・cmdif_rev(0x004 の上位 16bit = 5 か)を読む"},
@@ -377,6 +377,6 @@ def build(g):
         "ladder_data": (ladder(g, LADDER_DATA), "ラダーチャート(データの転送)"),
         "mailbox": (mailbox(g), "コマンドとメールボックス"),
         "qp": (qp(g), "QP の持ち方"),
-        "boot": (g.layout_flow("", BOOT, "開始: bfm_init()"), "立ち上げの手順"),
+        "boot": (g.layout_flow("", BOOT, "開始: bfm_dev_step()(ポートごと)"), "立ち上げの手順"),
         "datapath": (g.layout_flow("", DATAPATH, "開始: bfm_write() など"), "データ経路"),
     }

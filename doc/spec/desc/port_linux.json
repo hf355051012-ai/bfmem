@@ -1,6 +1,6 @@
 {
   "file": "port/linux_vfio/port_linux.c",
-  "summary": "移植層の Linux 版(x86-64 Linux + VFIO の試験環境)。装置を VFIO で掴み、DMA 領域と公開メモリを `g_bfm_dma_base` / `g_bfm_mr_base` の仮想アドレスにそのまま張って、同じ値を IOVA にして `VFIO_IOMMU_MAP_DMA` する(VxWorks の「論理アドレス = 物理アドレス」を真似る)。BAR0 は VFIO の fd ではなく sysfs の `resource0` から UC で張り、BlueFlame に使う UAR のページだけを、窓を「前 / そのページ / 後」の mmap に張り直してから `resource0_wc` で write-combining に張り替える。UC の窓を作っている mmap の一覧を静的配列 `s_seg`(最大 `SEG_MAX` = 32 個)で持つ。",
+  "summary": "移植層の Linux 版(x86-64 Linux + VFIO の試験環境)。`g_bfm_port_conn[]` が 0 でないポートの装置(`g_bfm_linux_pci_bdf[port]`)を VFIO で掴み、DMA 領域と公開メモリを `g_bfm_dma_base` / `g_bfm_mr_base` の仮想アドレスにそのまま張って、同じ値を IOVA にして `VFIO_IOMMU_MAP_DMA` する(VxWorks の「論理アドレス = 物理アドレス」を真似る)。VFIO のコンテナ(`s_container`)は全部のポートで 1 つにし、IOMMU グループは開いたものを `s_grp[]` に覚えて同じ番号なら使い回す(同じカードの 2 つの PF が同じグループのことがある)。装置の fd・設定空間の位置・BAR0 の窓はポートごとに `s_dev[port]` に持つ。BAR0 は VFIO の fd ではなく sysfs の `resource0` から UC で張り、BlueFlame に使う UAR のページだけを、窓を「前 / そのページ / 後」の mmap に張り直してから `resource0_wc` で write-combining に張り替える。UC の窓を作っている mmap の一覧はポートごとの配列 `s_dev[port].seg`(最大 `SEG_MAX` = 2 × `BFM_MAX_PORT_CONN` + 8 個)で持つ。",
   "functions": [
     {
       "func": "bfm_port_log",
@@ -81,59 +81,112 @@
       ]
     },
     {
-      "func": "vfio_open_device",
-      "summary": "PCI アドレス `bdf` の装置を VFIO で掴む。sysfs の `iommu_group` からグループ番号を読み、`/dev/vfio/vfio`(コンテナ)と `/dev/vfio/<グループ>` を開いて Type1 IOMMU を設定し、装置の fd を取る。あわせて設定空間と BAR0 の領域の位置(`s_cfg_off`・`s_bar0_vfio_off`)と BAR0 の大きさ(`s_bar0_size`)を読む。",
-      "args": {"bdf": "装置の PCI アドレス(`\"0000:01:00.0\"` の形)"},
-      "ret": "0: 成功。-1: 失敗(多くの場合、理由を表示する)。",
-      "pre": "装置(と同じ IOMMU グループの装置全部)を vfio-pci に結びつけてあること。IOMMU が有効なこと。",
-      "notes": "* 失敗しても、それまでに開いた fd(`s_container` / `s_group` / `s_device`)は閉じない。呼び出し側(`bfm_port_init()`)が `bfm_port_fini()` で閉じる。\n* 領域の情報(`VFIO_DEVICE_GET_REGION_INFO`)が取れないときは表示せずに -1 を返す。",
+      "func": "vfio_open_container",
+      "summary": "VFIO のコンテナ(`/dev/vfio/vfio`)を開き、API の版と Type1 IOMMU が使えることを確かめる。開いてあれば何もしない(コンテナは全部のポートで 1 つ)。",
+      "args": {},
+      "ret": "0: 成功(開いてあった場合も)。-1: 失敗(理由を表示する)。",
+      "pre": "特になし(`vfio_open_device()` から呼ぶ)。",
+      "notes": "* 開けたが版や Type1 IOMMU の確かめで失敗したときも、`s_container` は開いたまま残る(呼び出し側が失敗として `bfm_port_fini()` で閉じる)。\n* IOMMU の型(`VFIO_SET_IOMMU`)は、最初のグループをコンテナに入れた後に `vfio_open_group()` が決める。",
       "flow": [
+        {"if": "s_container >= 0 ?", "then": [
+          {"return": "0"}
+        ]},
+        {"do": "s_container = open(\"/dev/vfio/vfio\", O_RDWR)"},
+        {"if": "開けない、または API の版が VFIO_API_VERSION と違う、または VFIO_TYPE1_IOMMU が使えない?", "then": [
+          {"call": "bfm_port_log() で失敗を表示"},
+          {"return": "-1"}
+        ]},
+        {"return": "0"}
+      ]
+    },
+    {
+      "func": "vfio_open_group",
+      "summary": "IOMMU グループ `grp`(`/dev/vfio/<grp>`)を開いてコンテナに入れ、fd を返す。既に開いたグループ(`s_grp[]` にある番号)ならその fd を返す。最初のグループを入れたときに、コンテナの IOMMU の型を Type1 に決める。",
+      "args": {"grp": "IOMMU グループの番号"},
+      "ret": "グループの fd。-1: 失敗(理由を表示する)。",
+      "pre": "`vfio_open_container()` が成功していること。",
+      "notes": "* 開けたグループは、その後の確かめに失敗しても `s_grp[]` に残す(`bfm_port_fini()` が閉じる)。\n* 同じカードの 2 つの PF が同じ IOMMU グループのとき(OptiPlex)は、2 つめのポートで同じ fd を使い回す。グループの装置が全部 vfio-pci に結びついていないと `VFIO_GROUP_FLAGS_VIABLE` が立たず失敗する。",
+      "flow": [
+        {"do": "i = 0"},
+        {"while": "i < s_ngrp ?", "body": [
+          {"if": "s_grp[i].id == grp ?", "then": [
+            {"return": "s_grp[i].fd"}
+          ]},
+          {"do": "i++"}
+        ]},
+        {"do": "fd = open(\"/dev/vfio/<grp>\", O_RDWR)"},
+        {"if": "fd < 0 ?", "then": [
+          {"call": "bfm_port_log() で失敗を表示"},
+          {"return": "-1"}
+        ]},
+        {"do": "s_grp[s_ngrp] = {grp, fd}、s_ngrp++"},
+        {"if": "VFIO_GROUP_GET_STATUS に失敗した、または VFIO_GROUP_FLAGS_VIABLE が立っていない?", "then": [
+          {"call": "bfm_port_log() で失敗を表示"},
+          {"return": "-1"}
+        ]},
+        {"if": "VFIO_GROUP_SET_CONTAINER に失敗した?", "then": [
+          {"call": "bfm_port_log() で失敗を表示"},
+          {"return": "-1"}
+        ]},
+        {"if": "s_ngrp == 1 かつ VFIO_SET_IOMMU(VFIO_TYPE1_IOMMU)に失敗した?", "then": [
+          {"call": "bfm_port_log() で失敗を表示"},
+          {"return": "-1"}
+        ]},
+        {"return": "fd"}
+      ]
+    },
+    {
+      "func": "vfio_open_device",
+      "summary": "ポート `port` の装置(PCI アドレス `g_bfm_linux_pci_bdf[port]`)を VFIO で掴む。sysfs の `iommu_group` からグループ番号を読み、コンテナ(`vfio_open_container()`)とグループ(`vfio_open_group()`)を開いて、装置の fd を `s_dev[port].device` に取る。あわせて設定空間と BAR0 の領域の位置(`s_dev[port].cfg_off`・`bar0_vfio_off`)と BAR0 の大きさ(`bar0_size`)を読む。",
+      "args": {"port": "ポートの番号(0〜`BFM_MAX_PORT`-1)"},
+      "ret": "0: 成功。-1: 失敗(多くの場合、理由を表示する)。",
+      "pre": "装置(と同じ IOMMU グループの装置全部)を vfio-pci に結びつけてあること。IOMMU が有効なこと。`g_bfm_linux_pci_bdf[port]` を設定してあること。",
+      "notes": "* 失敗しても、それまでに開いた fd(コンテナ・グループ・装置)は閉じない。呼び出し側(`bfm_port_init()`)が `bfm_port_fini()` で閉じる。\n* 領域の情報(`VFIO_DEVICE_GET_REGION_INFO`)が取れないときは表示せずに -1 を返す。\n* `g_bfm_verbose` なら、ポートと BDF と IOMMU グループの番号を表示する。",
+      "flow": [
+        {"do": "bdf = g_bfm_linux_pci_bdf[port]"},
+        {"if": "bdf == NULL ?", "then": [
+          {"call": "bfm_port_log() で理由を表示"},
+          {"return": "-1"}
+        ]},
         {"do": "/sys/bus/pci/devices/<bdf>/iommu_group を readlink で読む"},
         {"if": "readlink に失敗した?", "then": [
           {"call": "bfm_port_log() で失敗を表示"},
           {"return": "-1"}
         ]},
         {"do": "リンク先の最後の / の後ろをグループ番号 grp にする"},
-        {"do": "s_container = open(\"/dev/vfio/vfio\")"},
-        {"if": "開けない、または API の版が VFIO_API_VERSION と違う、または VFIO_TYPE1_IOMMU が使えない?", "then": [
-          {"call": "bfm_port_log() で失敗を表示"},
+        {"call": "vfio_open_container() を呼ぶ"},
+        {"if": "vfio_open_container() != 0 ?", "then": [
           {"return": "-1"}
         ]},
-        {"do": "s_group = open(\"/dev/vfio/<grp>\")"},
-        {"if": "s_group < 0 ?", "then": [
-          {"call": "bfm_port_log() で失敗を表示"},
+        {"call": "gfd = vfio_open_group(grp) を呼ぶ"},
+        {"if": "gfd < 0 ?", "then": [
           {"return": "-1"}
         ]},
-        {"if": "VFIO_GROUP_GET_STATUS に失敗した、または VFIO_GROUP_FLAGS_VIABLE が立っていない?", "then": [
-          {"call": "bfm_port_log() で失敗を表示"},
-          {"return": "-1"}
-        ]},
-        {"if": "VFIO_GROUP_SET_CONTAINER または VFIO_SET_IOMMU(VFIO_TYPE1_IOMMU)に失敗した?", "then": [
-          {"call": "bfm_port_log() で失敗を表示"},
-          {"return": "-1"}
-        ]},
-        {"do": "s_device = ioctl(s_group, VFIO_GROUP_GET_DEVICE_FD, bdf)"},
-        {"if": "s_device < 0 ?", "then": [
+        {"do": "s_dev[port].device = ioctl(gfd, VFIO_GROUP_GET_DEVICE_FD, bdf)"},
+        {"if": "s_dev[port].device < 0 ?", "then": [
           {"call": "bfm_port_log() で失敗を表示"},
           {"return": "-1"}
         ]},
         {"if": "設定空間の領域の情報(VFIO_PCI_CONFIG_REGION_INDEX)が取れない?", "then": [
           {"return": "-1"}
         ]},
-        {"do": "s_cfg_off = 設定空間の領域の offset"},
+        {"do": "s_dev[port].cfg_off = 設定空間の領域の offset"},
         {"if": "BAR0 の領域の情報(VFIO_PCI_BAR0_REGION_INDEX)が取れない?", "then": [
           {"return": "-1"}
         ]},
-        {"do": "s_bar0_vfio_off = BAR0 の領域の offset、s_bar0_size = その size"},
+        {"do": "s_dev[port].bar0_vfio_off = BAR0 の領域の offset、s_dev[port].bar0_size = その size"},
+        {"if": "g_bfm_verbose ?", "then": [
+          {"call": "bfm_port_log() でポート・BDF・グループを表示"}
+        ]},
         {"return": "0"}
       ]
     },
     {
       "func": "map_region",
-      "summary": "仮想アドレス `va` の位置に `size` バイトの無名メモリを張り(`va` と `size` が 2MiB の境界・倍数なら hugepage を先に試す)、同じ値を IOVA にして `VFIO_IOMMU_MAP_DMA` で NIC から見えるようにする。",
+      "summary": "仮想アドレス `va` の位置に `size` バイトの無名メモリを張り(`va` と `size` が 2MiB の境界・倍数なら hugepage を先に試す)、同じ値を IOVA にして `VFIO_IOMMU_MAP_DMA` で NIC から見えるようにする(コンテナの中の全部の装置から見える)。",
       "args": {"va": "張る位置(仮想アドレス = IOVA)", "size": "大きさ(バイト)", "what": "表示に使う名前(「DMA 領域」など)"},
       "ret": "張った先頭(= `va`)。失敗したら NULL(理由を表示する)。",
-      "pre": "`vfio_open_device()` でコンテナ(`s_container`)を設定してあること。",
+      "pre": "使うポートのグループを全部コンテナ(`s_container`)に入れ、IOMMU の型を決めてあること(`bfm_port_init()` は装置を全部掴んでから呼ぶ)。",
       "notes": "* `MAP_FIXED_NOREPLACE` で張るので、`va` の位置に既に何か張られていると失敗する(表示で `g_bfm_*_base` を変えるよう促す)。\n* `MAP_POPULATE` で張るときに実体を確保する。\n* 失敗したときは自分で張ったメモリを外してから戻る。",
       "flow": [
         {"do": "p = MAP_FAILED"},
@@ -161,19 +214,30 @@
     },
     {
       "func": "bfm_port_init",
-      "summary": "移植層を立ち上げる。`g_bfm_linux_pci_bdf` の装置を VFIO で掴み(`vfio_open_device()`)、DMA 領域と公開メモリを `g_bfm_dma_base` / `g_bfm_mr_base` に張って IOVA に対応づける(`map_region()`)。`cpu_init()` で CPU を調べる(TSC の周波数・MSR。時刻と待ちには使わない)。`g_bfm_cpu_awake` が 0 でなければ `/dev/cpu_dma_latency` に 0 を書いて fd を開いたままにし、CPU を深い C-state に入れない。",
+      "summary": "移植層を立ち上げる。`g_bfm_port_conn[]` が 0 でないポートの装置を全部 VFIO で掴み(`vfio_open_device()`)、それから DMA 領域と公開メモリを `g_bfm_dma_base` / `g_bfm_mr_base` に張って IOVA に対応づける(`map_region()`)。`cpu_init()` で CPU を調べる(TSC の周波数・MSR。時刻と待ちには使わない)。`g_bfm_cpu_awake` が 0 でなければ `/dev/cpu_dma_latency` に 0 を書いて fd を開いたままにし、CPU を深い C-state に入れない。",
       "args": {},
-      "ret": "0: 成功。-1: 失敗(取ったものは `bfm_port_fini()` で返してある)。",
-      "pre": "`g_bfm_linux_pci_bdf`・`g_bfm_dma_base` / `g_bfm_dma_size`・`g_bfm_mr_base` / `g_bfm_mr_size` を設定してあること。装置を vfio-pci に結びつけてあること。",
-      "notes": "* `g_bfm_linux_pci_bdf` が NULL のときは、理由を表示して -1 を返す(まだ何も取っていないので `bfm_port_fini()` は呼ばない)。\n* `/dev/cpu_dma_latency` に書けないときは注意を表示するだけで、成功として続ける(相手からの read / atomic が遅くなりうる)。",
+      "ret": "0: 成功。-1: 失敗(装置を掴んだ後の失敗では、取ったものは `bfm_port_fini()` で返してある)。",
+      "pre": "使うポートの `g_bfm_linux_pci_bdf[]`・`g_bfm_port_conn[]`・`g_bfm_dma_base` / `g_bfm_dma_size`・`g_bfm_mr_base` / `g_bfm_mr_size` を設定してあること。装置を vfio-pci に結びつけてあること。",
+      "notes": "* 最初に全部のポートの `s_dev[]` とグループの数 `s_ngrp` を空にする。\n* 使うポートの装置を全部掴んで(グループがコンテナに入って)から DMA 領域を張る(`VFIO_IOMMU_MAP_DMA` は IOMMU の型を決めた後でないと使えない)。\n* 使うポートが無い(`g_bfm_port_conn[]` が全部 0)ときは、理由を表示して -1 を返す(何も取っていないので `bfm_port_fini()` は呼ばない)。\n* `/dev/cpu_dma_latency` に書けないときは注意を表示するだけで、成功として続ける(相手からの read / atomic が遅くなりうる)。",
       "flow": [
-        {"if": "g_bfm_linux_pci_bdf == NULL ?", "then": [
-          {"call": "bfm_port_log() で理由を表示"},
-          {"return": "-1"}
+        {"do": "used = 0"},
+        {"do": "全部のポート p について s_dev[p].device = -1、bar0 = NULL、nseg = 0"},
+        {"do": "s_ngrp = 0、p = 0"},
+        {"while": "p < BFM_MAX_PORT ?", "body": [
+          {"if": "g_bfm_port_conn[p] == 0 ?", "then": [
+            {"do": "p++"},
+            {"continue": true}
+          ]},
+          {"do": "used = 1"},
+          {"call": "vfio_open_device(p) を呼ぶ"},
+          {"if": "vfio_open_device() != 0 ?", "then": [
+            {"call": "bfm_port_fini() を呼ぶ"},
+            {"return": "-1"}
+          ]},
+          {"do": "p++"}
         ]},
-        {"call": "vfio_open_device(g_bfm_linux_pci_bdf) を呼ぶ"},
-        {"if": "vfio_open_device() != 0 ?", "then": [
-          {"call": "bfm_port_fini() を呼ぶ"},
+        {"if": "used == 0 ?", "then": [
+          {"call": "bfm_port_log() で理由を表示"},
           {"return": "-1"}
         ]},
         {"call": "s_dma_va = map_region(g_bfm_dma_base, g_bfm_dma_size, \"DMA 領域\") を呼ぶ"},
@@ -202,19 +266,23 @@
     },
     {
       "func": "bfm_port_fini",
-      "summary": "移植層が取ったものを返す。BAR0 を張っていれば外し、VFIO の装置・グループ・コンテナの fd を閉じ(IOMMU の対応づけもここで外れる)、DMA 領域と公開メモリを外し、`/dev/cpu_dma_latency` と `/dev/cpu/N/msr` を閉じる。",
+      "summary": "移植層が取ったものを返す。ポートごとに BAR0 を張っていれば外して装置の fd を閉じ、開いた IOMMU グループの fd とコンテナの fd を閉じ(IOMMU の対応づけもここで外れる)、DMA 領域と公開メモリを外し、`/dev/cpu_dma_latency` と `/dev/cpu/N/msr` を閉じる。",
       "args": {},
       "ret": "なし",
-      "pre": "Bus Master を落としてあること(NIC がメモリへ DMA しないこと)。",
+      "pre": "全部のポートの Bus Master を落としてあること(NIC がメモリへ DMA しないこと)。`bfm_port_init()` を呼んだ後であること(`s_dev[].device` を -1 にするのは `bfm_port_init()`)。",
       "notes": "取っていないものは飛ばすので、立ち上げの途中で失敗したときにも呼べる。何度呼んでもよい。",
       "flow": [
-        {"if": "s_bar0 != NULL ?", "then": [
-          {"call": "bfm_port_bar0_unmap() を呼ぶ"}
+        {"do": "p = 0"},
+        {"while": "p < BFM_MAX_PORT ?", "body": [
+          {"if": "s_dev[p].bar0 != NULL ?", "then": [
+            {"call": "bfm_port_bar0_unmap(p) を呼ぶ"}
+          ]},
+          {"if": "s_dev[p].device >= 0 ?", "then": [{"do": "close(s_dev[p].device)"}]},
+          {"do": "s_dev[p].device = -1、p++"}
         ]},
-        {"if": "s_device >= 0 ?", "then": [{"do": "close(s_device)"}]},
-        {"if": "s_group >= 0 ?", "then": [{"do": "close(s_group)"}]},
+        {"do": "開いたグループ s_grp[0〜s_ngrp-1] の fd を全部閉じ、s_ngrp = 0"},
         {"if": "s_container >= 0 ?", "then": [{"do": "close(s_container)(IOMMU の対応づけも外れる)"}]},
-        {"do": "s_device = s_group = s_container = -1"},
+        {"do": "s_container = -1"},
         {"if": "s_dma_va != NULL ?", "then": [{"do": "munmap(s_dma_va, g_bfm_dma_size)"}]},
         {"if": "s_mr_va != NULL ?", "then": [{"do": "munmap(s_mr_va, g_bfm_mr_size)"}]},
         {"do": "s_dma_va = s_mr_va = NULL"},
@@ -226,14 +294,14 @@
     },
     {
       "func": "bfm_port_pci_read32",
-      "summary": "PCIe の設定空間の `off` から 32bit を読む。VFIO の装置の fd の設定空間の領域を `pread` する。",
-      "args": {"off": "設定空間の中の位置(4 の倍数)"},
+      "summary": "ポート `port` の PCIe の設定空間の `off` から 32bit を読む。VFIO の装置の fd(`s_dev[port].device`)の設定空間の領域を `pread` する。",
+      "args": {"port": "ポートの番号(0〜`BFM_MAX_PORT`-1)", "off": "設定空間の中の位置(4 の倍数)"},
       "ret": "読んだ値。読めなかったら `0xffffffff`(理由を表示する)。",
-      "pre": "`bfm_port_init()` が成功していること。",
+      "pre": "`bfm_port_init()` が成功し、そのポートを使う(装置を掴んである)こと。",
       "notes": "特になし。",
       "flow": [
         {"do": "v = 0xffffffff"},
-        {"if": "pread(s_device, &v, 4, s_cfg_off + off) != 4 ?", "then": [
+        {"if": "pread(s_dev[port].device, &v, 4, s_dev[port].cfg_off + off) != 4 ?", "then": [
           {"call": "bfm_port_log() で失敗を表示"}
         ]},
         {"return": "v"}
@@ -241,139 +309,140 @@
     },
     {
       "func": "bfm_port_pci_write32",
-      "summary": "PCIe の設定空間の `off` へ 32bit を書く。VFIO の装置の fd の設定空間の領域へ `pwrite` する。",
-      "args": {"off": "設定空間の中の位置(4 の倍数)", "val": "書く値"},
+      "summary": "ポート `port` の PCIe の設定空間の `off` へ 32bit を書く。VFIO の装置の fd(`s_dev[port].device`)の設定空間の領域へ `pwrite` する。",
+      "args": {"port": "ポートの番号(0〜`BFM_MAX_PORT`-1)", "off": "設定空間の中の位置(4 の倍数)", "val": "書く値"},
       "ret": "なし",
-      "pre": "`bfm_port_init()` が成功していること。",
+      "pre": "`bfm_port_init()` が成功し、そのポートを使う(装置を掴んである)こと。",
       "notes": "書けなかったときは表示するだけで、呼び出し側には知らせない。",
       "flow": [
-        {"if": "pwrite(s_device, &val, 4, s_cfg_off + off) != 4 ?", "then": [
+        {"if": "pwrite(s_dev[port].device, &val, 4, s_dev[port].cfg_off + off) != 4 ?", "then": [
           {"call": "bfm_port_log() で失敗を表示"}
         ]}
       ]
     },
     {
       "func": "bar_map_uc",
-      "summary": "BAR0 の `[off, off+len)` を UC で `va` に張る。`s_bar0_sysfs` が 0 でなければ sysfs の `resource0` を `O_SYNC` で開いて張り、0 なら VFIO の装置の fd の BAR0 の領域から張る。",
-      "args": {"va": "張る位置(`fixed` が 0 なら NULL でよい)", "off": "BAR0 の中の位置", "len": "大きさ(バイト)", "fixed": "0 以外なら `MAP_FIXED` で `va` に張る(既にある対応づけを置き換える)"},
+      "summary": "ポート `port` の BAR0 の `[off, off+len)` を UC で `va` に張る。`s_dev[port].bar0_sysfs` が 0 でなければ sysfs の `resource0`(`g_bfm_linux_pci_bdf[port]`)を `O_SYNC` で開いて張り、0 なら VFIO の装置の fd の BAR0 の領域から張る。",
+      "args": {"port": "ポートの番号", "va": "張る位置(`fixed` が 0 なら NULL でよい)", "off": "BAR0 の中の位置", "len": "大きさ(バイト)", "fixed": "0 以外なら `MAP_FIXED` で `va` に張る(既にある対応づけを置き換える)"},
       "ret": "張った先頭。失敗したら `MAP_FAILED`。",
-      "pre": "`vfio_open_device()` が成功していること(VFIO から張るとき)。`g_bfm_linux_pci_bdf` を設定してあること(sysfs から張るとき)。",
+      "pre": "`vfio_open_device(port)` が成功していること。",
       "notes": "失敗しても表示しない。",
       "flow": [
         {"do": "p = MAP_FAILED、flags = MAP_SHARED(fixed なら MAP_FIXED も)"},
-        {"if": "s_bar0_sysfs ?", "then": [
+        {"if": "s_dev[port].bar0_sysfs ?", "then": [
           {"do": "fd = open(\"/sys/bus/pci/devices/<bdf>/resource0\", O_RDWR OR O_SYNC)"},
           {"if": "fd >= 0 ?", "then": [
             {"do": "p = mmap(va, len, flags, fd, off)"},
             {"do": "close(fd)"}
           ]}
         ], "else": [
-          {"do": "p = mmap(va, len, flags, s_device, s_bar0_vfio_off + off)"}
+          {"do": "p = mmap(va, len, flags, s_dev[port].device, s_dev[port].bar0_vfio_off + off)"}
         ]},
         {"return": "p"}
       ]
     },
     {
       "func": "bfm_port_bar0_map",
-      "summary": "BAR0 全体(VFIO から読んだ大きさ `s_bar0_size`)を UC で張って先頭を返す。まず sysfs の `resource0` から張り、だめなら VFIO の fd から張る(このときは BlueFlame を使えない)。",
-      "args": {"bar_phys": "設定空間から読んだ BAR0 の値(Linux では使わない)", "bar_size": "設定空間から測った BAR0 の大きさ(VFIO の値と比べるだけ)"},
+      "summary": "ポート `port` の BAR0 全体(VFIO から読んだ大きさ `s_dev[port].bar0_size`)を UC で張って先頭を返す。まず sysfs の `resource0` から張り、だめなら VFIO の fd から張る(このときは BlueFlame を使えない)。UC の窓の mmap の一覧を空にする。",
+      "args": {"port": "ポートの番号", "bar_phys": "設定空間から読んだ BAR0 の値(Linux では使わない)", "bar_size": "設定空間から測った BAR0 の大きさ(VFIO の値と比べるだけ)"},
       "ret": "BAR0 の先頭。張れなかったら NULL。",
-      "pre": "`bfm_port_init()` が成功していること。",
-      "notes": "* `bar_size` が 0 でなく VFIO の大きさと違うときは注意を表示するが、VFIO の大きさで張る。\n* VFIO の fd から張ったときは `s_bar0_sysfs` が 0 になり、`bfm_port_bar0_wc()` は NULL を返す(VFIO の fd から張ると BAR 全体が UC で登録され、後から一部を WC にできないため)。",
+      "pre": "`bfm_port_init()` が成功し、そのポートを使うこと。",
+      "notes": "* `bar_size` が 0 でなく VFIO の大きさと違うときは注意を表示するが、VFIO の大きさで張る。\n* VFIO の fd から張ったときは `s_dev[port].bar0_sysfs` が 0 になり、`bfm_port_bar0_wc()` は NULL を返す(VFIO の fd から張ると BAR 全体が UC で登録され、後から一部を WC にできないため)。",
       "flow": [
-        {"if": "bar_size != 0 かつ bar_size != s_bar0_size ?", "then": [
+        {"if": "bar_size != 0 かつ bar_size != s_dev[port].bar0_size ?", "then": [
           {"call": "bfm_port_log() で注意を表示"}
         ]},
-        {"do": "s_bar0_sysfs = 1"},
-        {"call": "p = bar_map_uc(NULL, 0, s_bar0_size, 0) を呼ぶ(sysfs から)"},
+        {"do": "s_dev[port].bar0_sysfs = 1"},
+        {"call": "p = bar_map_uc(port, NULL, 0, bar0_size, 0) を呼ぶ(sysfs から)"},
         {"if": "p == MAP_FAILED ?", "then": [
           {"call": "bfm_port_log() で「VFIO から張る」を表示"},
-          {"do": "s_bar0_sysfs = 0"},
-          {"call": "p = bar_map_uc(NULL, 0, s_bar0_size, 0) を呼ぶ(VFIO から)"}
+          {"do": "s_dev[port].bar0_sysfs = 0"},
+          {"call": "p = bar_map_uc(port, NULL, 0, bar0_size, 0) を呼ぶ(VFIO から)"}
         ]},
         {"if": "p == MAP_FAILED ?", "then": [
           {"return": "NULL"}
         ]},
-        {"do": "s_bar0 = p"},
-        {"return": "s_bar0"}
+        {"do": "s_dev[port].bar0 = p、s_dev[port].nseg = 0"},
+        {"return": "s_dev[port].bar0"}
       ]
     },
     {
       "func": "bfm_port_bar0_unmap",
-      "summary": "BAR0 の窓を外し、UC の窓の mmap の一覧を空にする。",
-      "args": {},
+      "summary": "ポート `port` の BAR0 の窓を外し、UC の窓の mmap の一覧を空にする。",
+      "args": {"port": "ポートの番号"},
       "ret": "なし",
-      "pre": "Bus Master を落としてあること。",
-      "notes": "WC に張り替えたページや、張り直して分かれた mmap も、BAR0 の範囲全体を 1 回の `munmap` で外す。",
+      "pre": "そのポートの Bus Master を落としてあること。",
+      "notes": "* WC に張り替えたページや、張り直して分かれた mmap も、BAR0 の範囲全体を 1 回の `munmap` で外す。\n* 装置の fd は閉じない(閉じるのは `bfm_port_fini()`)。",
       "flow": [
-        {"if": "s_bar0 != NULL ?", "then": [
-          {"do": "munmap(s_bar0, s_bar0_size)"}
+        {"if": "s_dev[port].bar0 != NULL ?", "then": [
+          {"do": "munmap(s_dev[port].bar0, s_dev[port].bar0_size)"}
         ]},
-        {"do": "s_bar0 = NULL"},
-        {"do": "s_nseg = 0"}
+        {"do": "s_dev[port].bar0 = NULL"},
+        {"do": "s_dev[port].nseg = 0"}
       ]
     },
     {
       "func": "seg_add",
-      "summary": "UC で張った BAR0 の区間 `[off, off+len)` を、UC の mmap の一覧 `s_seg` に足す。一覧が満杯なら足さない。",
-      "args": {"off": "BAR0 の中の位置", "len": "大きさ(バイト)"},
+      "summary": "UC で張ったポート `port` の BAR0 の区間 `[off, off+len)` を、UC の mmap の一覧 `s_dev[port].seg` に足す。一覧が満杯なら足さない。",
+      "args": {"port": "ポートの番号", "off": "BAR0 の中の位置", "len": "大きさ(バイト)"},
       "ret": "なし",
       "pre": "その区間が UC の 1 つの mmap として張られていること。",
-      "notes": "一覧が満杯(`s_nseg >= SEG_MAX`)のときは表示せずに足さない。その区間は以後 `bfm_port_bar0_wc()` で WC に張り替えられなくなるだけ。",
+      "notes": "一覧が満杯(`nseg >= SEG_MAX`)のときは表示せずに足さない。その区間は以後 `bfm_port_bar0_wc()` で WC に張り替えられなくなるだけ。",
       "flow": [
-        {"if": "s_nseg >= SEG_MAX ?", "then": [
+        {"if": "s_dev[port].nseg >= SEG_MAX ?", "then": [
           {"return": ""}
         ]},
-        {"do": "s_seg[s_nseg] = [off, off+len)"},
-        {"do": "s_nseg++"}
+        {"do": "s_dev[port].seg[nseg] = [off, off+len)"},
+        {"do": "s_dev[port].nseg++"}
       ]
     },
     {
       "func": "bfm_port_bar0_wc",
-      "summary": "BAR0 の `[off, off+len)`(UAR の 1 ページ)を、同じ仮想アドレスのまま write-combining に張り替えて先頭を返す。その範囲を含む UC の mmap を探し、範囲の前と後を UC で張り直して元の mmap をその範囲だけに縮め、その範囲を外してから sysfs の `resource0_wc` で張る。失敗したらその範囲を UC に戻して NULL を返す。",
-      "args": {"off": "BAR0 の中の位置(ページの境界)", "len": "大きさ(バイト。1 ページ)"},
+      "summary": "ポート `port` の BAR0 の `[off, off+len)`(UAR の 1 ページ)を、同じ仮想アドレスのまま write-combining に張り替えて先頭を返す。その範囲を含む UC の mmap を探し、範囲の前と後を UC で張り直して元の mmap をその範囲だけに縮め、その範囲を外してから sysfs の `resource0_wc` で張る。失敗したらその範囲を UC に戻して NULL を返す。",
+      "args": {"port": "ポートの番号", "off": "BAR0 の中の位置(ページの境界)", "len": "大きさ(バイト。1 ページ)"},
       "ret": "WC で張った先頭(= BAR0 の窓の `off` の位置)。BlueFlame を使えないときは NULL。",
-      "pre": "`bfm_port_bar0_map()` が sysfs から張れていること。",
-      "notes": "* x86 の PAT は同じ物理ページに別の型を許さず、登録は mmap のページが全部外れるまで残るので、元の mmap を張り直して範囲だけに縮めてから外す。\n* 返った後は、`bfm_port_bar0_map()` の窓のそのページも WC になっている。\n* 一覧 `s_seg` が満杯に近い(残り 2 個未満)ときや、範囲を含む mmap が一覧に無いときは NULL を返す。\n* 範囲の前・後の張り直しが失敗したときは、表示せずに NULL を返す(BAR0 は全部 UC のままなので、一覧は変えない。前を張り直した後に後で失敗したときも、張り直した前の部分はそのまま残る)。\n* 範囲の `munmap` に失敗したときは、表示せずに NULL を返す。範囲は UC のまま残っているので、一覧に `[off, off+len)` を足す(`seg_add()`)。\n* `resource0_wc` で張れなかったときは、UC に張り直せたら一覧に `[off, off+len)` を足す。張り直せなかったときは一覧に足さない(その範囲は以後 WC に張り替えられない)。",
+      "pre": "`bfm_port_bar0_map(port, …)` が sysfs から張れていること。",
+      "notes": "* x86 の PAT は同じ物理ページに別の型を許さず、登録は mmap のページが全部外れるまで残るので、元の mmap を張り直して範囲だけに縮めてから外す。\n* 返った後は、`bfm_port_bar0_map()` の窓のそのページも WC になっている。\n* 一覧が空のときは、BAR0 全体を 1 つの区間として足してから探す。\n* 一覧が満杯に近い(残り 2 個未満)ときや、範囲を含む mmap が一覧に無いときは NULL を返す。\n* 範囲の前・後の張り直しが失敗したときは、表示せずに NULL を返す(BAR0 は全部 UC のままなので、一覧は変えない。前を張り直した後に後で失敗したときも、張り直した前の部分はそのまま残る)。\n* 範囲の `munmap` に失敗したときは、表示せずに NULL を返す。範囲は UC のまま残っているので、一覧に `[off, off+len)` を足す(`seg_add()`)。\n* `resource0_wc` で張れなかったときは、UC に張り直せたら一覧に `[off, off+len)` を足す。張り直せなかったときは一覧に足さない(その範囲は以後 WC に張り替えられない)。",
       "flow": [
-        {"if": "s_bar0 == NULL、または s_bar0_sysfs == 0、または off + len > s_bar0_size ?", "then": [
+        {"do": "bar0 = s_dev[port].bar0"},
+        {"if": "bar0 == NULL、または bar0_sysfs == 0、または off + len > bar0_size ?", "then": [
           {"return": "NULL"}
         ]},
-        {"if": "s_nseg == 0 ?", "then": [
-          {"do": "s_seg[0] = BAR0 全体、s_nseg = 1"}
+        {"if": "s_dev[port].nseg == 0 ?", "then": [
+          {"call": "seg_add(port, 0, bar0_size) を呼ぶ(BAR0 全体を 1 つの区間にする)"}
         ]},
         {"do": "k = -1、i = 0"},
-        {"while": "i < s_nseg ?", "body": [
-          {"if": "s_seg[i] が [off, off+len) を含む?", "then": [
+        {"while": "i < nseg ?", "body": [
+          {"if": "seg[i] が [off, off+len) を含む?", "then": [
             {"do": "k = i"}
           ]},
           {"do": "i++"}
         ]},
-        {"if": "k < 0 または s_nseg + 2 > SEG_MAX ?", "then": [
+        {"if": "k < 0 または nseg + 2 > SEG_MAX ?", "then": [
           {"return": "NULL"}
         ]},
-        {"do": "va = s_bar0 + off、s0 / s1 = s_seg[k] の先頭 / 終わり"},
+        {"do": "va = bar0 + off、s0 / s1 = seg[k] の先頭 / 終わり"},
         {"if": "off > s0 ?", "then": [
-          {"call": "bar_map_uc(s_bar0 + s0, s0, off - s0, 1) を呼ぶ(前を張り直す)"},
-          {"if": "s_bar0 + s0 に張れなかった?", "then": [
+          {"call": "bar_map_uc(port, bar0 + s0, s0, off - s0, 1) を呼ぶ(前を張り直す)"},
+          {"if": "bar0 + s0 に張れなかった?", "then": [
             {"return": "NULL"}
           ]}
         ]},
         {"if": "off + len < s1 ?", "then": [
-          {"call": "bar_map_uc(va + len, off + len, s1 - off - len, 1) を呼ぶ(後を張り直す)"},
+          {"call": "bar_map_uc(port, va + len, off + len, s1 - off - len, 1) を呼ぶ(後を張り直す)"},
           {"if": "va + len に張れなかった?", "then": [
             {"return": "NULL"}
           ]}
         ]},
-        {"do": "s_seg[k] を一覧の最後の要素で置き換え、s_nseg を 1 減らす"},
+        {"do": "seg[k] を一覧の最後の要素で置き換え、nseg を 1 減らす"},
         {"if": "off > s0 ?", "then": [
-          {"do": "一覧に [s0, off) を足す"}
+          {"call": "seg_add(port, s0, off - s0) を呼ぶ(一覧に [s0, off) を足す)"}
         ]},
         {"if": "off + len < s1 ?", "then": [
-          {"do": "一覧に [off+len, s1) を足す"}
+          {"call": "seg_add(port, off + len, s1 - off - len) を呼ぶ(一覧に [off+len, s1) を足す)"}
         ]},
         {"if": "munmap(va, len) != 0 ?", "then": [
-          {"call": "seg_add(off, len) を呼ぶ(UC のまま残っている範囲を一覧に足す)"},
+          {"call": "seg_add(port, off, len) を呼ぶ(UC のまま残っている範囲を一覧に足す)"},
           {"return": "NULL"}
         ]},
         {"do": "fd = open(\"/sys/bus/pci/devices/<bdf>/resource0_wc\", O_RDWR OR O_SYNC)、p = MAP_FAILED"},
@@ -385,29 +454,29 @@
           {"return": "va"}
         ]},
         {"call": "bfm_port_log() で失敗を表示"},
-        {"call": "bar_map_uc(va, off, len, 1) を呼ぶ(UC に戻す)"},
+        {"call": "bar_map_uc(port, va, off, len, 1) を呼ぶ(UC に戻す)"},
         {"if": "va に張れた?", "then": [
-          {"call": "seg_add(off, len) を呼ぶ"}
+          {"call": "seg_add(port, off, len) を呼ぶ"}
         ]},
         {"return": "NULL"}
       ]
     },
     {
       "func": "bfm_port_bar0_wc_release",
-      "summary": "`bfm_port_bar0_wc()` で WC に張り替えた BAR0 の `[off, off+len)` を外し、同じ仮想アドレスに UC で張り直して、UC の mmap の一覧に足す。",
-      "args": {"off": "BAR0 の中の位置(`bfm_port_bar0_wc()` に渡したもの)", "len": "大きさ(バイト。`bfm_port_bar0_wc()` に渡したもの)"},
+      "summary": "`bfm_port_bar0_wc()` で WC に張り替えたポート `port` の BAR0 の `[off, off+len)` を外し、同じ仮想アドレスに UC で張り直して、UC の mmap の一覧に足す。",
+      "args": {"port": "ポートの番号", "off": "BAR0 の中の位置(`bfm_port_bar0_wc()` に渡したもの)", "len": "大きさ(バイト。`bfm_port_bar0_wc()` に渡したもの)"},
       "ret": "なし",
       "pre": "`bfm_port_bar0_wc()` がその範囲で成功していること。",
       "notes": "* BAR0 を張っていないとき、範囲が BAR0 を超えるときは何もしない。\n* `munmap` や張り直しに失敗したときは、表示せずに一覧に足さない。一覧が満杯のときも足さない(`seg_add()`)。",
       "flow": [
-        {"if": "s_bar0 == NULL または off + len > s_bar0_size ?", "then": [
+        {"if": "s_dev[port].bar0 == NULL または off + len > bar0_size ?", "then": [
           {"return": ""}
         ]},
-        {"do": "va = s_bar0 + off"},
+        {"do": "va = s_dev[port].bar0 + off"},
         {"if": "munmap(va, len) == 0 ?", "then": [
-          {"call": "bar_map_uc(va, off, len, 1) を呼ぶ(UC で張り直す)"},
+          {"call": "bar_map_uc(port, va, off, len, 1) を呼ぶ(UC で張り直す)"},
           {"if": "va に張れた?", "then": [
-            {"call": "seg_add(off, len) を呼ぶ(一覧に [off, off+len) を足す)"}
+            {"call": "seg_add(port, off, len) を呼ぶ(一覧に [off, off+len) を足す)"}
           ]}
         ]}
       ]

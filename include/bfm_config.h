@@ -5,7 +5,7 @@
  * 移植のときに設定する値は、すべてこのヘッダに集めてある。
  *
  * 実体(既定値)は src/bfm_config.c にある。既定値はプラットフォームごとに
- * 違う(Linux の試験環境と VxWorks)。VxWorks では、bfm_init() を呼ぶ前に
+ * 違う(Linux の試験環境と VxWorks)。VxWorks では、bfm_run() を最初に呼ぶ前に
  * アプリケーション(または BSP の初期化)からこれらの変数へ代入すること。
  *
  * アドレスはすべて「論理アドレス = 物理アドレス」として扱う(VxWorks の
@@ -20,35 +20,70 @@
  * コンパイル時に決める値(配列の大きさになるので変数にはできない)
  * ------------------------------------------------------------------- */
 
-/* 接続の枠の数の上限(配列の大きさ)。1 接続 = RC QP 1 本(+ CQ・UAR 1 つずつ)。
- * 複数のコアから同時に転送するときは、コアごとに別の接続を使う(64 コアまで)。
- * 実際に用意する枠の数は g_bfm_max_conn で減らせる。 */
-#ifndef BFM_MAX_CONN
-#define BFM_MAX_CONN 64u
+/* 使う ConnectX のポートの数の上限。ConnectX-4〜7 は物理ポートごとに別の PCIe の function(PF)なので、
+ * ポート 1 つ = PF 1 つ = 装置 1 つとして扱う(PCIe・HCA・GSI をポートごとに持つ)。 */
+#ifndef BFM_MAX_PORT
+#define BFM_MAX_PORT 2u
 #endif
 
+/* 1 つのポートに張る接続の数の上限(配列の大きさ)。1 接続 = RC QP 1 本(+ CQ・UAR 1 つずつ)。
+ * 実際に張る数は g_bfm_port_conn[] で決める。 */
+#ifndef BFM_MAX_PORT_CONN
+#define BFM_MAX_PORT_CONN 16u
+#endif
+
+/* 接続の表の大きさ(全部のポートの合計。既定 2 x 16 = 32)。 */
+#define BFM_MAX_CONN (BFM_MAX_PORT * BFM_MAX_PORT_CONN)
+
 /* ---------------------------------------------------------------------
- * PCIe
+ * ポートごとの値(添字はポートの番号 0〜BFM_MAX_PORT-1)
  * ------------------------------------------------------------------- */
 
-/* 使う PCIe の function(VxWorks のポート層が設定空間を引くのに使う)。 */
-extern uint32_t g_bfm_pci_bus;
-extern uint32_t g_bfm_pci_dev;
-extern uint32_t g_bfm_pci_func;
+/* ポートに張る接続の数(0〜BFM_MAX_PORT_CONN。大きければ BFM_MAX_PORT_CONN にする)。
+ * 0 ならそのポートは使わない(PCIe も触らない)。両方のノードで同じ値にすること
+ * (接続 (ポート p, 番号 i) どうしが対になる)。 */
+extern uint32_t g_bfm_port_conn[BFM_MAX_PORT];
 
-/* PCIe の ECAM(拡張設定空間)の先頭。VxWorks のポート層はここを直接読み書きする
- * (bus << 20 | dev << 15 | func << 12 | off)。0 だと bfm_init() が断る。Linux では使わない。 */
-extern uint64_t g_bfm_pcie_ecam_base;
+/* ポートの PCIe の function(VxWorks のポート層が設定空間を引くのに使う)。 */
+extern uint32_t g_bfm_pci_bus[BFM_MAX_PORT];
+extern uint32_t g_bfm_pci_dev[BFM_MAX_PORT];
+extern uint32_t g_bfm_pci_func[BFM_MAX_PORT];
 
 /* BAR0(64bit・メモリ)に割り当てるアドレス。0 なら書き込まず、今入っている値を使う
  * (Linux はカーネルが割り当て済みなので 0)。BAR0 の大きさは装置が決める
- * (ConnectX-4〜7 は 32MiB〜。bfm_init() が大きさを測って、境界が合わないと断る)。 */
-extern uint64_t g_bfm_bar0_addr;
+ * (ConnectX-4〜7 は 32MiB〜。立ち上げのときに大きさを測って、境界が合わないと断る)。 */
+extern uint64_t g_bfm_bar0_addr[BFM_MAX_PORT];
 
 /* BAR0 全体を write-combining で張った別名の先頭(VxWorks)。BlueFlame の書き込み先。
  * 0 なら BlueFlame を使わず、ドアベル 8 バイトだけを UC の BAR0 へ書く(動くが遅い)。
  * Linux ではポート層が UAR のページだけを WC に張り替えるので使わない。 */
-extern uint64_t g_bfm_bar0_wc_va;
+extern uint64_t g_bfm_bar0_wc_va[BFM_MAX_PORT];
+
+/* Linux(VFIO)の試験環境だけで使う: ポートの PCI アドレス("0000:01:00.0")。 */
+extern const char *g_bfm_linux_pci_bdf[BFM_MAX_PORT];
+
+/* ポートの IPv4(ホスト順。0xC0A8650A = 192.168.101.10)。GID はここから作る
+ * (::ffff:a.b.c.d)。IP のスタックは持たないので、ARP には答えない。 */
+extern uint32_t g_bfm_local_ip[BFM_MAX_PORT];
+
+/* ポートの MAC。全部 0 なら NIC の固有の MAC(vport の permanent_address)を使う。 */
+extern uint8_t g_bfm_local_mac[BFM_MAX_PORT][6];
+
+/* ポートの相手(相手のノードの、同じ番号のポート)の IPv4 と MAC。
+ * **IPv4 の小さいほうのノードが掛け側(REQ を送る)、大きいほうが受け側になる**(自動で決まるので、
+ * 両方のノードで同じプログラムを動かせる)。相手の MAC が全部 0 なら自動(掛け側は REQ を同報で送り、
+ * REP に入った MAC を使う。受け側は REQ に入った MAC を使う)。同報が届かない網(L2 を越える経路など)
+ * では MAC を書く。 */
+extern uint32_t g_bfm_peer_ip[BFM_MAX_PORT];
+extern uint8_t  g_bfm_peer_mac[BFM_MAX_PORT][6];
+
+/* ---------------------------------------------------------------------
+ * PCIe(全部のポートで共通)
+ * ------------------------------------------------------------------- */
+
+/* PCIe の ECAM(拡張設定空間)の先頭。VxWorks のポート層はここを直接読み書きする
+ * (bus << 20 | dev << 15 | func << 12 | off)。0 だと立ち上げで断る。Linux では使わない。 */
+extern uint64_t g_bfm_pcie_ecam_base;
 
 /* 1 = 立ち上げの前に FLR(Function Level Reset)をかける。前回の実行で NIC が
  * 動いたまま(DMA を出したまま)のことがあるので VxWorks では 1 にしておく。
@@ -58,40 +93,34 @@ extern uint32_t g_bfm_pcie_flr;
 /* PCIe の Max Read Request Size(バイト: 128〜4096)。0 なら触らない。 */
 extern uint32_t g_bfm_pcie_mrrs;
 
-/* Linux(VFIO)の試験環境だけで使う: 装置の PCI アドレス("0000:01:00.0")。 */
-extern const char *g_bfm_linux_pci_bdf;
-
 /* ---------------------------------------------------------------------
- * メモリ(どちらも 4KiB 境界、大きさは 4KiB の倍数)
+ * メモリ(どちらも 4KiB 境界、大きさは 4KiB の倍数。全部のポートで共有)
  * ------------------------------------------------------------------- */
 
 /* ドライバが使う DMA 領域。コマンドキュー・メールボックス・FW に渡すページ・
- * EQ / CQ / QP のリング・接続ごとの中継バッファをここから静的に切り出す。
- * 足りなければ bfm_init() が必要な大きさを表示して失敗する。 */
+ * EQ / CQ / QP のリング・接続ごとの中継バッファを、ポートごとにここから静的に切り出す。
+ * 足りなければ立ち上げ(bfm_run())が必要な大きさを表示して失敗する。 */
 extern uint64_t g_bfm_dma_base;
 extern uint64_t g_bfm_dma_size;
 
 /* 相手に見せるメモリ(相手が RDMA の write / read / atomic で直接触る範囲)。
- * この範囲だけを許した MKey を作り、その rkey と先頭アドレスを接続のときに相手へ渡す。
+ * ポートごとにこの範囲だけを許した MKey を作り、その rkey と先頭アドレスを接続のときに相手へ渡す
+ * (どのポート・どの接続から来ても、触るのはこの同じメモリ)。
  * 既定は 1GiB。大きさは 64bit で扱う(MKey は PA モードなので、大きくしても NIC の資源は増えない)。
  * VxWorks では、この範囲が OS に使われない RAM であること。Linux では起動のたびにこの大きさを
  * 確保して VFIO に登録する(2MiB の hugepage が足りなければ 4KiB のページで張る)。 */
 extern uint64_t g_bfm_mr_base;
 extern uint64_t g_bfm_mr_size;
 
-/* FW(ConnectX)へ MANAGE_PAGES で渡すページ(4KiB)の上限。DMA 領域から取る。
+/* FW(ConnectX)へ MANAGE_PAGES で渡すページ(4KiB)の上限(ポートごと)。DMA 領域から取る。
  * 実測の要求量は ConnectX-4 Lx で約 2,500、ConnectX-4 で約 4,500。ConnectX-7 は
- * もっと多いはずなので余裕を持たせてある。足りなければ bfm_init() が要求量を表示する。 */
+ * もっと多いはずなので余裕を持たせてある。足りなければ立ち上げで要求量を表示する。 */
 extern uint32_t g_bfm_fw_pages_max;
 
 /* 接続ごとの中継バッファの大きさ。inline に収まらない write の送り元と、
- * 32 バイトを超える read の着地点。1 回の操作の長さの上限にもなる(超える分は分割)。 */
+ * 32 バイトを超える read の着地点。1 回の操作の長さの上限にもなる(超える分は分割)。
+ * 接続 1 本で DMA 領域を、これと T10-DIF 用の中継バッファと QP・CQ のリング(約 20KiB)だけ使う。 */
 extern uint32_t g_bfm_stage_size;
-
-/* bfm_init() で用意する接続の枠の数(1〜BFM_MAX_CONN。0 か上限より大きければ BFM_MAX_CONN)。
- * 枠ごとに DMA 領域を約 230KiB(QP・CQ のリング、中継バッファ、T10-DIF 用の中継バッファ)と
- * UAR を 1 つ使う。使うコアの数(= 同時に張る接続の数)に合わせて減らしてよい。 */
-extern uint32_t g_bfm_max_conn;
 
 /* 接続ごとの T10-DIF 用の中継バッファの大きさ(2 面に分けて交互に使う)。
  * 1 面 = この半分で、1 回の RDMA で運ぶブロック数 = 1 面 / 520(既定 128KiB なら 126 ブロック)。
@@ -99,23 +128,11 @@ extern uint32_t g_bfm_max_conn;
 extern uint32_t g_bfm_dif_buf_size;
 
 /* ---------------------------------------------------------------------
- * ネットワーク(RoCE v2、IPv4)
+ * ネットワーク(RoCE v2、IPv4。全部のポートで共通)
  * ------------------------------------------------------------------- */
 
-/* 自分の IPv4(ホスト順。0xC0A8650A = 192.168.101.10)。GID はここから作る
- * (::ffff:a.b.c.d)。IP のスタックは持たないので、ARP には答えない。 */
-extern uint32_t g_bfm_local_ip;
-
-/* 自分の MAC。全部 0 なら NIC の固有の MAC(vport の permanent_address)を使う。 */
-extern uint8_t g_bfm_local_mac[6];
-
-/* 既定の相手(bfm_connect() の peer_ip が 0 / peer_mac が NULL のときに使う)。
- * 相手の MAC が全部 0 なら自動(REQ を同報で送り、REP に入った MAC を使う)。
- * 同報が届かない網(L2 を越える経路など)では相手の MAC を書く。受け側は REQ に入った MAC を使う。 */
-extern uint32_t g_bfm_peer_ip;
-extern uint8_t  g_bfm_peer_mac[6];
-
-/* 接続の番号(待ち受けを見分ける番号。bfm_connect() と bfm_accept() で同じ値にする)。 */
+/* 接続の番号の起点(待ち受けを見分ける番号)。接続 (ポート p, 番号 i) は g_bfm_cm_port + i を使う。
+ * 両方のノードで同じ値にすること。 */
 extern uint16_t g_bfm_cm_port;
 
 /* RoCE の経路 MTU(IB の符号: 1=256 2=512 3=1024 4=2048 5=4096)。
@@ -129,6 +146,10 @@ extern uint16_t g_bfm_port_mtu;
 
 /* リンクが上がるのを待つ時間(ミリ秒)。 */
 extern uint32_t g_bfm_link_wait_ms;
+
+/* 掛け側が、REP が来なければ REQ を送り直す間隔(ミリ秒)。相手のノードが立ち上がるまで
+ * 送り直し続ける(時間切れにしない)。 */
+extern uint32_t g_bfm_req_retry_ms;
 
 /* ---------------------------------------------------------------------
  * 動き

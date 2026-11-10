@@ -182,7 +182,7 @@
       },
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS` なら同じ `j` と引数で呼び直す)。",
       "pre": "`mlx5_qp_init2rtr_rc()` が成功していること。HCA の能力(`log_max_ra_req_qp` / `log_max_ra_res_qp`)を読んであること。",
-      "notes": "* `amode` を付けて断られたら、呼び出し側が `amode` = 0 でもう一度呼ぶ(`conn_step()`)。ここではやり直さない。\n* `c->max_rd` は呼ぶたびに計算し直して書く。",
+      "notes": "* `amode` を付けて断られたら、呼び出し側が `amode` = 0 でもう一度呼ぶ(`bfm_cm_conn_step()`)。ここではやり直さない。\n* `c->max_rd` は呼ぶたびに計算し直して書く。",
       "flow": [
         {"do": "sra_cap = log_max_ra_req_qp と 4 の小さいほう"},
         {"if": "c->peer_rr != 0 ?", "then": [

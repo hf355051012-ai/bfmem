@@ -1,14 +1,14 @@
 {
   "file": "src/bfm_core.c",
-  "summary": "ライブラリの入口。設定の検査、移植層・PCIe・HCA・T10-DIF・接続管理の順の立ち上げ(`bfm_init()`)、その逆順の停止(`bfm_shutdown()`)、非同期の処理(`bfm_poll()`)を持つ。\n\n立ち上げと停止は状態機械で、待つところ(FLR の待ち、FW のコマンドの完了など)では `BFM_INPROGRESS` を返す。呼び出し側は `BFM_INPROGRESS` でなくなるまで同じ関数を呼び続ける。全体の状態を静的変数 `s_phase` で持つ。\n\n* 立ち上げ: `I_IDLE` → `I_PCI` → `I_MAP` → `I_HCA` → `I_DIF` → `I_CM` → `I_READY`\n* 停止: `I_STOP`(その中で `S_CM` → `S_CMD` → `S_TEARDOWN` → `S_BUS` → `S_DONE`。`s_stop` で持つ)→ `I_IDLE`\n\n立ち上げの途中で失敗したら、停止の手順で取ったものを返してから失敗を返す。接続管理・FW のコマンド・EQ の処理を 1 つずつにする鍵 `g_bfm_ctl_lock` もここに置く。",
+  "summary": "ライブラリの入口。代表 API `bfm_run()`、ポートの立ち上げの状態機械 `bfm_dev_step()`、停止 `bfm_shutdown()` を持つ。接続をまたぐ状態(全部のポートの GSI・接続の枠・FW のコマンド・EQ・DMA 領域の切り出し)を 1 つずつにする鍵 `g_bfm_ctl_lock` もここに置く。\n\n`bfm_run()` は、どのコアから何本同時に呼んでもよい。呼ぶたびに待たずに少しずつ進める。\n\n. 最初の 1 回(`g_bfm_ctl_lock` を取れたコア): 設定を確かめ、装置(ポートごとの `g_bfm_dev[]`)と接続の表(`g_bfm_conn[]`)を作り、ポート層を開く(`run_start()`)。\n. 接続の表を回り、行の鍵(`c->lock`)と `g_bfm_ctl_lock` の両方を取れた行について、その行の状態機械を 1 つ進める(`bfm_cm_conn_step()`)。取れなければ待たずに次の行へ行く。回り始める行はコアごとにずらす。\n. 立ち上がったポートの EQ(FW のページ要求・エラー)と GSI(相手からの BYE など)を処理する。\n. 表の全部の行の状態をまとめて返す。\n\nポートの立ち上げは、そのポートの行が `K_PORT` の間に `bfm_dev_step()` で進める(その時に鍵を取ったコアが 1 つ手順を進める)。ポートの状態は `bfm_dev_t` の `phase` で持つ。\n\n* 立ち上げ: `D_IDLE` → `D_PCI` → `D_MAP` → `D_HCA` → `D_DIF` → `D_CM` → `D_READY`\n* 失敗: `D_STOP`(その中で `S_CM` → `S_CMD` → `S_TEARDOWN` → `S_BUS` → `S_DONE`。`bfm_dev_t` の `stop` で持つ)→ `D_FAILED`\n* 停止: `D_STOP` → `D_IDLE`(`bfm_shutdown()`)\n\n全体の状態は静的変数 `s_run`(`R_IDLE` / `R_RUN` / `R_STOP`。acquire / release で読み書きする)で持つ。待つところでは `BFM_INPROGRESS` を返し、回って待たない(`bfm_shutdown()` の鍵だけは回って取る)。",
   "functions": [
     {
       "func": "check_config",
-      "summary": "立ち上げの前に設定の変数を検査する。\n\n* DMA 領域と公開メモリの先頭・大きさが 4KiB の境界・倍数で、大きさが 0 でないこと\n* DMA 領域と公開メモリが重ならないこと\n* `g_bfm_local_ip` が 0 でないこと\n\nあわせて `g_bfm_stage_size` を 4KiB 以上に、`g_bfm_dif_buf_size` を 8KiB(2 面 × 4KiB)以上に、`g_bfm_signal_every` を 1 以上に、`g_bfm_max_conn` を 1〜`BFM_MAX_CONN` に直す(0 か上限より大きければ `BFM_MAX_CONN`)。",
+      "summary": "立ち上げの前に設定の変数を検査する。\n\n* DMA 領域と公開メモリの先頭・大きさが 4KiB の境界・倍数で、大きさが 0 でないこと\n* DMA 領域と公開メモリが重ならないこと\n* 使うポート(`g_bfm_port_conn[p]` が 0 でない)ごとに、`g_bfm_local_ip[p]` と `g_bfm_peer_ip[p]` が 0 でない別の値であること\n* 使うポートが 1 つ以上あること\n\nあわせて `g_bfm_port_conn[p]` を `BFM_MAX_PORT_CONN` 以下に、`g_bfm_stage_size` を 4KiB 以上に、`g_bfm_dif_buf_size` を 8KiB(2 面 × 4KiB)以上に、`g_bfm_signal_every` と `g_bfm_req_retry_ms` を 1 以上に直す。",
       "args": {},
       "ret": "`BFM_OK`: 使える設定。`BFM_E_PARAM`: 使えない設定(理由を表示する)。",
-      "pre": "特になし。",
-      "notes": "`g_bfm_stage_size`・`g_bfm_dif_buf_size`・`g_bfm_signal_every`・`g_bfm_max_conn` は、範囲外ならこの関数が書き換える(呼び出し側が入れた値が変わる)。",
+      "pre": "特になし(`run_start()` が `g_bfm_ctl_lock` の中で呼ぶ)。",
+      "notes": "* `g_bfm_port_conn[]`・`g_bfm_stage_size`・`g_bfm_dif_buf_size`・`g_bfm_signal_every`・`g_bfm_req_retry_ms` は、範囲外ならこの関数が書き換える(呼び出し側が入れた値が変わる)。\n* IPv4 の小さいほうのノードが掛け側になるので、ポートごとに自分と相手の IPv4 が同じではいけない。",
       "flow": [
         {"if": "DMA 領域・公開メモリの先頭と大きさが 4KiB の境界・倍数でない、または大きさが 0 ?", "then": [
           {"do": "BFM_LOG で理由を表示"},
@@ -18,63 +18,103 @@
           {"do": "BFM_LOG で理由を表示"},
           {"return": "BFM_E_PARAM"}
         ]},
-        {"if": "g_bfm_local_ip == 0 ?", "then": [
-          {"do": "BFM_LOG で理由を表示"},
+        {"do": "used = 0"},
+        {"while": "p < BFM_MAX_PORT ?(p は 0 から)", "body": [
+          {"if": "g_bfm_port_conn[p] == 0 ?", "then": [{"continue": true}]},
+          {"do": "used = 1"},
+          {"if": "g_bfm_port_conn[p] > BFM_MAX_PORT_CONN ?", "then": [{"do": "g_bfm_port_conn[p] = BFM_MAX_PORT_CONN"}]},
+          {"if": "g_bfm_local_ip[p] == 0 または g_bfm_peer_ip[p] == 0 または両者が等しい?", "then": [
+            {"do": "BFM_LOG で理由を表示"},
+            {"return": "BFM_E_PARAM"}
+          ]}
+        ]},
+        {"if": "!used ?", "then": [
+          {"do": "BFM_LOG で「使うポートが無い」を表示"},
           {"return": "BFM_E_PARAM"}
         ]},
         {"if": "g_bfm_stage_size < 4KiB ?", "then": [{"do": "g_bfm_stage_size = 4KiB"}]},
         {"if": "g_bfm_dif_buf_size < 2 × 4KiB ?", "then": [{"do": "g_bfm_dif_buf_size = 2 × 4KiB"}]},
         {"if": "g_bfm_signal_every == 0 ?", "then": [{"do": "g_bfm_signal_every = 1"}]},
-        {"if": "g_bfm_max_conn == 0 || g_bfm_max_conn > BFM_MAX_CONN ?", "then": [{"do": "g_bfm_max_conn = BFM_MAX_CONN"}]},
+        {"if": "g_bfm_req_retry_ms == 0 ?", "then": [{"do": "g_bfm_req_retry_ms = 1"}]},
         {"return": "BFM_OK"}
       ]
     },
     {
-      "func": "stop_begin",
-      "summary": "停止の手順を始める。全体の状態を `I_STOP` に、停止の手順を最初(`S_CM`)にし、止め終えたときに `bfm_init()` が返す値 `s_stop_rc` に `rc` を入れる。",
-      "args": {"rc": "止め終えたときに `bfm_init()` が返す値(立ち上げの失敗の理由)。`bfm_shutdown()` からは `BFM_E_STATE`"},
-      "ret": "なし",
-      "pre": "特になし。",
-      "notes": "手順は進めない(`stop_step()` が進める)。",
+      "func": "run_start",
+      "summary": "最初の `bfm_run()` で 1 回だけ行う準備。設定を検査し(`check_config()`)、装置 `g_bfm_dev[]` を 0 で埋めてポートごとに番号・使うか(`g_bfm_port_conn[p]` が 0 でない)・接続の数・掛け側か(自分の IPv4 < 相手の IPv4)を入れて `D_IDLE` にし、接続の表を作る(`bfm_cm_table_init()`)。続けてポート層を開き(`bfm_port_init()`。DMA 領域と公開メモリを使えるようにする)、DMA 領域の切り出しを最初に戻し(`bfm_mem_reset()`)、使うポートごとに接続の数・役割・IPv4 を表示する。",
+      "args": {},
+      "ret": "`BFM_OK`: 準備できた。`BFM_E_PARAM`: 設定が不正(`check_config()`)。`BFM_E_HW`: ポート層の初期化に失敗。",
+      "pre": "`g_bfm_ctl_lock` を持っていること。全体の状態が `R_IDLE` であること(`bfm_run()` が確かめてから呼ぶ)。",
+      "notes": "* 失敗しても後始末はしない(全体の状態は `R_IDLE` のままで、次の `bfm_run()` が最初からやり直す)。\n* 接続の表は `bfm_port_init()` より前に作る(装置の `port`・`used`・`nconn` を先に入れておく)。",
       "flow": [
-        {"do": "s_phase = I_STOP、s_stop = S_CM、s_stop_rc = rc"}
+        {"call": "rc = check_config() を呼ぶ"},
+        {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+        {"do": "g_bfm_dev を 0 で埋める"},
+        {"while": "p < BFM_MAX_PORT ?(p は 0 から)", "body": [
+          {"do": "d = &g_bfm_dev[p]。d->port = p、d->used = (g_bfm_port_conn[p] != 0)、d->nconn = used ならその数、そうでなければ 0"},
+          {"do": "d->initiator = (g_bfm_local_ip[p] < g_bfm_peer_ip[p])、d->phase = D_IDLE"}
+        ]},
+        {"call": "bfm_cm_table_init() を呼ぶ"},
+        {"call": "bfm_port_init() を呼ぶ"},
+        {"if": "bfm_port_init() != 0 ?", "then": [
+          {"do": "BFM_LOG で「ポート層の初期化に失敗」を表示"},
+          {"return": "BFM_E_HW"}
+        ]},
+        {"call": "bfm_mem_reset() を呼ぶ"},
+        {"while": "p < BFM_MAX_PORT ?(p は 0 から)", "body": [
+          {"if": "!g_bfm_dev[p].used ?", "then": [{"continue": true}]},
+          {"do": "BFM_LOG で接続の数・掛け側 / 受け側・自分と相手の IPv4 を表示"}
+        ]},
+        {"return": "BFM_OK"}
       ]
     },
     {
-      "func": "stop_step",
-      "summary": "停止の手順を、待つところまで進める。接続を畳み、GSI の送信を待ち、WC の窓を返す(`bfm_cm_fini_step()`)→ 出したままの FW のコマンドの完了を待って捨てる(`mlx5_cmd_drain()`)→ FW を止める(`mlx5_hca_teardown()`)→ Bus Master を落として BAR0 を外し、移植層を閉じる、の順に行う。",
-      "args": {},
+      "func": "dev_stop_begin",
+      "summary": "ポート `d` を止める手順を始める。`d->phase` を `D_STOP` に、止める手順 `d->stop` を最初(`S_CM`)にし、止め終えたときの結果 `d->stop_rc` に `rc` を入れる。",
+      "args": {"d": "止めるポートの装置", "rc": "止め終えたときの結果(立ち上げの失敗の理由。`bfm_shutdown()` からは `BFM_OK`)"},
+      "ret": "なし",
+      "pre": "`g_bfm_ctl_lock` を持っていること。",
+      "notes": "手順は進めない(`dev_stop_step()` が進める)。",
+      "flow": [
+        {"do": "d->phase = D_STOP、d->stop = S_CM、d->stop_rc = rc"}
+      ]
+    },
+    {
+      "func": "dev_stop_step",
+      "summary": "ポート `d` を止める手順を、待つところまで進める。接続を畳み、GSI の送信を待ち、WC の窓を返す(`bfm_cm_fini_step()`)→ 出したままの FW のコマンドの完了を待って捨てる(`mlx5_cmd_drain()`)→ FW を止める(`mlx5_hca_teardown()`)→ Bus Master を落として BAR0 を外す、の順に行う。",
+      "args": {"d": "止めるポートの装置"},
       "ret": "`BFM_INPROGRESS`: 途中(もう一度呼ぶと先へ進む)。`BFM_OK`: 済んだ。",
-      "pre": "`stop_begin()` で手順を始めてあること。",
-      "notes": "* 停止の手順は `s_stop` で持つ(`S_CM` → `S_CMD` → `S_TEARDOWN` → `S_BUS` → `S_DONE`)。済んだ後に呼んでも `BFM_OK` を返す。\n* コマンドキューが無い(`g_bfm.cmdq` が NULL。HCA の立ち上げの前に止めた)ときは `S_CMD` で待たない。\n* Bus Master を落としてから BAR0 を外すので、この後 NIC はメモリへ DMA しない。BAR0 を張っていなければ Bus Master も触らない。\n* 移植層は開いていたとき(`s_port_ok`)だけ閉じる。",
+      "pre": "`dev_stop_begin()` で手順を始めてあること。`g_bfm_ctl_lock` を持っていること。",
+      "notes": "* 止める手順は `d->stop` で持つ(`S_CM` → `S_CMD` → `S_TEARDOWN` → `S_BUS` → `S_DONE`)。済んだ後に呼んでも `BFM_OK` を返す。\n* コマンドキューが無い(`d->cmdq` が NULL。HCA の立ち上げの前に止めた)ときは `S_CMD` で待たない。\n* Bus Master を落としてから BAR0 を外すので、この後 NIC はメモリへ DMA しない。Bus Master は PCIe の設定が済んでいれば(BAR0 を張れなかったときも)落とす。\n* ポート層は閉じない(全部のポートで 1 つなので、`bfm_shutdown()` が最後に閉じる)。",
       "flow": [
         {"loop": "for (;;)", "body": [
-          {"switch": "s_stop", "cases": [
+          {"switch": "d->stop", "cases": [
             {"case": "S_CM", "body": [
-              {"call": "bfm_cm_fini_step() を呼ぶ"},
+              {"call": "bfm_cm_fini_step(d) を呼ぶ"},
               {"if": "bfm_cm_fini_step() == BFM_INPROGRESS ?", "then": [{"return": "BFM_INPROGRESS"}]},
-              {"do": "s_stop = S_CMD"}
+              {"do": "d->stop = S_CMD"}
             ]},
             {"case": "S_CMD", "body": [
-              {"if": "g_bfm.cmdq != NULL ?", "then": [
-                {"call": "mlx5_cmd_drain(&g_bfm) を呼ぶ"},
+              {"if": "d->cmdq != NULL ?", "then": [
+                {"call": "mlx5_cmd_drain(d) を呼ぶ"},
                 {"if": "mlx5_cmd_drain() == BFM_INPROGRESS ?", "then": [{"return": "BFM_INPROGRESS"}]}
               ]},
-              {"do": "s_stop = S_TEARDOWN"}
+              {"do": "d->stop = S_TEARDOWN"}
             ]},
             {"case": "S_TEARDOWN", "body": [
-              {"call": "mlx5_hca_teardown(&g_bfm) を呼ぶ"},
+              {"call": "mlx5_hca_teardown(d) を呼ぶ"},
               {"if": "mlx5_hca_teardown() == BFM_INPROGRESS ?", "then": [{"return": "BFM_INPROGRESS"}]},
-              {"do": "s_stop = S_BUS"}
+              {"do": "d->stop = S_BUS"}
             ]},
             {"case": "S_BUS", "body": [
-              {"if": "g_bfm.bar0 != NULL ?", "then": [
-                {"call": "bfm_pci_bus_master(0) を呼ぶ"},
-                {"call": "bfm_port_bar0_unmap() を呼ぶ"},
-                {"do": "g_bfm.bar0 = NULL"}
+              {"if": "d->bar0_size != 0 ?", "then": [
+                {"call": "bfm_pci_bus_master(d, 0) を呼ぶ"}
               ]},
-              {"if": "s_port_ok ?", "then": [{"call": "bfm_port_fini() を呼ぶ"}]},
-              {"do": "s_port_ok = 0、s_stop = S_DONE"}
+              {"if": "d->bar0 != NULL ?", "then": [
+                {"call": "bfm_port_bar0_unmap(d->port) を呼ぶ"},
+                {"do": "d->bar0 = NULL"}
+              ]},
+              {"do": "d->stop = S_DONE"}
             ]},
             {"default": true, "body": [
               {"return": "BFM_OK"}
@@ -83,12 +123,12 @@
         ]}
       ],
       "states": {
-        "start": "stop_begin()(s_stop = S_CM)",
+        "start": "dev_stop_begin()(d->stop = S_CM)",
         "list": [
           {"id": "S_CM", "text": "接続を畳み、GSI の送信を待ち、WC の窓を返す(bfm_cm_fini_step())", "wait": "接続の畳み(BYE・QP と CQ の破棄のコマンド)と GSI の送信"},
           {"id": "S_CMD", "text": "出したままのコマンドの完了を待って捨てる(mlx5_cmd_drain()。コマンドキューが無ければ待たない)", "wait": "FW がコマンドを返す"},
           {"id": "S_TEARDOWN", "text": "FW を止める(mlx5_hca_teardown()。TEARDOWN_HCA)", "wait": "TEARDOWN_HCA の完了"},
-          {"id": "S_BUS", "text": "Bus Master を落とし、BAR0 を外し、移植層を閉じる"},
+          {"id": "S_BUS", "text": "Bus Master を落とし(PCIe の設定が済んでいれば)、BAR0 を外す(張っていれば)"},
           {"id": "S_DONE", "text": "済んだ"}
         ],
         "end": "BFM_OK を返す",
@@ -96,64 +136,59 @@
       }
     },
     {
-      "func": "bfm_init",
-      "summary": "ライブラリを立ち上げる(待つところでは `BFM_INPROGRESS` を返す状態機械)。最初の呼び出し(`I_IDLE`)で設定の検査(`check_config()`)、`g_bfm` などの初期化、移植層の初期化(DMA 領域と公開メモリを使えるようにする)、各層の状態を最初に戻す(`bfm_mem_reset()`・`bfm_pci_setup_reset()`・`mlx5_hca_init_reset()`・`bfm_dif_init_reset()`・`bfm_cm_reset()`)を行い、その後は PCIe の設定(`bfm_pci_setup_step()`)→ BAR0 を張る → HCA の立ち上げ(`mlx5_hca_init_step()`)→ T10-DIF の準備(`bfm_dif_init_step()`)→ 接続管理の準備(GSI と接続の枠。`bfm_cm_init_step()`)の順に進め、使った DMA 領域などを表示して `I_READY` にする。",
-      "args": {},
-      "ret": "`BFM_OK`: 立ち上がった(既に立ち上がっていたときも)。`BFM_INPROGRESS`: 途中(もう一度呼ぶと先へ進む。失敗の後始末の途中も)。`BFM_E_PARAM`: 設定が不正。`BFM_E_HW`: 移植層・PCIe・BAR0 の失敗。そのほか `mlx5_hca_init_step()` / `bfm_cm_init_step()` の戻り値(`BFM_E_HW` / `BFM_E_NOMEM` / `BFM_E_TIMEOUT` など)。`BFM_E_STATE`: `bfm_shutdown()` で止めている途中に呼んだ(止め終えたとき)、または状態が不正。",
-      "pre": "`include/bfm_config.h` の変数を設定し終えていること。ほかのコアが bfmem を使っていないときに、1 つのコアから呼ぶこと。",
-      "notes": "* 全体の状態は `s_phase` で持つ(状態遷移図)。`BFM_OK` か失敗が返るまで呼び続ける。済んだ後に呼んでも `BFM_OK` を返す。\n* `I_PCI`〜`I_CM` で失敗したら、`stop_begin(rc)` で停止の手順を始め、取ったものを返してから(後始末が待つなら `BFM_INPROGRESS` を返し、次の呼び出しで続ける)失敗の理由を返し、`I_IDLE` に戻る。次の呼び出しは最初からやり直す。\n* 設定の検査と移植層の初期化(`I_IDLE` の中)の失敗は、後始末をせずにそのまま返す(`I_IDLE` のまま)。\n* `I_IDLE` で `g_bfm` と `g_bfm_conn` を 0 で初期化し、用意する接続の枠の数 `g_bfm.nconn` を `g_bfm_max_conn` にし、`g_bfm_ctl_lock` を空ける。\n* `bfm_shutdown()` が止めている途中(`I_STOP`)に呼ぶと、停止の手順を進め、止め終えたら `s_stop_rc`(`BFM_E_STATE`)を返す。",
+      "func": "bfm_dev_step",
+      "summary": "ポート `d` の立ち上げを、待つところまで進める(待つところでは `BFM_INPROGRESS` を返す状態機械)。`D_IDLE` では、そのポートの各層の状態を最初に戻し(`bfm_pci_setup_reset()`・`mlx5_hca_init_reset()`・`bfm_dif_init_reset()`・`bfm_cm_reset()`)、その後は PCIe の設定(`bfm_pci_setup_step()`)→ BAR0 を張る(`bfm_port_bar0_map()`)→ HCA の立ち上げ(`mlx5_hca_init_step()`。公開メモリの MKey を含む)→ T10-DIF の準備(`bfm_dif_init_step()`)→ GSI と接続の枠の用意(`bfm_cm_init_step()`)の順に進め、準備完了(使った DMA 領域・接続の数・inline の上限・BlueFlame の窓)を表示して `D_READY` にする。途中で失敗したら、取ったものを返す手順(`D_STOP`。`dev_stop_step()`)を進めてから `D_FAILED` にする。",
+      "args": {"d": "立ち上げるポートの装置"},
+      "ret": "`BFM_OK`: 使える(`D_READY`)。`BFM_INPROGRESS`: 途中(もう一度呼ぶと先へ進む。失敗の後始末の途中も)。負: 失敗した(その理由。`D_FAILED` の後は呼ぶたびに同じ値)。`BFM_E_HW`: PCIe・BAR0 の失敗。そのほか `mlx5_hca_init_step()` / `bfm_cm_init_step()` の戻り値(`BFM_E_NOMEM` / `BFM_E_TIMEOUT` など)。`BFM_E_STATE`: 状態が不正。",
+      "pre": "`g_bfm_ctl_lock` を持っていること。`run_start()` の後であること(`bfm_cm_conn_step()` の `K_PORT` から呼ばれる)。",
+      "notes": "* ポートの状態は `d->phase` で持つ(状態遷移図)。同じポートの接続の行が全部 `K_PORT` から呼ぶので、どの行(どのコア)からでも同じ立ち上げが進む。\n* 1 回の呼び出しで、待つところまで(または済むまで・失敗するまで)いくつも手順を進める。\n* `D_FAILED` は `bfm_shutdown()` まで変わらない(`d->fail_rc` を返し続ける)。\n* 失敗の後始末が待つなら `D_STOP` のまま `BFM_INPROGRESS` を返し、次の呼び出しで続け、済んだら `d->stop_rc` を `d->fail_rc` にして返す。\n* DMA 領域の切り出し(`bfm_mem_reset()`)は全部のポートで 1 つなので、ここでは戻さない(`run_start()` が戻す)。",
       "flow": [
-        {"if": "s_phase == I_READY ?", "then": [{"return": "BFM_OK"}]},
-        {"if": "s_phase == I_STOP ?", "then": [
-          {"call": "stop_step() を呼ぶ"},
-          {"if": "stop_step() == BFM_INPROGRESS ?", "then": [{"return": "BFM_INPROGRESS"}]},
-          {"do": "s_phase = I_IDLE"},
-          {"return": "s_stop_rc"}
-        ]},
-        {"if": "s_phase == I_IDLE ?", "then": [
-          {"call": "rc = check_config() を呼ぶ"},
-          {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-          {"do": "g_bfm と g_bfm_conn を 0 で埋める。g_bfm.nconn = g_bfm_max_conn"},
-          {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
-          {"call": "bfm_port_init() を呼ぶ"},
-          {"if": "bfm_port_init() != 0 ?", "then": [
-            {"do": "BFM_LOG で失敗を表示"},
-            {"return": "BFM_E_HW"}
+        {"do": "rc = BFM_OK"},
+        {"switch": "d->phase", "cases": [
+          {"case": "D_READY", "body": [{"return": "BFM_OK"}]},
+          {"case": "D_FAILED", "body": [{"return": "d->fail_rc"}]},
+          {"case": "D_STOP", "body": [
+            {"call": "dev_stop_step(d) を呼ぶ"},
+            {"if": "dev_stop_step() == BFM_INPROGRESS ?", "then": [{"return": "BFM_INPROGRESS"}]},
+            {"do": "d->phase = D_FAILED、d->fail_rc = d->stop_rc"},
+            {"return": "d->fail_rc"}
           ]},
-          {"do": "s_port_ok = 1"},
-          {"call": "bfm_mem_reset()・bfm_pci_setup_reset()・mlx5_hca_init_reset()・bfm_dif_init_reset()・bfm_cm_reset() を呼ぶ"},
-          {"do": "s_phase = I_PCI"}
+          {"case": "D_IDLE", "body": [
+            {"call": "bfm_pci_setup_reset(d)・mlx5_hca_init_reset(d)・bfm_dif_init_reset(d)・bfm_cm_reset(d) を呼ぶ"},
+            {"do": "BFM_DBG で「立ち上げを始める」を表示"},
+            {"do": "d->phase = D_PCI"}
+          ]}
         ]},
         {"loop": "for (;;)", "body": [
-          {"switch": "s_phase", "cases": [
-            {"case": "I_PCI", "body": [
-              {"call": "rc = bfm_pci_setup_step(&g_bfm) を呼ぶ"},
-              {"if": "rc == BFM_OK ?", "then": [{"do": "s_phase = I_MAP"}]}
+          {"switch": "d->phase", "cases": [
+            {"case": "D_PCI", "body": [
+              {"call": "rc = bfm_pci_setup_step(d) を呼ぶ"},
+              {"if": "rc == BFM_OK ?", "then": [{"do": "d->phase = D_MAP"}]}
             ]},
-            {"case": "I_MAP", "body": [
-              {"call": "g_bfm.bar0 = bfm_port_bar0_map(g_bfm.bar0_phys, g_bfm.bar0_size) を呼ぶ"},
-              {"if": "g_bfm.bar0 == NULL ?", "then": [
-                {"do": "BFM_LOG で失敗を表示"},
+            {"case": "D_MAP", "body": [
+              {"call": "d->bar0 = bfm_port_bar0_map(d->port, d->bar0_phys, d->bar0_size) を呼ぶ"},
+              {"if": "d->bar0 == NULL ?", "then": [
+                {"do": "BFM_LOG で「BAR0 を張れない」を表示"},
                 {"do": "rc = BFM_E_HW"}
               ], "else": [
-                {"do": "s_phase = I_HCA"}
+                {"do": "d->phase = D_HCA"}
               ]}
             ]},
-            {"case": "I_HCA", "body": [
-              {"call": "rc = mlx5_hca_init_step(&g_bfm) を呼ぶ"},
-              {"if": "rc == BFM_OK ?", "then": [{"do": "s_phase = I_DIF"}]}
+            {"case": "D_HCA", "body": [
+              {"call": "rc = mlx5_hca_init_step(d) を呼ぶ"},
+              {"if": "rc == BFM_OK ?", "then": [{"do": "d->phase = D_DIF"}]}
             ]},
-            {"case": "I_DIF", "body": [
-              {"call": "rc = bfm_dif_init_step() を呼ぶ"},
-              {"if": "rc == BFM_OK ?", "then": [{"do": "s_phase = I_CM"}]}
+            {"case": "D_DIF", "body": [
+              {"call": "rc = bfm_dif_init_step(d) を呼ぶ"},
+              {"if": "rc == BFM_OK ?", "then": [{"do": "d->phase = D_CM"}]}
             ]},
-            {"case": "I_CM", "body": [
-              {"call": "rc = bfm_cm_init_step() を呼ぶ"},
+            {"case": "D_CM", "body": [
+              {"call": "rc = bfm_cm_init_step(d) を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [
                 {"do": "switch を抜ける(break)"}
               ], "else": [
-                {"call": "bfm_mem_used() / bfm_inline_max() で使った量・接続の枠の数などを BFM_LOG で表示"},
-                {"do": "s_phase = I_READY"},
+                {"call": "bfm_mem_used() / bfm_inline_max() で使った量・接続の数などを BFM_LOG で表示"},
+                {"do": "d->phase = D_READY"},
                 {"return": "BFM_OK"}
               ]}
             ]},
@@ -163,66 +198,124 @@
           ]},
           {"if": "rc == BFM_INPROGRESS ?", "then": [{"return": "BFM_INPROGRESS"}]},
           {"if": "rc != BFM_OK ?", "then": [
-            {"call": "stop_begin(rc) を呼ぶ"},
-            {"call": "stop_step() を呼ぶ"},
-            {"if": "stop_step() == BFM_INPROGRESS ?", "then": [{"return": "BFM_INPROGRESS"}]},
-            {"do": "s_phase = I_IDLE"},
+            {"do": "BFM_LOG で「立ち上げに失敗。後始末をする」を表示"},
+            {"call": "dev_stop_begin(d, rc) を呼ぶ"},
+            {"call": "dev_stop_step(d) を呼ぶ"},
+            {"if": "dev_stop_step() == BFM_INPROGRESS ?", "then": [{"return": "BFM_INPROGRESS"}]},
+            {"do": "d->phase = D_FAILED、d->fail_rc = rc"},
             {"return": "rc"}
           ]}
         ]}
       ],
       "states": {
-        "start": "最初の呼び出し(s_phase = I_IDLE)",
+        "start": "run_start() の後(d->phase = D_IDLE)。接続の行の K_PORT から呼ばれる",
         "list": [
-          {"id": "I_IDLE", "text": "設定の検査(check_config())、g_bfm などの初期化、移植層の初期化(bfm_port_init())、各層の状態を最初に戻す(*_reset())"},
-          {"id": "I_PCI", "text": "PCIe の設定(bfm_pci_setup_step())", "wait": "FLR(保留中の DMA・100ms・設定空間が読めるまで)",
-           "next": [{"to": "I_MAP", "label": "BFM_OK"}, {"to": "I_STOP", "label": "失敗"}]},
-          {"id": "I_MAP", "text": "BAR0 を張る(bfm_port_bar0_map())",
-           "next": [{"to": "I_HCA", "label": "張れた"}, {"to": "I_STOP", "label": "張れない(BFM_E_HW)"}]},
-          {"id": "I_HCA", "text": "HCA の立ち上げ(mlx5_hca_init_step())", "wait": "FW のコマンドの完了",
-           "next": [{"to": "I_DIF", "label": "BFM_OK"}, {"to": "I_STOP", "label": "失敗"}]},
-          {"id": "I_DIF", "text": "T10-DIF の準備(bfm_dif_init_step()。失敗は返さない)", "wait": "FW のコマンドの完了(PSV・署名つき MKey)"},
-          {"id": "I_CM", "text": "GSI と接続の枠の用意(bfm_cm_init_step())", "wait": "FW のコマンドの完了",
-           "next": [{"to": "I_READY", "label": "BFM_OK(準備完了を表示)"}, {"to": "I_STOP", "label": "失敗"}]},
-          {"id": "I_READY", "text": "使える(bfm_init() は何もせず BFM_OK を返す)",
-           "next": [{"to": "END", "label": "BFM_OK"}, {"to": "I_STOP", "label": "bfm_shutdown()"}]},
-          {"id": "I_STOP", "text": "停止の手順(stop_step())。失敗なら stop_begin(rc)、bfm_shutdown() なら stop_begin(BFM_E_STATE) で始める", "wait": "接続の畳み・コマンドの完了・TEARDOWN_HCA",
-           "next": [{"to": "I_IDLE", "label": "止め終えた(bfm_init() は s_stop_rc を返す)"}]}
+          {"id": "D_IDLE", "text": "ポートの各層の状態を最初に戻す(bfm_pci_setup_reset()・mlx5_hca_init_reset()・bfm_dif_init_reset()・bfm_cm_reset())"},
+          {"id": "D_PCI", "text": "PCIe の設定(bfm_pci_setup_step())", "wait": "FLR(保留中の DMA・100ms・設定空間が読めるまで)",
+           "next": [{"to": "D_MAP", "label": "BFM_OK"}, {"to": "D_STOP", "label": "失敗"}]},
+          {"id": "D_MAP", "text": "BAR0 を張る(bfm_port_bar0_map())",
+           "next": [{"to": "D_HCA", "label": "張れた"}, {"to": "D_STOP", "label": "張れない(BFM_E_HW)"}]},
+          {"id": "D_HCA", "text": "HCA の立ち上げ(mlx5_hca_init_step()。公開メモリの MKey を含む)", "wait": "FW のコマンドの完了",
+           "next": [{"to": "D_DIF", "label": "BFM_OK"}, {"to": "D_STOP", "label": "失敗"}]},
+          {"id": "D_DIF", "text": "T10-DIF の準備(bfm_dif_init_step())", "wait": "FW のコマンドの完了(PSV・署名つき MKey)",
+           "next": [{"to": "D_CM", "label": "BFM_OK"}, {"to": "D_STOP", "label": "失敗"}]},
+          {"id": "D_CM", "text": "GSI と接続の枠の用意(bfm_cm_init_step())", "wait": "FW のコマンドの完了",
+           "next": [{"to": "D_READY", "label": "BFM_OK(準備完了を表示)"}, {"to": "D_STOP", "label": "失敗"}]},
+          {"id": "D_READY", "text": "使える(呼ぶと BFM_OK を返す)",
+           "next": [{"to": "END", "label": "BFM_OK"}]},
+          {"id": "D_STOP", "text": "取ったものを返す(dev_stop_begin(d, rc) で始め、dev_stop_step() で進める)", "wait": "接続の畳み・コマンドの完了・TEARDOWN_HCA",
+           "next": [{"to": "D_FAILED", "label": "止め終えた"}]},
+          {"id": "D_FAILED", "text": "失敗した(呼ぶたびに d->fail_rc を返す。bfm_shutdown() の後にやり直す)"}
         ],
         "end": "BFM_OK を返す",
-        "note": "待つ状態では BFM_INPROGRESS を返して留まる。I_IDLE の中の失敗(設定の検査・移植層の初期化)は I_IDLE のまま失敗を返す。bfm_shutdown() は I_IDLE 以外のどの状態からも I_STOP へ移す(図は I_READY からだけ描く)。"
+        "note": "待つ状態では BFM_INPROGRESS を返して留まる。bfm_shutdown() は D_IDLE・D_FAILED 以外のどの状態からも D_STOP(結果 BFM_OK)へ移し、止め終えたら D_IDLE に戻す(この関数の外)。"
       }
     },
     {
-      "func": "bfm_shutdown",
-      "summary": "ライブラリを止める(待つところでは `BFM_INPROGRESS` を返す)。停止の手順(`stop_step()`)で、全部の接続を畳み、出したままのコマンドを捨て、FW を止め(TEARDOWN_HCA)、Bus Master を落とし、BAR0 と移植層を閉じる。",
+      "func": "bfm_run",
+      "summary": "代表 API。呼ぶたびに待たずに少しずつ進め、接続の表の全体の様子を返す。\n\n. 全体の状態が `R_STOP`(`bfm_shutdown()` の途中)なら `BFM_E_STATE` を返す。\n. `R_IDLE` なら、`g_bfm_ctl_lock` を取れたコアだけが(取ってからもう一度 `R_IDLE` を確かめて)`run_start()` で準備し、できたら `R_RUN` にする。鍵を取れなければ `BFM_INPROGRESS` を返す。\n. 接続の表を、コアごとにずらした行から 1 周回り、使う行の鍵 `c->lock` と `g_bfm_ctl_lock` の両方を取れた行について、`R_RUN` なら `bfm_cm_conn_step()` で状態を 1 つ進める。取れなければ待たずに次の行へ行く。\n. 使うポートで `D_READY` のものについて、`g_bfm_ctl_lock` を取れたら EQ(`mlx5_eq_poll()`)と GSI(`bfm_cm_poll()`)を処理する。\n. 使う行の状態(`bfm_cm_conn_state()`)をまとめて返す。",
       "args": {},
-      "ret": "`BFM_OK`: 止めた(止まっていたときも)。`BFM_INPROGRESS`: 途中(もう一度呼ぶと先へ進む)。",
-      "pre": "`bfm_init()` と同じタスクから呼ぶこと。",
-      "notes": "* 止まっていれば(`I_IDLE`)何もせず `BFM_OK` を返す。\n* 立ち上げの途中でも呼べる(そこで止める)。`I_STOP` でなければ `stop_begin(BFM_E_STATE)` で停止の手順を始める。`I_STOP` なら(前の `bfm_shutdown()`、または立ち上げの失敗の後始末の途中)その続きを進める。\n* 接続が残っていれば `bfm_cm_fini_step()` が相手へ BYE を送ってから畳む。\n* `BFM_OK` が返るまで呼び続けること。",
+      "ret": "`BFM_OK`: 使う接続が全部使える(`BFM_ST_UP`)。`BFM_INPROGRESS`: 途中(立ち上げ・確立の途中の接続がある、または最初の準備をほかのコアがしている)。`BFM_E_STATE`: `bfm_shutdown()` の途中か、エラー・切断のままの接続(`BFM_ST_DOWN`)がある。そのほかの負: 失敗した接続(`BFM_ST_FAILED`)がある(最初に見つけた行の `c->result`。負でなければ `BFM_E_HW`)、または `run_start()` の失敗(`BFM_E_PARAM` / `BFM_E_HW`)。",
+      "pre": "`include/bfm_config.h` の変数を設定し終えていること。どのコアから何本同時に呼んでもよい(データ経路の関数と同時でもよい)。",
+      "notes": "* 優先は 失敗 > エラー・切断のまま > 途中 > 全部使える。\n* どの値が返っても呼び続けてよい(ほかの接続は進む)。使える後も、相手からの BYE や FW のページ要求に答えるため、ときどき呼ぶこと。\n* 回って待たない(鍵は `bfm_trylock()` で 1 回だけ試す)。1 回の呼び出しで 1 つの行は 1 つの手順しか進まない。\n* 回り始める行は通し番号 `s_rr` を原子的に増やして決める(コアごとにずらし、同じ行を取り合わないようにする)。\n* 行を進める前と EQ・GSI を処理する前に、`g_bfm_ctl_lock` の中で `s_run` が `R_RUN` であることを確かめ直す(`bfm_shutdown()` と重ならないように)。",
       "flow": [
-        {"if": "s_phase == I_IDLE ?", "then": [{"return": "BFM_OK"}]},
-        {"if": "s_phase != I_STOP ?", "then": [{"call": "stop_begin(BFM_E_STATE) を呼ぶ"}]},
-        {"call": "stop_step() を呼ぶ"},
-        {"if": "stop_step() == BFM_INPROGRESS ?", "then": [{"return": "BFM_INPROGRESS"}]},
-        {"do": "s_phase = I_IDLE"},
-        {"do": "BFM_LOG で「止めた」を表示"},
-        {"return": "BFM_OK"}
+        {"do": "st = s_run(acquire)"},
+        {"if": "st == R_STOP ?", "then": [{"return": "BFM_E_STATE"}]},
+        {"if": "st == R_IDLE ?", "then": [
+          {"call": "bfm_trylock(&g_bfm_ctl_lock) を呼ぶ"},
+          {"if": "取れなかった?", "then": [{"return": "BFM_INPROGRESS"}]},
+          {"do": "rc = BFM_OK"},
+          {"if": "s_run == R_IDLE ?", "then": [
+            {"call": "rc = run_start() を呼ぶ"},
+            {"if": "rc == BFM_OK ?", "then": [{"do": "s_run = R_RUN(release)"}]}
+          ]},
+          {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
+          {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
+          {"if": "s_run != R_RUN ?", "then": [{"return": "BFM_E_STATE"}]}
+        ]},
+        {"do": "start = s_rr++(原子的)を BFM_MAX_CONN で割った余り"},
+        {"while": "k < BFM_MAX_CONN ?(k は 0 から)", "body": [
+          {"do": "c = &g_bfm_conn[(start + k) % BFM_MAX_CONN]"},
+          {"if": "!c->used ?", "then": [{"continue": true}]},
+          {"call": "bfm_trylock(&c->lock) を呼ぶ"},
+          {"if": "取れなかった?", "then": [{"continue": true}]},
+          {"call": "bfm_trylock(&g_bfm_ctl_lock) を呼ぶ"},
+          {"if": "取れた?", "then": [
+            {"if": "s_run == R_RUN ?", "then": [{"call": "bfm_cm_conn_step(c) を呼ぶ"}]},
+            {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"}
+          ]},
+          {"call": "bfm_unlock(&c->lock) を呼ぶ"}
+        ]},
+        {"while": "p < BFM_MAX_PORT ?(p は 0 から)", "body": [
+          {"do": "d = &g_bfm_dev[p]"},
+          {"if": "!d->used または d->phase != D_READY ?", "then": [{"continue": true}]},
+          {"call": "bfm_trylock(&g_bfm_ctl_lock) を呼ぶ"},
+          {"if": "取れなかった?", "then": [{"continue": true}]},
+          {"if": "d->phase == D_READY かつ s_run == R_RUN ?", "then": [
+            {"call": "mlx5_eq_poll(d) を呼ぶ"},
+            {"call": "bfm_cm_poll(d) を呼ぶ"}
+          ]},
+          {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"}
+        ]},
+        {"do": "fail = BFM_OK、down = 0、all_up = 1"},
+        {"while": "i < BFM_MAX_CONN ?(i は 0 から)", "body": [
+          {"do": "c = &g_bfm_conn[i]"},
+          {"if": "!c->used ?", "then": [{"continue": true}]},
+          {"call": "s = bfm_cm_conn_state(c) を呼ぶ"},
+          {"if": "s == BFM_ST_FAILED かつ fail == BFM_OK ?", "then": [{"do": "fail = c->result が負ならそれ、そうでなければ BFM_E_HW"}]},
+          {"if": "s == BFM_ST_DOWN ?", "then": [{"do": "down = 1"}]},
+          {"if": "s != BFM_ST_UP ?", "then": [{"do": "all_up = 0"}]}
+        ]},
+        {"if": "fail != BFM_OK ?", "then": [{"return": "fail"}]},
+        {"if": "down ?", "then": [{"return": "BFM_E_STATE"}]},
+        {"if": "all_up ?", "then": [{"return": "BFM_OK"}], "else": [{"return": "BFM_INPROGRESS"}]}
       ]
     },
     {
-      "func": "bfm_poll",
-      "summary": "非同期の処理を 1 回行う。EQ のイベント(FW のページ要求・リンクの変化・QP のエラー)を読み(`mlx5_eq_poll()`)、GSI に来た接続のメッセージ(相手からの BYE・REQ の送り直し)を処理する(`bfm_cm_poll()`)。 どちらも `g_bfm_ctl_lock` の中で行う(ページ要求への答えは FW のコマンドなので、ほかのコアの接続・切断と重ねない)。",
+      "func": "bfm_shutdown",
+      "summary": "ライブラリを止める(待つところでは `BFM_INPROGRESS` を返す)。全体の状態を `R_STOP` にして `bfm_run()` が表を進めないようにし、`g_bfm_ctl_lock` を(回って)取って、使うポートのうち `D_IDLE`・`D_FAILED` でないものについて、`D_STOP` でなければ `dev_stop_begin(d, BFM_OK)` で止める手順を始め、`dev_stop_step()` で進める(全部の接続を畳み、出したままのコマンドを捨て、FW を止め、Bus Master を落とし、BAR0 を外す)。止め終えたポートは `D_IDLE` にする。全部のポートが止まったら、ポート層を閉じ(`bfm_port_fini()`)、`R_IDLE` に戻す。",
       "args": {},
-      "ret": "処理したイベントとメッセージの数の合計。立ち上がっていなければ(`I_READY` でなければ)0。",
-      "pre": "`bfm_init()` が `BFM_OK` を返した後であること。どのコアから呼んでもよい(データ経路の関数と同時でもよい)。",
-      "notes": "データ経路の関数はこれを呼ばない。相手からの切断や FW のページ要求に答えるため、アプリケーションがときどき呼ぶこと。立ち上げ・停止の途中は何もしない。",
+      "ret": "`BFM_OK`: 止めた(止まっていたときも)。`BFM_INPROGRESS`: 途中(もう一度呼ぶと先へ進む)。",
+      "pre": "ほかのコアが bfmem を使っていない(`bfm_run()` もデータ経路の関数も呼んでいない)ときに、1 つのコアから呼ぶこと。",
+      "notes": "* 止まっていれば(`R_IDLE`)何もせず `BFM_OK` を返す。\n* 立ち上げの途中でも呼べる(そこで止める)。立ち上げの失敗の後始末の途中(`D_STOP`)なら、その続きを進める。`D_FAILED` のポートは止め終えているので触らない。\n* 接続が残っていれば `bfm_cm_fini_step()` が相手へ BYE を送ってから畳む。\n* `g_bfm_ctl_lock` は `bfm_lock()` で回って取る(ほかのコアの `bfm_run()` が持つのは 1 つの手順を進める間だけ)。\n* `BFM_OK` が返るまで呼び続けること。止めた後に `bfm_run()` を呼ぶと、最初から立ち上げ直す。",
       "flow": [
-        {"if": "s_phase != I_READY ?", "then": [{"return": "0"}]},
+        {"if": "s_run == R_IDLE ?", "then": [{"return": "BFM_OK"}]},
+        {"do": "s_run = R_STOP(release)"},
+        {"do": "busy = 0"},
         {"call": "bfm_lock(&g_bfm_ctl_lock) を呼ぶ"},
-        {"call": "n = mlx5_eq_poll(&g_bfm) + bfm_cm_poll() を呼ぶ"},
+        {"while": "p < BFM_MAX_PORT ?(p は 0 から)", "body": [
+          {"do": "d = &g_bfm_dev[p]"},
+          {"if": "!d->used または d->phase == D_IDLE または d->phase == D_FAILED ?", "then": [{"continue": true}]},
+          {"if": "d->phase != D_STOP ?", "then": [{"call": "dev_stop_begin(d, BFM_OK) を呼ぶ"}]},
+          {"call": "dev_stop_step(d) を呼ぶ"},
+          {"if": "dev_stop_step() == BFM_INPROGRESS ?", "then": [{"do": "busy = 1"}], "else": [{"do": "d->phase = D_IDLE"}]}
+        ]},
         {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
-        {"return": "n"}
+        {"if": "busy ?", "then": [{"return": "BFM_INPROGRESS"}]},
+        {"call": "bfm_port_fini() を呼ぶ"},
+        {"do": "s_run = R_IDLE(release)"},
+        {"do": "BFM_LOG で「止めた」を表示"},
+        {"return": "BFM_OK"}
       ]
     }
   ]

@@ -5,7 +5,7 @@
  * 同じ bfm_cmd_t と同じ引数で呼び直して完了を受け取る。entry は 1 つなので、出している間は
  * その bfm_cmd_t が持ち主になり(d->cmd_owner)、ほかの bfm_cmd_t からの呼び出しは出さずに
  * BFM_INPROGRESS を返す(持ち主が完了を受け取るまで待たされる)。
- * ここでは排他を持たないので、複数のコアから使うときは呼び出し側が g_bfm_ctl_lock を取る。 */
+ * コマンドキューと EQ はポート(装置)ごとにある。ここでは排他を持たないので、呼び出し側が g_bfm_ctl_lock を取る。 */
 #include "bfm_internal.h"
 
 #include <string.h>
@@ -33,7 +33,7 @@
 
 #define CMD_TIMEOUT_MS 10000u
 
-bfm_dev_t g_bfm;                            /* 装置の状態(使う ConnectX は 1 枚だけ)*/
+bfm_dev_t g_bfm_dev[BFM_MAX_PORT];           /* ポートごとの装置の状態(ConnectX のポート 1 つ = PCIe の function 1 つ)*/
 
 static volatile uint8_t *mbox_in(const bfm_dev_t *d, uint32_t i)
 {
@@ -274,28 +274,28 @@ int mlx5_pages_step(bfm_dev_t *d, bfm_pages_t *p)
 #define EQE_SIZE        64u
 #define EQ_DB_NOARM     0x48u    /* UAR ページの中の EQ のドアベル(arm しない)*/
 
-static bfm_pages_t s_eq_pages;   /* EQ で受けたページ要求に答えている途中の手順 */
-static int s_eq_pages_busy;      /* s_eq_pages が動いている */
+static bfm_pages_t s_eq_pages[BFM_MAX_PORT];   /* EQ で受けたページ要求に答えている途中の手順 */
+static int s_eq_pages_busy[BFM_MAX_PORT];      /* s_eq_pages が動いている */
 static struct {
     int      valid;              /* 答えている間に次の要求が来た */
     uint16_t func;               /* その要求の function */
     int32_t  n;                  /* その要求のページの数 */
-} s_eq_next;                     /* 答え終えたら答える要求(来た中で最後のもの)*/
+} s_eq_next[BFM_MAX_PORT];                     /* 答え終えたら答える要求(来た中で最後のもの)*/
 
 /* EQ を作る前に、ページ要求に答える手順を空にする(mlx5_hca_init_step() から)。 */
-void mlx5_eq_reset(void)
+void mlx5_eq_reset(bfm_dev_t *d)
 {
-    memset(&s_eq_pages, 0, sizeof(s_eq_pages));
-    memset(&s_eq_next, 0, sizeof(s_eq_next));
-    s_eq_pages_busy = 0;
+    memset(&s_eq_pages[d->port], 0, sizeof(s_eq_pages[d->port]));
+    memset(&s_eq_next[d->port], 0, sizeof(s_eq_next[d->port]));
+    s_eq_pages_busy[d->port] = 0;
 }
 
 /* ページ要求に答える手順を始める(区画が足りなければ CANT_GIVE を伝える手順にする)。 */
 static void eq_pages_begin(bfm_dev_t *d, uint16_t func, int32_t n)
 {
     if (n > 0) {
-        if (mlx5_pages_start(d, &s_eq_pages, func, n) != BFM_OK) s_eq_pages.cant = 1;
-        s_eq_pages_busy = 1;
+        if (mlx5_pages_start(d, &s_eq_pages[d->port], func, n) != BFM_OK) s_eq_pages[d->port].cant = 1;
+        s_eq_pages_busy[d->port] = 1;
     } else if (n < 0) {
         BFM_DBG("bfm: FW がページの返却を申し出た(%d)。預けたままにする\n", (int)n);
     }
@@ -387,7 +387,7 @@ int mlx5_eq_poll(bfm_dev_t *d)
             break;
         case MLX5_EVT_PORT_CHANGE:
             if (sub == 1u || sub == 4u) d->link_up = (sub == 4u);
-            BFM_LOG("bfm: リンクが %s になった\n", sub == 4u ? "ACTIVE" : sub == 1u ? "DOWN" : "?");
+            BFM_LOG("bfm: ポート %u: リンクが %s になった\n", d->port, sub == 4u ? "ACTIVE" : sub == 1u ? "DOWN" : "?");
             break;
         case MLX5_EVT_CQ_ERROR:
             BFM_LOG("bfm: CQ のエラー cqn=%u syndrome=0x%02x\n", bfm_rd24be(data + 1), data[11]);
@@ -396,7 +396,7 @@ int mlx5_eq_poll(bfm_dev_t *d)
         case MLX5_EVT_WQ_INVAL_REQ:
         case MLX5_EVT_WQ_ACCESS_ERROR:
         case MLX5_EVT_PATH_MIG_FAILED:
-            if (data[20] == 0u) bfm_conn_mark_error(bfm_rd24be(data + 25), "QP のエラーのイベント");
+            if (data[20] == 0u) bfm_conn_mark_error(d, bfm_rd24be(data + 25), "QP のエラーのイベント");
             BFM_LOG("bfm: QP のエラーのイベント type=0x%02x qpn=%u\n", type, bfm_rd24be(data + 25));
             break;
         default:
@@ -408,24 +408,24 @@ int mlx5_eq_poll(bfm_dev_t *d)
     }
     if (n) mlx5_eq_update_ci(d);
     if (page_req) {
-        if (!s_eq_pages_busy) {
+        if (!s_eq_pages_busy[d->port]) {
             eq_pages_begin(d, page_func, page_n);
         } else {
             /* 答えている間に来た要求は、答え終えてから答える。受け流すと FW は出し直さず、渡すページが
              * 前の版(読み取りごとに最後の要求に答えていた)より少なくなった(ConnectX-4 Lx で確認) */
-            s_eq_next.valid = 1;
-            s_eq_next.func = page_func;
-            s_eq_next.n = page_n;
+            s_eq_next[d->port].valid = 1;
+            s_eq_next[d->port].func = page_func;
+            s_eq_next[d->port].n = page_n;
         }
     }
-    if (s_eq_pages_busy) {
-        const int rc = mlx5_pages_step(d, &s_eq_pages);
+    if (s_eq_pages_busy[d->port]) {
+        const int rc = mlx5_pages_step(d, &s_eq_pages[d->port]);
         if (rc != BFM_INPROGRESS) {
-            s_eq_pages_busy = 0;
+            s_eq_pages_busy[d->port] = 0;
             if (rc == BFM_OK) BFM_DBG("bfm: FW のページ要求に答えた(計 %u ページ)\n", d->fw_pages_used);
-            if (s_eq_next.valid) {
-                s_eq_next.valid = 0;
-                eq_pages_begin(d, s_eq_next.func, s_eq_next.n);
+            if (s_eq_next[d->port].valid) {
+                s_eq_next[d->port].valid = 0;
+                eq_pages_begin(d, s_eq_next[d->port].func, s_eq_next[d->port].n);
             }
         }
     }
@@ -433,7 +433,7 @@ int mlx5_eq_poll(bfm_dev_t *d)
 }
 
 /* 1 = EQ で受けたページ要求に答えている途中。 */
-int mlx5_eq_busy(void)
+int mlx5_eq_busy(const bfm_dev_t *d)
 {
-    return s_eq_pages_busy;
+    return s_eq_pages_busy[d->port];
 }

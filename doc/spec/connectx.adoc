@@ -9,6 +9,7 @@ ConnectX-4〜7 の違いへの備えは、この章の最後に書く。
   bfmem は `bfm_wr16be()` などのバイト順の関数で読み書きする。例外は atomic の元の値(<<cx-wqe,WQE と CQE>>)。
 * NIC に渡すアドレスは CPU のポインタの値そのもの(VxWorks は論理 = 物理、Linux は仮想 = IOVA に張る)。
 * 割り込みは使わない。EQ と CQ は arm せず、CPU が見に行く(ポーリング)。
+* ConnectX のポート(PCIe の機能)ごとに装置 `bfm_dev_t`(`g_bfm_dev[BFM_MAX_PORT]`)を 1 つ持ち、この章に書く PCIe の設定・FW の起動・コマンド・EQ・GSI は、どれもポートごとに行う。
 
 [[cx-block]]
 === ブロック図
@@ -173,10 +174,10 @@ NIC が DMA で読む、ホストのメモリの 64 バイト(QP・CQ ごと)。
 [[cx-boot]]
 === ファームウェアの起動
 
-`bfm_init()` の流れ(`bfm_pci_setup_step()` → BAR0 を張る → `mlx5_hca_init_step()` → `bfm_dif_init_step()` → `bfm_cm_init_step()`)。
+ポートごとの立ち上げ `bfm_dev_step()` の流れ(`bfm_pci_setup_step()` → BAR0 を張る → `mlx5_hca_init_step()` → `bfm_dif_init_step()` → `bfm_cm_init_step()`)。
 両側に線のある箱は FW へのコマンド。手順は Linux の mlx5_core(`mlx5_function_enable()` / `mlx5_function_setup()`)と同じ順。
 どの段階も待たずに進める: 時間で待つところ(FLR の後の 100ms・FW の初期化・リンク・ページ要求)とコマンドの完了では
-`BFM_INPROGRESS` を返し、`bfm_init()` が呼ばれるたびに先へ進む(各関数の状態遷移図)。
+`BFM_INPROGRESS` を返し、`bfm_run()` が呼ばれるたびに先へ進む(各関数の状態遷移図)。
 
 .立ち上げの手順
 image::hw_boot.drawio.svg[立ち上げの手順]
@@ -276,8 +277,8 @@ image::hw_mailbox.drawio.svg[コマンドとメールボックス]
 [[cx-eq]]
 === EQ(イベント)
 
-EQ は 1 本(64 バイトの EQE x 128 = 8KiB)。全部の CQ の通知先(c_eqn)で、非同期のイベントも来る。arm しないので割り込みは来ず、
-`bfm_poll()`(と立ち上げの途中)が `mlx5_eq_poll()` で読む。
+EQ はポートごとに 1 本(64 バイトの EQE x 128 = 8KiB)。全部の CQ の通知先(c_eqn)で、非同期のイベントも来る。arm しないので割り込みは来ず、
+`bfm_run()`(と立ち上げ・接続の確立の途中)が `mlx5_eq_poll()` で読む。
 
 * EQE は [63] の bit0 が owner。読む位置の EQE の owner が「何周目か」(eq_cc の 2^7 の位)と合えば新しい。最初は全部の owner を 1 にしておく。
 * [1] = 種類、[3] = 細かい種類、[32〜] = データ。
@@ -301,7 +302,7 @@ bfmem の QP は 2 種類。どちらも CQ を 1 本持ち、送受信で共有
 [cols="2,3,3",options="header"]
 |===
 | |GSI(QP1、UD) |RC(接続ごと)
-|数 |1 本(`bfm_cm_init()` で作る) |接続の枠ごと(`bfm_connect()` / `bfm_accept()` で作り、切断で壊す)
+|数 |ポートごとに 1 本(`bfm_cm_init_step()` で作る) |接続の枠ごと(`bfm_cm_conn_step()` が確立のときに作り、畳むときに壊す)
 |使い道 |接続の確立(bfmem だけの REQ / REP / BYE)を相手の QP1 へ送る |相手のメモリへの write / read / atomic、T10-DIF
 |SQ |64 WQEBB(UD の SEND は 1 個 2 WQEBB) |256 WQEBB(16KiB)
 |RQ |256 x 16B。受信の枠(128 バイト = GRH 40 + メッセージ)を 128 個投稿しておく |256 x 16B(使わない)
@@ -433,6 +434,6 @@ CQE は 64 バイト。
 * BlueFlame の窓の大きさは log_bf_reg_size から求める(8〜12 の外なら 512 バイトとして扱う)。
 * QP の ts_format は RoCE の能力 qp_ts_format に合わせる(ConnectX-7 は時刻の形式を実時間だけにできるので、既定の 0 = free running だと CREATE_QP が断られうる)。
 * num_vhca_ports が 0 でなければ `SET_ROCE_ADDRESS` にポート番号を入れる。
-* FW のページの要求量は装置で大きく違うので、上限は `g_bfm_fw_pages_max`(足りなければ `bfm_init()` が要る数を表示する)。
+* FW のページの要求量は装置で大きく違うので、上限は `g_bfm_fw_pages_max`(足りなければ立ち上げ(`mlx5_hca_init_step()`)が要る数を表示する)。
 * FW の起動待ちの上限は 120 秒(ConnectX-7 は長くかかることがある)。
 * T10-DIF のオフロード(能力の sho)は ConnectX-4 Lx に無い。ConnectX-5 以降での動きは確かめていない。

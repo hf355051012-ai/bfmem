@@ -1,6 +1,6 @@
 {
   "file": "src/bfm_mem.c",
-  "summary": "DMA 領域(`g_bfm_dma_base` / `g_bfm_dma_size`)からの静的な切り出し。切り出した量を静的変数 `s_next`(領域の先頭からのバイト数)で持つ。切り出したものを個別に返すことはせず、`bfm_init()` のたびに `bfm_mem_reset()` で先頭から切り直す。接続ごとの資源は `bfm_init()` のときに `BFM_MAX_CONN` 本ぶんを先に切り出しておく。",
+  "summary": "DMA 領域(`g_bfm_dma_base` / `g_bfm_dma_size`)からの静的な切り出し。切り出した量を静的変数 `s_next`(領域の先頭からのバイト数)で持つ。DMA 領域は全部のポートで 1 つで、各ポートの立ち上げ(コマンドキュー・EQ・FW 用のページ・GSI・接続の枠)が順に続きから切り出す。切り出したものを個別に返すことはせず、最初から立ち上げるたび(`bfm_run()` の `run_start()`)に `bfm_mem_reset()` で先頭から切り直す。接続ごとの資源は、ポートの立ち上げ(`bfm_cm_init_step()`)のときに、そのポートの接続の数(`g_bfm_port_conn[port]`)ぶんを先に切り出しておく。",
   "functions": [
     {
       "func": "bfm_mem_reset",
@@ -8,7 +8,7 @@
       "args": {},
       "ret": "なし",
       "pre": "それまでに切り出した領域を、もう誰も使っていないこと(NIC も含む)。",
-      "notes": "領域の中身は消さない(0 で埋めるのは `bfm_mem_alloc()` が切り出すとき)。`bfm_init()` が移植層の初期化の直後に呼ぶ。",
+      "notes": "領域の中身は消さない(0 で埋めるのは `bfm_mem_alloc()` が切り出すとき)。`bfm_core.c` の `run_start()`(最初の `bfm_run()`、または `bfm_shutdown()` の後の `bfm_run()`)が、移植層の初期化(`bfm_port_init()`)の直後に呼ぶ。",
       "flow": [
         {"do": "s_next = 0"}
       ]
@@ -50,7 +50,7 @@
       "args": {},
       "ret": "使った量(バイト。`s_next`)。",
       "pre": "特になし。",
-      "notes": "`bfm_init()` が立ち上げの終わりに、使った量を表示するのに使う。",
+      "notes": "`bfm_dev_step()` がポートの立ち上げの終わり(`D_CM` が済んだとき)に、使った量を表示するのに使う(全部のポートで 1 つの領域なので、それまでに立ち上げたポートの分も含む)。",
       "flow": [
         {"return": "s_next"}
       ]

@@ -8,7 +8,8 @@
  *
  * 設定空間の読み書きはポート層(bfm_port_pci_read32 / write32)を通す。Linux では
  * VFIO の設定空間を通るので、BAR への書き込みは VFIO の中だけで効く(実際の BAR は
- * カーネルが割り当てたまま)。そのため Linux では g_bfm_bar0_addr を 0 にしておく。 */
+ * カーネルが割り当てたまま)。そのため Linux では g_bfm_bar0_addr[] を 0 にしておく。
+ * ConnectX はポートごとに別の function なので、ここの手順はポート(bfm_dev_t)ごとに進める。 */
 #include "bfm_internal.h"
 
 #define PCI_ID          0x00u
@@ -42,24 +43,24 @@ static const struct {
     { 0x1021u, "ConnectX-7" },
 };
 
-static uint16_t pci_cmd_read(void)
+static uint16_t pci_cmd_read(bfm_dev_t *d)
 {
-    return (uint16_t)bfm_port_pci_read32(PCI_COMMAND);
+    return (uint16_t)bfm_port_pci_read32(d->port, PCI_COMMAND);
 }
 
 /* Status(上位 16bit)は書いて 1 を消すビットなので、0 を書いて触らない。 */
-static void pci_cmd_write(uint16_t cmd)
+static void pci_cmd_write(bfm_dev_t *d, uint16_t cmd)
 {
-    bfm_port_pci_write32(PCI_COMMAND, cmd);
+    bfm_port_pci_write32(d->port, PCI_COMMAND, cmd);
 }
 
 /* PCI Express の capability の位置(無ければ 0)。 */
-static uint32_t pci_find_pcie_cap(void)
+static uint32_t pci_find_pcie_cap(bfm_dev_t *d)
 {
-    if (!((bfm_port_pci_read32(PCI_COMMAND) >> 16) & PCI_STATUS_CAP)) return 0;
-    uint32_t pos = bfm_port_pci_read32(PCI_CAP_PTR) & 0xfcu;
+    if (!((bfm_port_pci_read32(d->port, PCI_COMMAND) >> 16) & PCI_STATUS_CAP)) return 0;
+    uint32_t pos = bfm_port_pci_read32(d->port, PCI_CAP_PTR) & 0xfcu;
     for (unsigned guard = 0; pos != 0 && guard < 48u; guard++) {
-        const uint32_t v = bfm_port_pci_read32(pos);
+        const uint32_t v = bfm_port_pci_read32(d->port, pos);
         if ((v & 0xffu) == PCI_CAP_ID_EXP) return pos;
         pos = (v >> 8) & 0xfcu;
     }
@@ -89,7 +90,7 @@ static struct {
     int step;                        /* 今の状態(P_*)*/
     uint32_t pcie;                   /* PCI Express の capability の位置 */
     uint64_t t0;                     /* 時間で待つ状態の起点 */
-} s_pci;
+} s_pci[BFM_MAX_PORT];                 /* ポートごと */
 
 static int pci_setup(bfm_dev_t *d);
 
@@ -97,37 +98,37 @@ static int pci_setup(bfm_dev_t *d);
  * BAR0 の大きさを測り、addr が 0 でなければ書き込む。BAR0 の値(物理アドレス)と
  * 大きさを返す。測る間は Memory Space を止める。
  * ===============================================================*/
-static int pci_setup_bar0(uint64_t addr, uint64_t *out_phys, uint64_t *out_size)
+static int pci_setup_bar0(bfm_dev_t *d, uint64_t addr, uint64_t *out_phys, uint64_t *out_size)
 {
-    const uint32_t lo = bfm_port_pci_read32(PCI_BAR0);
-    const uint32_t hi = bfm_port_pci_read32(PCI_BAR0 + 4u);
+    const uint32_t lo = bfm_port_pci_read32(d->port, PCI_BAR0);
+    const uint32_t hi = bfm_port_pci_read32(d->port, PCI_BAR0 + 4u);
     if ((lo & 0x1u) != 0 || ((lo >> 1) & 0x3u) != 0x2u) {
         BFM_LOG("bfm: BAR0 が 64bit のメモリ BAR ではない (0x%08x)\n", lo);
         return -1;
     }
-    const uint16_t cmd = pci_cmd_read();
-    pci_cmd_write((uint16_t)(cmd & ~(PCI_CMD_MEM | PCI_CMD_MASTER)));
-    bfm_port_pci_write32(PCI_BAR0, 0xffffffffu);
-    bfm_port_pci_write32(PCI_BAR0 + 4u, 0xffffffffu);
-    const uint64_t mask = ((uint64_t)bfm_port_pci_read32(PCI_BAR0 + 4u) << 32) |
-                          (bfm_port_pci_read32(PCI_BAR0) & ~0xfu);
+    const uint16_t cmd = pci_cmd_read(d);
+    pci_cmd_write(d, (uint16_t)(cmd & ~(PCI_CMD_MEM | PCI_CMD_MASTER)));
+    bfm_port_pci_write32(d->port, PCI_BAR0, 0xffffffffu);
+    bfm_port_pci_write32(d->port, PCI_BAR0 + 4u, 0xffffffffu);
+    const uint64_t mask = ((uint64_t)bfm_port_pci_read32(d->port, PCI_BAR0 + 4u) << 32) |
+                          (bfm_port_pci_read32(d->port, PCI_BAR0) & ~0xfu);
     const uint64_t size = ~mask + 1u;
     uint64_t phys = ((uint64_t)hi << 32) | (lo & ~0xfu);
     const char *err = NULL;
     if (mask == 0 || (size & (size - 1u)) != 0) err = "BAR0 の大きさが測れない";
     else if (addr != 0 && (addr & (size - 1u)) != 0) err = "g_bfm_bar0_addr が BAR0 の大きさの境界に合っていない";
     if (err != NULL) {
-        BFM_LOG("bfm: %s(g_bfm_bar0_addr = 0x%llx、BAR0 の大きさ 0x%llx)\n",
-                err, (unsigned long long)addr, (unsigned long long)size);
-        bfm_port_pci_write32(PCI_BAR0, lo);
-        bfm_port_pci_write32(PCI_BAR0 + 4u, hi);
-        pci_cmd_write(cmd);
+        BFM_LOG("bfm: %s(g_bfm_bar0_addr[%u] = 0x%llx、BAR0 の大きさ 0x%llx)\n",
+                err, d->port, (unsigned long long)addr, (unsigned long long)size);
+        bfm_port_pci_write32(d->port, PCI_BAR0, lo);
+        bfm_port_pci_write32(d->port, PCI_BAR0 + 4u, hi);
+        pci_cmd_write(d, cmd);
         return -1;
     }
     if (addr != 0) phys = addr;
-    bfm_port_pci_write32(PCI_BAR0, (uint32_t)phys | (lo & 0xfu));
-    bfm_port_pci_write32(PCI_BAR0 + 4u, (uint32_t)(phys >> 32));
-    pci_cmd_write(cmd);
+    bfm_port_pci_write32(d->port, PCI_BAR0, (uint32_t)phys | (lo & 0xfu));
+    bfm_port_pci_write32(d->port, PCI_BAR0 + 4u, (uint32_t)(phys >> 32));
+    pci_cmd_write(d, cmd);
     *out_phys = phys;
     *out_size = size;
     return 0;
@@ -136,7 +137,7 @@ static int pci_setup_bar0(uint64_t addr, uint64_t *out_phys, uint64_t *out_size)
 /* 装置を確かめる(Mellanox の ConnectX-4〜7 の PF か)。d の vendor / device / name を埋める。 */
 static int pci_probe(bfm_dev_t *d)
 {
-    const uint32_t id = bfm_port_pci_read32(PCI_ID);
+    const uint32_t id = bfm_port_pci_read32(d->port, PCI_ID);
     d->vendor = (uint16_t)id;
     d->device = (uint16_t)(id >> 16);
     d->name = NULL;
@@ -148,20 +149,20 @@ static int pci_probe(bfm_dev_t *d)
                 "ConnectX-4〜7 の PF(VF ではないもの)を指定すること\n", d->vendor, d->device);
         return -1;
     }
-    s_pci.pcie = pci_find_pcie_cap();
-    if (s_pci.pcie == 0) {
+    s_pci[d->port].pcie = pci_find_pcie_cap(d);
+    if (s_pci[d->port].pcie == 0) {
         BFM_LOG("bfm: PCI Express の capability が見つからない\n");
         return -1;
     }
     return 0;
 }
 
-/* 設定の状態を最初に戻す(bfm_init() が始めるときに呼ぶ)。 */
-void bfm_pci_setup_reset(void)
+/* 設定の状態を最初に戻す(ポートの立ち上げを始めるときに呼ぶ)。 */
+void bfm_pci_setup_reset(bfm_dev_t *d)
 {
-    s_pci.step = P_PROBE;
-    s_pci.pcie = 0;
-    s_pci.t0 = 0;
+    s_pci[d->port].step = P_PROBE;
+    s_pci[d->port].pcie = 0;
+    s_pci[d->port].t0 = 0;
 }
 
 /*=================================================================
@@ -174,48 +175,48 @@ void bfm_pci_setup_reset(void)
 int bfm_pci_setup_step(bfm_dev_t *d)
 {
     for (;;) {
-        switch (s_pci.step) {
+        switch (s_pci[d->port].step) {
         case P_PROBE:
             if (pci_probe(d) != 0) return BFM_E_HW;
             if (!g_bfm_pcie_flr) {
-                s_pci.step = P_BAR;
-            } else if (!(bfm_port_pci_read32(s_pci.pcie + PCIE_DEVCAP) & PCIE_DEVCAP_FLR)) {
+                s_pci[d->port].step = P_BAR;
+            } else if (!(bfm_port_pci_read32(d->port, s_pci[d->port].pcie + PCIE_DEVCAP) & PCIE_DEVCAP_FLR)) {
                 BFM_LOG("bfm: この装置は FLR に対応していない。リセットせずに進む\n");
-                s_pci.step = P_BAR;
+                s_pci[d->port].step = P_BAR;
             } else {
-                pci_cmd_write((uint16_t)(pci_cmd_read() & ~PCI_CMD_MASTER));
-                s_pci.t0 = bfm_port_time_ns();
-                s_pci.step = P_TRPND;
+                pci_cmd_write(d, (uint16_t)(pci_cmd_read(d) & ~PCI_CMD_MASTER));
+                s_pci[d->port].t0 = bfm_port_time_ns();
+                s_pci[d->port].step = P_TRPND;
             }
             break;
         case P_TRPND: {
-            if ((bfm_port_pci_read32(s_pci.pcie + PCIE_DEVCTL) >> 16) & PCIE_DEVSTA_TRPND) {
-                if (ms_since(s_pci.t0) < TRPND_WAIT_MS) return BFM_INPROGRESS;
+            if ((bfm_port_pci_read32(d->port, s_pci[d->port].pcie + PCIE_DEVCTL) >> 16) & PCIE_DEVSTA_TRPND) {
+                if (ms_since(s_pci[d->port].t0) < TRPND_WAIT_MS) return BFM_INPROGRESS;
                 BFM_LOG("bfm: 注意: 100ms 待っても Transactions Pending が消えない。このまま FLR をかける\n");
             }
-            const uint32_t ctl = bfm_port_pci_read32(s_pci.pcie + PCIE_DEVCTL) & 0xffffu;
-            bfm_port_pci_write32(s_pci.pcie + PCIE_DEVCTL, ctl | PCIE_DEVCTL_FLR);
-            s_pci.t0 = bfm_port_time_ns();
-            s_pci.step = P_FLR_WAIT;
+            const uint32_t ctl = bfm_port_pci_read32(d->port, s_pci[d->port].pcie + PCIE_DEVCTL) & 0xffffu;
+            bfm_port_pci_write32(d->port, s_pci[d->port].pcie + PCIE_DEVCTL, ctl | PCIE_DEVCTL_FLR);
+            s_pci[d->port].t0 = bfm_port_time_ns();
+            s_pci[d->port].step = P_FLR_WAIT;
             break;
         }
         case P_FLR_WAIT:
-            if (ms_since(s_pci.t0) < FLR_WAIT_MS) return BFM_INPROGRESS;
-            s_pci.t0 = bfm_port_time_ns();
-            s_pci.step = P_PRESENT;
+            if (ms_since(s_pci[d->port].t0) < FLR_WAIT_MS) return BFM_INPROGRESS;
+            s_pci[d->port].t0 = bfm_port_time_ns();
+            s_pci[d->port].step = P_PRESENT;
             break;
         case P_PRESENT:
-            if ((bfm_port_pci_read32(PCI_ID) & 0xffffu) != MLX5_VENDOR_ID) {
-                if (ms_since(s_pci.t0) <= PRESENT_WAIT_MS) return BFM_INPROGRESS;
+            if ((bfm_port_pci_read32(d->port, PCI_ID) & 0xffffu) != MLX5_VENDOR_ID) {
+                if (ms_since(s_pci[d->port].t0) <= PRESENT_WAIT_MS) return BFM_INPROGRESS;
                 BFM_LOG("bfm: FLR の後、設定空間が読めない\n");
                 return BFM_E_HW;
             }
             BFM_DBG("bfm: FLR をかけた\n");
-            s_pci.step = P_BAR;
+            s_pci[d->port].step = P_BAR;
             break;
         case P_BAR:
             if (pci_setup(d) != 0) return BFM_E_HW;
-            s_pci.step = P_DONE;
+            s_pci[d->port].step = P_DONE;
             break;
         default:   /* P_DONE */
             return BFM_OK;
@@ -229,30 +230,30 @@ int bfm_pci_setup_step(bfm_dev_t *d)
  * ===============================================================*/
 static int pci_setup(bfm_dev_t *d)
 {
-    const uint32_t pcie = s_pci.pcie;
-    if (pci_setup_bar0(g_bfm_bar0_addr, &d->bar0_phys, &d->bar0_size) != 0) return -1;
+    const uint32_t pcie = s_pci[d->port].pcie;
+    if (pci_setup_bar0(d, g_bfm_bar0_addr[d->port], &d->bar0_phys, &d->bar0_size) != 0) return -1;
 
     if (g_bfm_pcie_mrrs != 0) {
         unsigned code = 0;
         while (code < 5u && (128u << code) < g_bfm_pcie_mrrs) code++;
-        uint32_t ctl = bfm_port_pci_read32(pcie + PCIE_DEVCTL) & 0xffffu;
+        uint32_t ctl = bfm_port_pci_read32(d->port, pcie + PCIE_DEVCTL) & 0xffffu;
         ctl = (ctl & ~0x7000u) | ((uint32_t)code << 12);
-        bfm_port_pci_write32(pcie + PCIE_DEVCTL, ctl);
+        bfm_port_pci_write32(d->port, pcie + PCIE_DEVCTL, ctl);
     }
 
-    pci_cmd_write((uint16_t)(pci_cmd_read() | PCI_CMD_MEM | PCI_CMD_MASTER | PCI_CMD_INTX_OFF));
+    pci_cmd_write(d, (uint16_t)(pci_cmd_read(d) | PCI_CMD_MEM | PCI_CMD_MASTER | PCI_CMD_INTX_OFF));
 
-    const uint32_t lnk = bfm_port_pci_read32(pcie + PCIE_LNKSTA) >> 16;
-    BFM_LOG("bfm: %s (%04x:%04x) BAR0=0x%llx (%llu MiB) PCIe Gen%u x%u MRRS=%u\n",
-            d->name, d->vendor, d->device, (unsigned long long)d->bar0_phys,
+    const uint32_t lnk = bfm_port_pci_read32(d->port, pcie + PCIE_LNKSTA) >> 16;
+    BFM_LOG("bfm: ポート %u: %s (%04x:%04x) BAR0=0x%llx (%llu MiB) PCIe Gen%u x%u MRRS=%u\n",
+            d->port, d->name, d->vendor, d->device, (unsigned long long)d->bar0_phys,
             (unsigned long long)(d->bar0_size >> 20), lnk & 0xfu, (lnk >> 4) & 0x3fu,
-            128u << ((bfm_port_pci_read32(pcie + PCIE_DEVCTL) >> 12) & 0x7u));
+            128u << ((bfm_port_pci_read32(d->port, pcie + PCIE_DEVCTL) >> 12) & 0x7u));
     return 0;
 }
 
 /* Bus Master を入れる / 落とす(落とすと NIC はメモリへ DMA しない)。 */
-void bfm_pci_bus_master(int on)
+void bfm_pci_bus_master(bfm_dev_t *d, int on)
 {
-    const uint16_t cmd = pci_cmd_read();
-    pci_cmd_write(on ? (uint16_t)(cmd | PCI_CMD_MASTER) : (uint16_t)(cmd & ~PCI_CMD_MASTER));
+    const uint16_t cmd = pci_cmd_read(d);
+    pci_cmd_write(d, on ? (uint16_t)(cmd | PCI_CMD_MASTER) : (uint16_t)(cmd & ~PCI_CMD_MASTER));
 }

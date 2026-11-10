@@ -8,7 +8,7 @@
  *   read : RDMA READ -> 中継バッファ -> (検査・PI の付け外し)-> dst
  *
  * BFM_DIF_HW(オフロードあり): NIC の署名オフロード(Linux の IB_WR_REG_MR_INTEGRITY と同じ手順)。
- * 接続・面ごとに、署名つきの MKey 1 個と PSV 2 個(メモリ側・ワイヤ側)を bfm_init() で作っておく。
+ * 接続・面ごとに、署名つきの MKey 1 個と PSV 2 個(メモリ側・ワイヤ側)をポートの立ち上げで作っておく。
  * 中継バッファの面(メモリ側の形)を、ブロックの形を書いた BSF つきで MKey に張り、その MKey を
  * 手元のバッファとして RDMA を出すと、NIC が通る途中で PI を検査・付け替えする。
  *   1. (前に使っていれば)UMR で MKey を空きに戻す(Linux の LOCAL_INV)
@@ -186,7 +186,7 @@ struct sig_res {
     uint8_t  used;                   /* 張ったまま(次に張る前に空きに戻す)*/
 };
 static struct sig_res s_sig[BFM_MAX_CONN][BFM_DIF_SLOTS];   /* 接続・面ごと */
-static int s_hw;                            /* 署名のオフロード(BFM_DIF_HW)の資源を用意できた */
+static int s_hw[BFM_MAX_PORT];              /* ポートの署名のオフロード(BFM_DIF_HW)の資源を用意できた */
 
 /* mkey_mask(Linux の sig_mkey_mask()): LEN PAGE_SIZE START_ADDR EN_RINVAL EN_SIGERR BSF_EN KEY
  * LR LW RR RW SMALL_FENCE FREE */
@@ -229,7 +229,7 @@ static void build_umr(struct bfm_conn *c, struct sig_res *s, uint64_t *w, const 
     uint8_t *b = (uint8_t *)w;
 
     memset(w, 0, 256);
-    bfm_ops_ctrl(c, w, MLX5_OPCODE_UMR, 16u, g_bfm.umr_fence, s->mkey);
+    bfm_ops_ctrl(c, w, MLX5_OPCODE_UMR, 16u, c->dev->umr_fence, s->mkey);
     b[16] = 0x80u | 0x20u;                                   /* MLX5_FLAGS_INLINE | MLX5_FLAGS_CHECK_FREE */
     bfm_wr16be(&b[20], 4u);                                  /* xlt_octowords */
     bfm_wr16be(&b[22], 4u);                                  /* bsf_octowords */
@@ -237,14 +237,14 @@ static void build_umr(struct bfm_conn *c, struct sig_res *s, uint64_t *w, const 
 
     b[66] = 0x80u | 0x08u | 0x04u | 0x02u;                   /* UMR_EN | LW | LR | access_mode = KLM */
     bfm_wr32be(&b[68], (s->mkey & 0xffu) | 0xffffff00u);
-    bfm_wr32be(&b[76], (1u << 24) | ((s->sigerr_count & 1u) << 26) | (1u << 30) | g_bfm.pdn);
+    bfm_wr32be(&b[76], (1u << 24) | ((s->sigerr_count & 1u) << 26) | (1u << 30) | c->dev->pdn);
     bfm_wr64be(&b[88], (uint64_t)k * (mem_pi ? BLK_PI : BLK));   /* len */
     bfm_wr32be(&b[96], 4u);                                  /* bsfs_octo_size */
     bfm_wr32be(&b[116], 4u);                                 /* xlt_oct_size */
 
     if (!mem_pi) {
         bfm_wr32be(&b[128], k * BLK);                        /* KLM: bcount key va */
-        bfm_wr32be(&b[132], g_bfm.lkey);
+        bfm_wr32be(&b[132], c->dev->lkey);
         bfm_wr64be(&b[136], va);
     } else {
         bfm_wr32be(&b[128], BLK_PI);                         /* bcount_per_cycle */
@@ -253,11 +253,11 @@ static void build_umr(struct bfm_conn *c, struct sig_res *s, uint64_t *w, const 
         bfm_wr16be(&b[142], 2u);                             /* num_entries */
         bfm_wr16be(&b[144], BLK_PI);                         /* データ: stride bcount key va */
         bfm_wr16be(&b[146], BLK);
-        bfm_wr32be(&b[148], g_bfm.lkey);
+        bfm_wr32be(&b[148], c->dev->lkey);
         bfm_wr64be(&b[152], va);
         bfm_wr16be(&b[160], BLK_PI);                         /* PI */
         bfm_wr16be(&b[162], PIB);
-        bfm_wr32be(&b[164], g_bfm.lkey);
+        bfm_wr32be(&b[164], c->dev->lkey);
         bfm_wr64be(&b[168], va + BLK);
     }
 
@@ -349,7 +349,7 @@ static int hw_post(struct bfm_conn *c, uint32_t si, const struct plan *p, int is
 static int sw_post(struct bfm_conn *c, int is_read, uint64_t off, uint64_t va, uint32_t len)
 {
     uint64_t w[8];
-    bfm_ops_build_rdma(c, w, is_read, off, g_bfm.lkey, va, len, 0);
+    bfm_ops_build_rdma(c, w, is_read, off, c->dev->lkey, va, len, 0);
     return bfm_ops_post(c, w, 1u);
 }
 
@@ -495,80 +495,83 @@ static void progress(struct bfm_conn *c, struct job *j)
 /* ---------------------------------------------------------------------
  * 立ち上げ
  * ------------------------------------------------------------------- */
-/* 立ち上げの状態(bfm_dif_init_step() が進める)。 */
+/* 立ち上げの状態(bfm_dif_init_step() が進める。ポートごと)。 */
 enum { D_START = 0, D_PSV, D_MKEY, D_DONE };
 
 static struct {
     int step;                        /* 今の状態(D_*)*/
-    unsigned i, si;                  /* 作っている接続の枠と面 */
+    unsigned i, si;                  /* 作っている接続の枠(ポートの中の番号)と面 */
     uint8_t key8;                    /* 署名つき MKey の鍵の下位 8 ビットの起点 */
     bfm_cmd_t cmd;                   /* 出しているコマンド */
-} s_di;
+} s_di[BFM_MAX_PORT];
 
-/* 立ち上げの状態を最初に戻す(bfm_init() が始めるときに呼ぶ)。 */
-void bfm_dif_init_reset(void)
+/* 立ち上げの状態を最初に戻す(ポートの立ち上げを始めるときに呼ぶ)。 */
+void bfm_dif_init_reset(bfm_dev_t *d)
 {
-    memset(&s_di, 0, sizeof(s_di));
+    memset(&s_di[d->port], 0, sizeof(s_di[d->port]));
 }
 
 /*=================================================================
- * T10-DIF の準備を、待つところまで進める。CRC の表を作り、装置に署名オフロード(sho)が
- * あれば、接続の枠・面ごとに PSV 2 つと署名つき MKey を作る(コマンドの完了を待つところで
+ * ポート d の T10-DIF の準備を、待つところまで進める。CRC の表を作り、装置に署名オフロード(sho)が
+ * あれば、そのポートの接続の枠・面ごとに PSV 2 つと署名つき MKey を作る(コマンドの完了を待つところで
  * BFM_INPROGRESS を返す)。作れなければ表示して BFM_DIF_SW だけにする(失敗にはしない)。
  * 戻り値: BFM_INPROGRESS = 途中。BFM_OK = 済んだ。
  * ===============================================================*/
-int bfm_dif_init_step(void)
+int bfm_dif_init_step(bfm_dev_t *d)
 {
     for (;;) {
-        switch (s_di.step) {
+        switch (s_di[d->port].step) {
         case D_START:
-            memset(s_sig, 0, sizeof(s_sig));
-            memset(s_job, 0, sizeof(s_job));
-            s_hw = 0;
+            for (unsigned i = 0; i < d->nconn; i++) {
+                const int k = d->conn[i].index;
+                memset(s_sig[k], 0, sizeof(s_sig[k]));
+                memset(&s_job[k], 0, sizeof(s_job[k]));
+            }
+            s_hw[d->port] = 0;
             crc_ready();                   /* 表は立ち上げのときに作っておく */
-            if (!g_bfm.sho) {
-                BFM_DBG("bfm: 署名のオフロード(sho)が無い。T10-DIF は BFM_DIF_SW だけ\n");
-                s_di.step = D_DONE;
+            if (!d->sho) {
+                BFM_DBG("bfm: ポート %u: 署名のオフロード(sho)が無い。T10-DIF は BFM_DIF_SW だけ\n", d->port);
+                s_di[d->port].step = D_DONE;
                 break;
             }
-            s_di.key8 = (uint8_t)(bfm_port_time_ns() >> 12);
-            s_di.i = s_di.si = 0;
-            s_di.step = D_PSV;
+            s_di[d->port].key8 = (uint8_t)(bfm_port_time_ns() >> 12);
+            s_di[d->port].i = s_di[d->port].si = 0;
+            s_di[d->port].step = D_PSV;
             break;
         case D_PSV:
         case D_MKEY: {
-            struct sig_res *s = &s_sig[s_di.i][s_di.si];
+            const unsigned i = s_di[d->port].i, si = s_di[d->port].si;
+            struct sig_res *s = &s_sig[d->conn[i].index][si];
             int rc;
-            if (s_di.step == D_PSV) {
+            if (s_di[d->port].step == D_PSV) {
                 uint32_t psv[2];
-                rc = mlx5_create_psv2(&g_bfm, &s_di.cmd, psv);
+                rc = mlx5_create_psv2(d, &s_di[d->port].cmd, psv);
                 if (rc == BFM_OK) {
                     s->psv_mem = psv[0];
                     s->psv_wire = psv[1];
                 }
             } else {
-                rc = mlx5_create_sig_mkey(&g_bfm, &s_di.cmd,
-                                          (uint8_t)(s_di.key8 + s_di.i * BFM_DIF_SLOTS + s_di.si), &s->mkey);
+                rc = mlx5_create_sig_mkey(d, &s_di[d->port].cmd,
+                                          (uint8_t)(s_di[d->port].key8 + i * BFM_DIF_SLOTS + si), &s->mkey);
             }
             if (rc == BFM_INPROGRESS) return rc;
             if (rc != BFM_OK) {
-                BFM_LOG("bfm: 注意: 署名の資源を作れない。T10-DIF は BFM_DIF_SW だけ\n");
-                s_di.step = D_DONE;        /* 作った分は TEARDOWN_HCA で消える */
+                BFM_LOG("bfm: ポート %u: 注意: 署名の資源を作れない。T10-DIF は BFM_DIF_SW だけ\n", d->port);
+                s_di[d->port].step = D_DONE;        /* 作った分は TEARDOWN_HCA で消える */
                 break;
             }
-            if (s_di.step == D_PSV) {
-                s_di.step = D_MKEY;
+            if (s_di[d->port].step == D_PSV) {
+                s_di[d->port].step = D_MKEY;
                 break;
             }
             s->sigerr_count = 1;           /* Linux と同じく、最初の UMR で sigerr の印を立てる */
-            s_di.step = D_PSV;
-            if (++s_di.si == BFM_DIF_SLOTS) {
-                s_di.si = 0;
-                if (++s_di.i == g_bfm.nconn) {
-                    s_hw = 1;
-                    BFM_DBG("bfm: T10-DIF のオフロードを使える(接続 0 の面 0: MKey 0x%08x PSV %u / %u)\n",
-                            s_sig[0][0].mkey, s_sig[0][0].psv_mem, s_sig[0][0].psv_wire);
-                    s_di.step = D_DONE;
+            s_di[d->port].step = D_PSV;
+            if (++s_di[d->port].si == BFM_DIF_SLOTS) {
+                s_di[d->port].si = 0;
+                if (++s_di[d->port].i == d->nconn) {
+                    s_hw[d->port] = 1;
+                    BFM_DBG("bfm: ポート %u: T10-DIF のオフロードを使える\n", d->port);
+                    s_di[d->port].step = D_DONE;
                 }
             }
             break;
@@ -587,9 +590,16 @@ void bfm_dif_attach(struct bfm_conn *c)
     for (unsigned si = 0; si < BFM_DIF_SLOTS; si++) c->sig_mkey[si] = s_sig[c->index][si].mkey;
 }
 
+/* 使う全部のポートで BFM_DIF_HW の資源を用意できたときだけ 1。 */
 int bfm_dif_hw_supported(void)
 {
-    return s_hw;
+    int any = 0;
+    for (unsigned p = 0; p < BFM_MAX_PORT; p++) {
+        if (!g_bfm_dev[p].used) continue;
+        if (!s_hw[p]) return 0;
+        any = 1;
+    }
+    return any;
 }
 
 /* ---------------------------------------------------------------------
@@ -604,7 +614,7 @@ static int prepare(struct bfm_conn *c, uint64_t off, const void *buf, uint32_t n
     int rc = make_plan(d, p);
     if (rc != BFM_OK) return rc;
     if (d->mode != BFM_DIF_SW && d->mode != BFM_DIF_HW) return BFM_E_PARAM;
-    if (d->mode == BFM_DIF_HW && !s_hw) return BFM_E_NOTSUP;
+    if (d->mode == BFM_DIF_HW && !s_hw[c->dev->port]) return BFM_E_NOTSUP;
     const uint32_t remote_bs = is_read ? p->in_bs : p->out_bs;
     rc = bfm_ops_check_range(c, off, (uint64_t)n * remote_bs);
     if (rc != BFM_OK) return rc;

@@ -1249,8 +1249,8 @@ def api_section(allf, descs):
            "説明はヘッダ(`include/bfm.h` / `include/bfm_port.h`)のコメントから取っている。\n"]
     # アプリケーション向け
     out.append("\n=== アプリケーションが使う関数(`include/bfm.h`)\n\n"
-               "使い方の順: `bfm_init()` → `bfm_accept()` / `bfm_connect()` → `bfm_write()` など → "
-               "`bfm_disconnect()` → `bfm_shutdown()`。`bfm_poll()` はときどき呼ぶ。\n\n"
+               "使い方の順: `bfm_run()` が `BFM_OK` を返すまで呼ぶ → `bfm_conn()` で接続を取り `bfm_write()` など → "
+               "`bfm_shutdown()`。`bfm_run()` は使える後もときどき呼び、切れた接続は `bfm_reconnect()` で張り直す。\n\n"
                "[cols=\"3,7\",options=\"header\"]\n|===\n|関数 |説明\n")
     for title, items in header_api("include/bfm.h"):
         out.append("2+h|%s\n" % a_esc(title))

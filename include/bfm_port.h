@@ -25,30 +25,32 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* ---- ポート層が実装する関数 ---- */
+/* ---- ポート層が実装する関数 ----
+ * port はポートの番号(0〜BFM_MAX_PORT-1)。ConnectX はポートごとに別の PCIe の function なので、
+ * 設定空間と BAR0 はポートごとにある。 */
 
-/* 装置を使えるようにし(Linux: VFIO で掴む)、DMA 領域と公開メモリ
- * (g_bfm_dma_* / g_bfm_mr_*)を CPU と NIC の両方から同じアドレスで触れるようにする。
+/* g_bfm_port_conn[] が 0 でないポートの装置を使えるようにし(Linux: VFIO で掴む)、DMA 領域と
+ * 公開メモリ(g_bfm_dma_* / g_bfm_mr_*)を CPU と NIC の両方から同じアドレスで触れるようにする。
  * 0 = 成功。 */
 int  bfm_port_init(void);
-/* bfm_port_init() で取ったものを返す。呼ぶ前に Bus Master は落としてある。 */
+/* bfm_port_init() で取ったものを返す。呼ぶ前に全部のポートの Bus Master は落としてある。 */
 void bfm_port_fini(void);
 
-/* PCIe の設定空間の 32bit 読み書き(off は 4 の倍数)。 */
-uint32_t bfm_port_pci_read32(uint32_t off);
-void     bfm_port_pci_write32(uint32_t off, uint32_t val);
+/* ポート port の PCIe の設定空間の 32bit 読み書き(off は 4 の倍数)。 */
+uint32_t bfm_port_pci_read32(unsigned port, uint32_t off);
+void     bfm_port_pci_write32(unsigned port, uint32_t off, uint32_t val);
 
-/* BAR0 を UC(キャッシュしない)で CPU から触れるようにして先頭を返す。
+/* ポート port の BAR0 を UC(キャッシュしない)で CPU から触れるようにして先頭を返す。
  * bar_phys は設定空間から読んだ BAR0 の値(Linux では使わない)。NULL = 失敗。 */
-volatile uint8_t *bfm_port_bar0_map(uint64_t bar_phys, uint64_t bar_size);
-void              bfm_port_bar0_unmap(void);
+volatile uint8_t *bfm_port_bar0_map(unsigned port, uint64_t bar_phys, uint64_t bar_size);
+void              bfm_port_bar0_unmap(unsigned port);
 
-/* BAR0 の [off, off+len)(UAR の 1 ページ)を write-combining で触れるようにして
+/* ポート port の BAR0 の [off, off+len)(UAR の 1 ページ)を write-combining で触れるようにして
  * 先頭を返す。BlueFlame の書き込み先。NULL = WC は使えない(BlueFlame を使わない)。
  * Linux は UC の窓のそのページを同じ仮想アドレスのまま WC に張り替えるので、
  * 返った後は bfm_port_bar0_map() の窓のそのページも WC になっている。 */
-volatile uint8_t *bfm_port_bar0_wc(uint64_t off, uint64_t len);
-void              bfm_port_bar0_wc_release(uint64_t off, uint64_t len);
+volatile uint8_t *bfm_port_bar0_wc(unsigned port, uint64_t off, uint64_t len);
+void              bfm_port_bar0_wc_release(unsigned port, uint64_t off, uint64_t len);
 
 /* 単調に増える時刻(ナノ秒)。分解能は粗くてよい(時間切れの判定に使う)。 */
 uint64_t bfm_port_time_ns(void);

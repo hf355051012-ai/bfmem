@@ -1,7 +1,8 @@
 /* DMA 領域(g_bfm_dma_base / g_bfm_dma_size)からの静的な切り出し。
  *
- * 返すことはしない(bfm_init() のたびに先頭から切り直す)。接続ごとの資源は
- * bfm_init() のときに g_bfm_max_conn 本ぶんを先に切り出しておく。 */
+ * 返すことはしない(bfm_run() が最初から立ち上げるたびに先頭から切り直す)。接続ごとの資源は
+ * ポートの立ち上げのときに g_bfm_port_conn[] 本ぶんを先に切り出しておく。複数のコアから切り出すことは無い
+ * (ポートの立ち上げは g_bfm_ctl_lock の中で進む)。 */
 #include "bfm_internal.h"
 
 #include <string.h>

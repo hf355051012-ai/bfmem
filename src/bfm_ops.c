@@ -148,14 +148,14 @@ static int post(struct bfm_conn *c, const uint64_t *w, uint32_t bbs)
     bfm_dma_wmb();
     c->qp.dbr[1] = bfm_cpu_to_be32(c->qp.sq_pc & 0xffffu);
     bfm_dma_wmb();
-    if (c->bf != NULL && bbs * MLX5_SEND_WQE_BB <= g_bfm.bf_buf_size) {
+    if (c->bf != NULL && bbs * MLX5_SEND_WQE_BB <= c->dev->bf_buf_size) {
         volatile uint64_t *reg = (volatile uint64_t *)(volatile void *)(c->bf + c->bf_off);
         for (uint32_t k = 0; k < bbs * 8u; k++) reg[k] = w[k];
     } else {
         bfm_mmio_wr64_raw(c->db + c->bf_off, w[0]);
     }
     bfm_wc_flush();
-    c->bf_off ^= g_bfm.bf_buf_size;
+    c->bf_off ^= c->dev->bf_buf_size;
     return BFM_OK;
 }
 
@@ -189,10 +189,10 @@ static void build_raddr(struct bfm_conn *c, uint64_t *w, uint64_t off)
     put32(w, 28, 0);
 }
 
-static void build_dseg(uint64_t *w, unsigned at, uint32_t len, uint64_t addr)
+static void build_dseg(const struct bfm_conn *c, uint64_t *w, unsigned at, uint32_t len, uint64_t addr)
 {
     put32(w, at, len);
-    put32(w, at + 4u, g_bfm.lkey);
+    put32(w, at + 4u, c->dev->lkey);
     put64(w, at + 8u, addr);
 }
 
@@ -237,13 +237,13 @@ void bfm_ops_detach(struct bfm_conn *c)
     c->last_scat = NULL;
 }
 
-/* EQ でその QP のエラーを知ったとき。 */
-void bfm_conn_mark_error(uint32_t qpn, const char *why)
+/* ポート d の EQ でその QP のエラーを知ったとき(QP の番号はポートごとに別に振られる)。 */
+void bfm_conn_mark_error(bfm_dev_t *d, uint32_t qpn, const char *why)
 {
-    for (unsigned i = 0; i < g_bfm.nconn; i++) {
-        struct bfm_conn *c = &g_bfm_conn[i];
+    for (unsigned i = 0; i < d->nconn; i++) {
+        struct bfm_conn *c = &d->conn[i];
         if (c->state == BFM_CS_UP && c->qp.has_qp && c->qp.qpn == qpn) {
-            BFM_LOG("bfm: 接続 %u: %s。接続は使えなくなった\n", i, why);
+            BFM_LOG("bfm: ポート %u の接続 %u: %s。接続は使えなくなった\n", d->port, i, why);
             c->state = BFM_CS_ERROR;
         }
     }
@@ -268,7 +268,7 @@ int bfm_ops_post_rw(struct bfm_conn *c, int is_read, uint64_t off, uint32_t stag
     memset(w, 0, 64);
     build_ctrl(c, w, is_read ? MLX5_OPCODE_RDMA_READ : MLX5_OPCODE_RDMA_WRITE, 3u, 1);
     build_raddr(c, w, off);
-    build_dseg(w, 32, len, bfm_dma_addr(c->stage + stage_off));
+    build_dseg(c, w, 32, len, bfm_dma_addr(c->stage + stage_off));
     return post(c, w, 1u);
 }
 
@@ -345,7 +345,7 @@ int bfm_write(bfm_conn_t *c, uint64_t off, const void *src, uint32_t len)
         memset(w, 0, 64);
         build_ctrl(c, w, MLX5_OPCODE_RDMA_WRITE, 3u, 1);
         build_raddr(c, w, off);
-        build_dseg(w, 32, n, bfm_dma_addr(c->stage));
+        build_dseg(c, w, 32, n, bfm_dma_addr(c->stage));
         if ((rc = post(c, w, 1u)) != BFM_OK) return rc;
         if ((rc = wait_done(c, c->qp.sq_pc)) != BFM_OK) return rc;
         s += n;
@@ -396,7 +396,7 @@ int bfm_read(bfm_conn_t *c, uint64_t off, void *dst, uint32_t len)
         memset(w, 0, sizeof(w));
         build_ctrl(c, w, MLX5_OPCODE_RDMA_READ, 3u, 1);
         build_raddr(c, w, off);
-        build_dseg(w, 32, n, bfm_dma_addr(c->stage));
+        build_dseg(c, w, 32, n, bfm_dma_addr(c->stage));
         if ((rc = post(c, w, 1u)) != BFM_OK) return rc;
         if ((rc = wait_done(c, c->qp.sq_pc)) != BFM_OK) return rc;
         if (c->last_scat != NULL && n <= SCAT_MAX) {
@@ -443,7 +443,7 @@ static int atomic_op(struct bfm_conn *c, uint32_t opcode, uint64_t off, uint64_t
     build_raddr(c, w, off);
     put64(w, 32, swap_add);
     put64(w, 40, cmp);
-    build_dseg(w, 48, 8u, bfm_dma_addr(c->stage));
+    build_dseg(c, w, 48, 8u, bfm_dma_addr(c->stage));
     if ((rc = post(c, w, 1u)) != BFM_OK) return rc;
     if ((rc = wait_done(c, c->qp.sq_pc)) != BFM_OK) return rc;
     if (old) *old = atomic_result(c);
@@ -464,7 +464,7 @@ static int atomic32_op(struct bfm_conn *c, uint32_t opcode, uint64_t off, uint32
     int rc = check_range(c, off, 4u);
     if (rc != BFM_OK) return rc;
     if (((c->raddr + off) & 3u) != 0) return BFM_E_PARAM;
-    if ((g_bfm.atomic_ops & 0x0cu) != 0x0cu || (g_bfm.atomic_size_qp & 0x04u) == 0) return BFM_E_NOTSUP;
+    if ((c->dev->atomic_ops & 0x0cu) != 0x0cu || (c->dev->atomic_size_qp & 0x04u) == 0) return BFM_E_NOTSUP;
     memset(w, 0, sizeof(w));
     build_ctrl(c, w, opcode, 4u, 1);
     put32(w, 0, (MLX5_OPMOD_EXT_ATOMIC(2u) << 24) | ((c->qp.sq_pc & 0xffffu) << 8) | opcode);
@@ -475,7 +475,7 @@ static int atomic32_op(struct bfm_conn *c, uint32_t opcode, uint64_t off, uint32
         put32(w, 40, 0xffffffffu);
         put32(w, 44, 0xffffffffu);
     }
-    build_dseg(w, 48, 4u, bfm_dma_addr(c->stage));
+    build_dseg(c, w, 48, 4u, bfm_dma_addr(c->stage));
     if ((rc = post(c, w, 1u)) != BFM_OK) return rc;
     if ((rc = wait_done(c, c->qp.sq_pc)) != BFM_OK) return rc;
     if (old) *old = atomic32_result(c);

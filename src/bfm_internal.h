@@ -15,10 +15,11 @@
 #define BFM_PAGE 4096u   /* ConnectX が扱うページサイズ。ConnectX の仕様で規定 */
 
 /* ---------------------------------------------------------------------
- * 鍵(複数のコアから接続・切断・bfm_poll() を呼べるように)
+ * 鍵(複数のコアから bfm_run() を同時に呼べるように)
  *
- * x86-64 の xchg で取り、取れなければ pause しながら回って待つ(OS の機能は使わない)。
- * 回って待つので、同じ CPU の上で鍵を持ったタスクより優先度の高いタスクが鍵を待つと進まない。
+ * x86-64 の xchg で取る(OS の機能は使わない)。bfm_run() は bfm_trylock() で 1 回だけ試し、取れなければ
+ * 待たずに次へ行く。bfm_lock() は取れなければ pause しながら回って待つ(bfm_reconnect()・bfm_shutdown())。
+ * 回って待つ側は、同じ CPU の上で鍵を持ったタスクより優先度の高いタスクから呼ぶと進まない。
  * データ経路(write / read / atomic / T10-DIF)は鍵を使わない(接続ごとの資源だけを触る)。
  * ------------------------------------------------------------------- */
 typedef struct {
@@ -37,12 +38,20 @@ static inline void bfm_lock(bfm_lock_t *l)
     }
 }
 
+/* 回って待たずに 1 回だけ取ってみる。1 = 取れた、0 = 誰かが持っている。 */
+static inline int bfm_trylock(bfm_lock_t *l)
+{
+    if (__atomic_load_n(&l->v, __ATOMIC_RELAXED) != 0u) return 0;
+    return __atomic_exchange_n(&l->v, 1u, __ATOMIC_ACQUIRE) == 0u;
+}
+
 static inline void bfm_unlock(bfm_lock_t *l)
 {
     __atomic_store_n(&l->v, 0u, __ATOMIC_RELEASE);
 }
 
-/* 接続管理(GSI・接続の枠の取り外し)・FW のコマンド・EQ の処理を 1 つずつにする鍵(bfm_core.c)。 */
+/* 接続をまたぐ状態(全部のポートの GSI・接続の枠・FW のコマンド・EQ・DMA 領域の切り出し)を
+ * 1 つずつにする鍵(bfm_core.c)。bfm_run() は取れなければ待たずに次へ行く。 */
 extern bfm_lock_t g_bfm_ctl_lock;
 
 /* ---------------------------------------------------------------------
@@ -191,9 +200,21 @@ typedef struct {
 } bfm_pages_t;
 
 /* ---------------------------------------------------------------------
- * 装置
+ * 装置(ConnectX のポート 1 つ = PCIe の function 1 つ)
  * ------------------------------------------------------------------- */
+struct bfm_conn;
+
 typedef struct {
+    /* ポート */
+    unsigned port;                   /* ポートの番号(g_bfm_dev の添字。移植層の関数に渡す)*/
+    uint8_t  used;                   /* 使う(g_bfm_port_conn[port] が 0 でない)*/
+    uint8_t  initiator;              /* 1 = 掛け側(自分の IPv4 < 相手の IPv4)、0 = 受け側 */
+    int      phase;                  /* ポートの立ち上げの状態(bfm_core.c の D_*)*/
+    int      stop;                   /* 止める手順(bfm_core.c の S_*)*/
+    int      stop_rc;                /* 止め終えたときの結果(立ち上げの失敗の理由。0 = bfm_shutdown())*/
+    int      fail_rc;                /* 立ち上げに失敗した理由(phase が D_FAILED のとき)*/
+    struct bfm_conn *conn;           /* このポートの接続の表の先頭(g_bfm_conn + port * BFM_MAX_PORT_CONN)*/
+
     /* PCIe */
     uint16_t vendor;                 /* PCI のベンダ ID(0x15b3 = Mellanox / NVIDIA)*/
     uint16_t device;                 /* PCI のデバイス ID(対応する ConnectX の表で name を引く)*/
@@ -247,10 +268,10 @@ typedef struct {
     int      link_up;                /* リンクが上がっている(ポートの状態のイベントで更新する)*/
 
     /* 接続の枠 */
-    uint32_t nconn;                  /* 用意した接続の枠の数(g_bfm_max_conn を BFM_MAX_CONN までに直したもの)*/
+    uint32_t nconn;                  /* このポートの接続の数(g_bfm_port_conn[port] を BFM_MAX_PORT_CONN までに直したもの)*/
 } bfm_dev_t;
 
-extern bfm_dev_t g_bfm;
+extern bfm_dev_t g_bfm_dev[BFM_MAX_PORT];
 
 /* QP 1 本ぶんの資源(RC と GSI で共通)。 */
 typedef struct {
@@ -291,10 +312,16 @@ struct bfm_sig_rec {
     uint64_t off;                    /* 誤りの位置(署名つき MKey の中のバイト)*/
 };
 
-/* 接続 1 本。コアごとに別の接続を使うので、隣の接続とキャッシュラインを分ける。 */
+/* 接続 1 本 = 接続の表(g_bfm_conn)の 1 行。行ごとに状態機械(step)を持ち、bfm_run() は鍵(lock)を
+ * 取れた行の状態を 1 つ進める。コアごとに別の接続を使うので、隣の接続とキャッシュラインを分ける。 */
 struct __attribute__((aligned(64))) bfm_conn {
+    bfm_lock_t lock;                 /* この行の鍵(bfm_run() は取れた行だけを進める)*/
+    uint8_t  used;                   /* 1 = 使う行(ポートの接続の数の内側)*/
+    uint8_t  reconnect;              /* 1 = 張り直しを頼まれた(bfm_reconnect())*/
+    uint16_t pidx;                   /* ポートの中の番号(0〜nconn-1。接続の番号 g_bfm_cm_port + pidx)*/
+    bfm_dev_t *dev;                  /* この接続のポート(装置)*/
     int state;                       /* 接続の状態(BFM_CS_FREE / SETUP / UP / ERROR / CLOSED)*/
-    int index;                       /* 枠の番号(g_bfm_conn の添字。表示に使う)*/
+    int index;                       /* 表の番号(g_bfm_conn の添字 = ポート x BFM_MAX_PORT_CONN + pidx)*/
     bfm_qp_t qp;                     /* この接続の RC の QP・CQ・UAR */
 
     /* データ経路(接続のときに求めておく)*/
@@ -336,16 +363,16 @@ struct __attribute__((aligned(64))) bfm_conn {
     uint16_t port;                   /* 待ち受けの番号 */
     uint8_t  got_rep;                /* 掛け側: REP を受け取った */
     uint8_t  step;                   /* 状態機械の今の手順(bfm_cm.c の K_*)*/
-    uint8_t  role;                   /* 1 = 掛け側(bfm_connect())、2 = 受け側(bfm_accept())*/
-    uint8_t  abort;                  /* 畳む(bfm_disconnect() か確立の失敗)*/
+    uint8_t  role;                   /* 1 = 掛け側(自分の IPv4 が小さい)、2 = 受け側 */
+    uint8_t  abort;                  /* 畳む(張り直し・確立の失敗・bfm_shutdown())*/
     uint8_t  amode;                  /* RTR2RTS に付ける atomic_mode(断られたら 0 にして出し直す)*/
-    int      result;                 /* 畳み終えたときに返す値 */
-    uint32_t timeout_ms;             /* 掛け側: 確立の上限。受け側: REQ を待つ上限(0 = 待ち続ける)*/
+    int      result;                 /* 畳み終えたときの結果(負なら K_FAILED に止まる)*/
     uint64_t t0;                     /* 確立を始めた時刻 */
     uint64_t t_sent;                 /* 掛け側: REQ を最後に送った時刻。畳む: BYE を出し始めた時刻 */
     bfm_cmd_t cmd;                   /* この接続が出している FW のコマンド */
 };
 
+/* 接続の表。ポート p の接続 i は g_bfm_conn[p * BFM_MAX_PORT_CONN + i]。 */
 extern struct bfm_conn g_bfm_conn[BFM_MAX_CONN];
 
 /* ---------------------------------------------------------------------
@@ -359,10 +386,13 @@ uint64_t bfm_mem_used(void);
 
 /* 以下、戻り値が int で「待たずに進める」関数は、BFM_INPROGRESS の間は同じ引数で呼び直す。 */
 
+/* bfm_core.c */
+int  bfm_dev_step(bfm_dev_t *d);           /* ポートの立ち上げを進める(接続の状態機械の K_PORT から)*/
+
 /* bfm_pci.c */
-void bfm_pci_setup_reset(void);
+void bfm_pci_setup_reset(bfm_dev_t *d);
 int  bfm_pci_setup_step(bfm_dev_t *d);
-void bfm_pci_bus_master(int on);
+void bfm_pci_bus_master(bfm_dev_t *d, int on);
 
 /* mlx5_cmd.c */
 int  mlx5_cmd_init(bfm_dev_t *d);
@@ -372,14 +402,14 @@ int  mlx5_cmd_drain(bfm_dev_t *d);
 int  mlx5_destroy_obj(bfm_dev_t *d, bfm_cmd_t *j, uint16_t opcode, uint32_t id, const char *what);
 int  mlx5_pages_start(bfm_dev_t *d, bfm_pages_t *p, uint16_t func, int32_t npages);
 int  mlx5_pages_step(bfm_dev_t *d, bfm_pages_t *p);
-void mlx5_eq_reset(void);
+void mlx5_eq_reset(bfm_dev_t *d);
 int  mlx5_eq_prepare(bfm_dev_t *d);
 int  mlx5_eq_create(bfm_dev_t *d, bfm_cmd_t *j);
 int  mlx5_eq_poll(bfm_dev_t *d);
-int  mlx5_eq_busy(void);
+int  mlx5_eq_busy(const bfm_dev_t *d);
 
 /* mlx5_hca.c */
-void mlx5_hca_init_reset(void);
+void mlx5_hca_init_reset(bfm_dev_t *d);
 int  mlx5_hca_init_step(bfm_dev_t *d);
 int  mlx5_hca_teardown(bfm_dev_t *d);
 int  mlx5_alloc_uar(bfm_dev_t *d, bfm_cmd_t *j, uint32_t *uarn);
@@ -400,15 +430,18 @@ uint16_t mlx5_udp_sport(uint32_t lqpn, uint32_t rqpn);
 void mlx5_gid_from_ipv4(uint32_t ip, uint8_t gid[16]);
 
 /* bfm_cm.c */
-void bfm_cm_reset(void);
-int  bfm_cm_init_step(void);
-int  bfm_cm_fini_step(void);
-int  bfm_cm_poll(void);
+void bfm_cm_reset(bfm_dev_t *d);
+int  bfm_cm_init_step(bfm_dev_t *d);
+int  bfm_cm_fini_step(bfm_dev_t *d);
+int  bfm_cm_poll(bfm_dev_t *d);
+void bfm_cm_table_init(void);              /* 接続の表を作る(bfm_run() の最初)*/
+int  bfm_cm_conn_step(struct bfm_conn *c); /* 接続の状態機械を 1 つ進める(g_bfm_ctl_lock の中で)*/
+int  bfm_cm_conn_state(const struct bfm_conn *c);   /* 公開する状態(BFM_ST_*)*/
 
 /* bfm_ops.c */
 int  bfm_ops_attach(struct bfm_conn *c);   /* 接続ができた後、データ経路の準備 */
 void bfm_ops_detach(struct bfm_conn *c);
-void bfm_conn_mark_error(uint32_t qpn, const char *why);
+void bfm_conn_mark_error(bfm_dev_t *d, uint32_t qpn, const char *why);
 /* 性能の試験用(test/bfm_test.c の bench)。 */
 int  bfm_ops_post_rw(struct bfm_conn *c, int is_read, uint64_t off, uint32_t stage_off,
                      const void *src, uint32_t len);
@@ -423,8 +456,8 @@ void bfm_ops_build_rdma(struct bfm_conn *c, uint64_t *w, int is_read, uint64_t o
                         uint64_t addr, uint32_t len, uint8_t fence);
 
 /* bfm_dif.c */
-void bfm_dif_init_reset(void);
-int  bfm_dif_init_step(void);
+void bfm_dif_init_reset(bfm_dev_t *d);
+int  bfm_dif_init_step(bfm_dev_t *d);
 void bfm_dif_attach(struct bfm_conn *c);   /* 接続ができたとき(bfm_ops_attach() から)*/
 
 #endif /* BFM_INTERNAL_H */

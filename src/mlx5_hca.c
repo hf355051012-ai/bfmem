@@ -68,38 +68,38 @@ static int access_reg(bfm_dev_t *d, bfm_cmd_t *j, uint16_t reg, int read, uint8_
     return rc;
 }
 
-static uint8_t s_cap_out[16 + MLX5_HCA_CAP_BYTES];  /* QUERY_HCA_CAP の応答(16 バイトの頭 + 能力)*/
-static uint8_t s_cap_in[16 + MLX5_HCA_CAP_BYTES];   /* SET_HCA_CAP の入力(s_cap_out の能力を直して写す)*/
+static uint8_t s_cap_out[BFM_MAX_PORT][16 + MLX5_HCA_CAP_BYTES];  /* QUERY_HCA_CAP の応答(16 バイトの頭 + 能力)*/
+static uint8_t s_cap_in[BFM_MAX_PORT][16 + MLX5_HCA_CAP_BYTES];  /* SET_HCA_CAP の入力(s_cap_out の能力を直して写す)*/
 
 static int query_cap(bfm_dev_t *d, bfm_cmd_t *j, uint16_t type, const char *what)
 {
     uint8_t in[16] = {0};
     bfm_wr16be(&in[0], MLX5_CMD_QUERY_HCA_CAP);
     bfm_wr16be(&in[6], (uint16_t)((type << 1) | 1u));   /* current */
-    return mlx5_cmd_run(d, j, in, sizeof(in), s_cap_out, sizeof(s_cap_out), what);
+    return mlx5_cmd_run(d, j, in, sizeof(in), s_cap_out[d->port], sizeof(s_cap_out[d->port]), what);
 }
 
-/* s_cap_out の能力(書き換え済み)をそのまま SET_HCA_CAP で書く。 */
+/* s_cap_out[d->port] の能力(書き換え済み)をそのまま SET_HCA_CAP で書く。 */
 static int set_cap(bfm_dev_t *d, bfm_cmd_t *j, uint16_t type, const char *what)
 {
     uint8_t out[16];
     if (!j->posted) {
-        memset(s_cap_in, 0, 16);
-        bfm_wr16be(&s_cap_in[0], MLX5_CMD_SET_HCA_CAP);
-        bfm_wr16be(&s_cap_in[6], (uint16_t)(type << 1));
-        memcpy(&s_cap_in[16], &s_cap_out[16], MLX5_HCA_CAP_BYTES);
+        memset(s_cap_in[d->port], 0, 16);
+        bfm_wr16be(&s_cap_in[d->port][0], MLX5_CMD_SET_HCA_CAP);
+        bfm_wr16be(&s_cap_in[d->port][6], (uint16_t)(type << 1));
+        memcpy(&s_cap_in[d->port][16], &s_cap_out[d->port][16], MLX5_HCA_CAP_BYTES);
     }
-    return mlx5_cmd_run(d, j, s_cap_in, sizeof(s_cap_in), out, sizeof(out), what);
+    return mlx5_cmd_run(d, j, s_cap_in[d->port], sizeof(s_cap_in[d->port]), out, sizeof(out), what);
 }
 
 /*=================================================================
- * general の能力(s_cap_out)から要るものを取り出す(書き戻しは今の値のまま。
+ * general の能力(s_cap_out[d->port])から要るものを取り出す(書き戻しは今の値のまま。
  * Linux も今の値を写してから一部を変えて書く。ここでは変えるものが無い)。
  * 位置は struct mlx5_ifc_cmd_hca_cap_bits のビット位置 / 8。
  * ===============================================================*/
 static int parse_general_caps(bfm_dev_t *d)
 {
-    const uint8_t *c = &s_cap_out[16];
+    const uint8_t *c = &s_cap_out[d->port][16];
     d->page_request_disable = (uint8_t)((c[0] & 0x02u) ? 1u : 0u);   /* bit 0x6 */
     d->log_max_ra_req_qp = c[41] & 0x3fu;                             /* bit 0x14a */
     d->log_max_ra_res_qp = c[43] & 0x3fu;                             /* bit 0x15a */
@@ -132,8 +132,8 @@ static int parse_general_caps(bfm_dev_t *d)
 }
 
 /*=================================================================
- * atomic の能力(s_cap_out)を読む。8 バイトの atomic をホストのバイト順で扱う設定に
- * なっていなければ、s_cap_out を書き換えて 1 を返す(呼び出し側が SET_HCA_CAP で書く。
+ * atomic の能力(s_cap_out[d->port])を読む。8 バイトの atomic をホストのバイト順で扱う設定に
+ * なっていなければ、s_cap_out[d->port] を書き換えて 1 を返す(呼び出し側が SET_HCA_CAP で書く。
  * Linux の handle_hca_cap_atomic() と同じ。できない装置は断る)。
  *   byte 8  bit7-6 atomic_req_8B_endianness_mode(0 = BE / 1 = ホスト順)
  *   byte 8  bit1   supported_atomic_req_8B_endianness_mode_1
@@ -143,7 +143,7 @@ static int parse_general_caps(bfm_dev_t *d)
  * ===============================================================*/
 static int parse_atomic_caps(bfm_dev_t *d)
 {
-    uint8_t *c = &s_cap_out[16];
+    uint8_t *c = &s_cap_out[d->port][16];
     d->atomic_ops = bfm_rd16be(&c[18]);
     d->atomic_size_qp = bfm_rd16be(&c[22]);
     if ((c[8] >> 6) == 1u) return 0;
@@ -405,20 +405,20 @@ static struct {
     uint8_t reg[16];                 /* ACCESS_REG のデータ(完了した呼び出しで読んだ値が入る)*/
     uint32_t frame;                  /* ポートに設定するフレーム長 */
     int read_ok;                     /* PAOS が読めた */
-} s_hi;
+} s_hi[BFM_MAX_PORT];                 /* ポートごと */
 
 /* 停止の状態(mlx5_hca_teardown())。 */
 static struct {
     uint16_t prof;                   /* 0 = graceful、1 = force */
     bfm_cmd_t cmd;                   /* 出している TEARDOWN_HCA */
-} s_td;
+} s_td[BFM_MAX_PORT];                 /* ポートごと */
 
-/* 立ち上げと停止の状態を最初に戻す(bfm_init() が始めるときに呼ぶ)。 */
-void mlx5_hca_init_reset(void)
+/* 立ち上げと停止の状態を最初に戻す(ポートの立ち上げを始めるときに呼ぶ)。 */
+void mlx5_hca_init_reset(bfm_dev_t *d)
 {
-    memset(&s_hi, 0, sizeof(s_hi));
-    memset(&s_td, 0, sizeof(s_td));
-    mlx5_eq_reset();
+    memset(&s_hi[d->port], 0, sizeof(s_hi[d->port]));
+    memset(&s_td[d->port], 0, sizeof(s_td[d->port]));
+    mlx5_eq_reset(d);
 }
 
 /*=================================================================
@@ -430,7 +430,7 @@ int mlx5_hca_init_step(bfm_dev_t *d)
 {
     int rc;
     for (;;) {
-        switch (s_hi.step) {
+        switch (s_hi[d->port].step) {
         case H_START: {
             const uint32_t fw = bfm_mmio_rd32be(d->bar0, MLX5_ISEG_FW_REV);
             const uint32_t cmdif = bfm_mmio_rd32be(d->bar0, MLX5_ISEG_CMDIF_REV);
@@ -443,44 +443,44 @@ int mlx5_hca_init_step(bfm_dev_t *d)
                 BFM_LOG("bfm: コマンドの版が %u(%u を想定)\n", cmdif >> 16, MLX5_CMD_IF_REV);
                 return BFM_E_HW;
             }
-            s_hi.t0 = bfm_port_time_ns();
-            s_hi.step = H_FW_WAIT1;
+            s_hi[d->port].t0 = bfm_port_time_ns();
+            s_hi[d->port].step = H_FW_WAIT1;
             break;
         }
         case H_FW_WAIT1:
         case H_FW_WAIT2:
             if (fw_initializing(d)) {
-                if (ms_since(s_hi.t0) <= FW_INIT_TIMEOUT_MS) return BFM_INPROGRESS;
+                if (ms_since(s_hi[d->port].t0) <= FW_INIT_TIMEOUT_MS) return BFM_INPROGRESS;
                 BFM_LOG("bfm: FW の初期化(%s)が %u ms で終わらない\n",
-                        s_hi.step == H_FW_WAIT1 ? "pre-init" : "init", FW_INIT_TIMEOUT_MS);
+                        s_hi[d->port].step == H_FW_WAIT1 ? "pre-init" : "init", FW_INIT_TIMEOUT_MS);
                 return BFM_E_TIMEOUT;
             }
-            s_hi.step = (s_hi.step == H_FW_WAIT1) ? H_CMDQ : H_ENABLE;
+            s_hi[d->port].step = (s_hi[d->port].step == H_FW_WAIT1) ? H_CMDQ : H_ENABLE;
             break;
         case H_CMDQ:
             if ((rc = mlx5_cmd_init(d)) != BFM_OK) return rc;
-            s_hi.t0 = bfm_port_time_ns();
-            s_hi.step = H_CMDQ_WAIT;
+            s_hi[d->port].t0 = bfm_port_time_ns();
+            s_hi[d->port].step = H_CMDQ_WAIT;
             break;
         case H_CMDQ_WAIT:
-            if (ms_since(s_hi.t0) < CMDQ_SETTLE_MS) return BFM_INPROGRESS;
-            s_hi.t0 = bfm_port_time_ns();
-            s_hi.step = H_FW_WAIT2;
+            if (ms_since(s_hi[d->port].t0) < CMDQ_SETTLE_MS) return BFM_INPROGRESS;
+            s_hi[d->port].t0 = bfm_port_time_ns();
+            s_hi[d->port].step = H_FW_WAIT2;
             break;
         case H_ENABLE:
-            if ((rc = simple_cmd(d, &s_hi.cmd, MLX5_CMD_ENABLE_HCA, 0, "ENABLE_HCA")) != BFM_OK) return rc;
+            if ((rc = simple_cmd(d, &s_hi[d->port].cmd, MLX5_CMD_ENABLE_HCA, 0, "ENABLE_HCA")) != BFM_OK) return rc;
             d->hca_enabled = 1;
-            s_hi.step = H_QUERY_ISSI;
+            s_hi[d->port].step = H_QUERY_ISSI;
             break;
         case H_QUERY_ISSI: {
             uint8_t in[16] = {0}, out[112];
             bfm_wr16be(&in[0], MLX5_CMD_QUERY_ISSI);
-            if ((rc = mlx5_cmd_run(d, &s_hi.cmd, in, sizeof(in), out, sizeof(out), "QUERY_ISSI")) != BFM_OK) return rc;
+            if ((rc = mlx5_cmd_run(d, &s_hi[d->port].cmd, in, sizeof(in), out, sizeof(out), "QUERY_ISSI")) != BFM_OK) return rc;
             if (bfm_rd32be(&out[108]) & 0x2u) {
-                s_hi.step = H_SET_ISSI;
+                s_hi[d->port].step = H_SET_ISSI;
             } else {
                 BFM_LOG("bfm: ISSI 1 に対応していない。ISSI 0 のまま進む\n");
-                s_hi.step = H_BOOT_QUERY;
+                s_hi[d->port].step = H_BOOT_QUERY;
             }
             break;
         }
@@ -488,13 +488,13 @@ int mlx5_hca_init_step(bfm_dev_t *d)
             uint8_t in[16] = {0}, out[16];
             bfm_wr16be(&in[0], MLX5_CMD_SET_ISSI);
             bfm_wr16be(&in[10], 1u);
-            if ((rc = mlx5_cmd_run(d, &s_hi.cmd, in, sizeof(in), out, sizeof(out), "SET_ISSI")) != BFM_OK) return rc;
-            s_hi.step = H_BOOT_QUERY;
+            if ((rc = mlx5_cmd_run(d, &s_hi[d->port].cmd, in, sizeof(in), out, sizeof(out), "SET_ISSI")) != BFM_OK) return rc;
+            s_hi[d->port].step = H_BOOT_QUERY;
             break;
         }
         case H_BOOT_QUERY:
         case H_INIT_QUERY: {
-            const int boot = (s_hi.step == H_BOOT_QUERY);
+            const int boot = (s_hi[d->port].step == H_BOOT_QUERY);
             if (boot && d->fw_pages == NULL) {
                 d->fw_pages = (uint8_t *)bfm_mem_alloc((uint64_t)g_bfm_fw_pages_max * BFM_PAGE, BFM_PAGE);
                 if (d->fw_pages == NULL) return BFM_E_NOMEM;
@@ -502,206 +502,206 @@ int mlx5_hca_init_step(bfm_dev_t *d)
             }
             uint16_t func = 0;
             int32_t n = 0;
-            if ((rc = query_pages(d, &s_hi.cmd, boot ? 1u : 2u, &func, &n)) != BFM_OK) return rc;
+            if ((rc = query_pages(d, &s_hi[d->port].cmd, boot ? 1u : 2u, &func, &n)) != BFM_OK) return rc;
             BFM_DBG("bfm: FW が %s のページを %d 求めた\n", boot ? "boot" : "init", (int)n);
-            if ((rc = mlx5_pages_start(d, &s_hi.pages, func, n)) != BFM_OK) return rc;
-            s_hi.step = boot ? H_BOOT_GIVE : H_INIT_GIVE;
+            if ((rc = mlx5_pages_start(d, &s_hi[d->port].pages, func, n)) != BFM_OK) return rc;
+            s_hi[d->port].step = boot ? H_BOOT_GIVE : H_INIT_GIVE;
             break;
         }
         case H_BOOT_GIVE:
         case H_INIT_GIVE:
-            if ((rc = mlx5_pages_step(d, &s_hi.pages)) != BFM_OK) return rc;
-            s_hi.step = (s_hi.step == H_BOOT_GIVE) ? H_HOST_ENDIAN : H_INIT_HCA;
+            if ((rc = mlx5_pages_step(d, &s_hi[d->port].pages)) != BFM_OK) return rc;
+            s_hi[d->port].step = (s_hi[d->port].step == H_BOOT_GIVE) ? H_HOST_ENDIAN : H_INIT_HCA;
             break;
         case H_HOST_ENDIAN:
             /* HOST_ENDIANNESS(Linux の set_hca_ctrl())。x86 はリトルエンディアンなので 0。 */
-            if (!s_hi.cmd.posted) memset(s_hi.reg, 0, sizeof(s_hi.reg));
-            if ((rc = access_reg(d, &s_hi.cmd, MLX5_REG_HOST_ENDIANNESS, 0, s_hi.reg,
+            if (!s_hi[d->port].cmd.posted) memset(s_hi[d->port].reg, 0, sizeof(s_hi[d->port].reg));
+            if ((rc = access_reg(d, &s_hi[d->port].cmd, MLX5_REG_HOST_ENDIANNESS, 0, s_hi[d->port].reg,
                                  "ACCESS_REG(HOST_ENDIANNESS)")) != BFM_OK) return rc;
-            s_hi.step = H_GEN_QUERY;
+            s_hi[d->port].step = H_GEN_QUERY;
             break;
         case H_GEN_QUERY:
-            if ((rc = query_cap(d, &s_hi.cmd, MLX5_CAP_GENERAL, "QUERY_HCA_CAP(general)")) != BFM_OK) return rc;
+            if ((rc = query_cap(d, &s_hi[d->port].cmd, MLX5_CAP_GENERAL, "QUERY_HCA_CAP(general)")) != BFM_OK) return rc;
             if ((rc = parse_general_caps(d)) != BFM_OK) return rc;
-            s_hi.step = H_GEN_SET;
+            s_hi[d->port].step = H_GEN_SET;
             break;
         case H_GEN_SET:
-            if ((rc = set_cap(d, &s_hi.cmd, MLX5_CAP_GENERAL, "SET_HCA_CAP(general)")) != BFM_OK) return rc;
-            s_hi.step = H_ATOM_QUERY;
+            if ((rc = set_cap(d, &s_hi[d->port].cmd, MLX5_CAP_GENERAL, "SET_HCA_CAP(general)")) != BFM_OK) return rc;
+            s_hi[d->port].step = H_ATOM_QUERY;
             break;
         case H_ATOM_QUERY:
-            rc = query_cap(d, &s_hi.cmd, MLX5_CAP_ATOMIC, "QUERY_HCA_CAP(atomic)");
+            rc = query_cap(d, &s_hi[d->port].cmd, MLX5_CAP_ATOMIC, "QUERY_HCA_CAP(atomic)");
             if (rc == BFM_INPROGRESS) return rc;
             if (rc != BFM_OK) return BFM_E_HW;
             if ((rc = parse_atomic_caps(d)) < 0) return rc;
             if (rc == 0) decide_atomic_mode(d);
-            s_hi.step = (rc == 1) ? H_ATOM_SET : H_ROCE_QUERY;
+            s_hi[d->port].step = (rc == 1) ? H_ATOM_SET : H_ROCE_QUERY;
             break;
         case H_ATOM_SET:
-            rc = set_cap(d, &s_hi.cmd, MLX5_CAP_ATOMIC, "SET_HCA_CAP(atomic)");
+            rc = set_cap(d, &s_hi[d->port].cmd, MLX5_CAP_ATOMIC, "SET_HCA_CAP(atomic)");
             if (rc == BFM_INPROGRESS) return rc;
             if (rc != BFM_OK) return BFM_E_HW;
             decide_atomic_mode(d);
-            s_hi.step = H_ROCE_QUERY;
+            s_hi[d->port].step = H_ROCE_QUERY;
             break;
         case H_ROCE_QUERY:
             /* RoCE の能力の qp_ts_format(byte 3 の下位 2bit)が 0 でなければ、QP は ts_format = 1(DEFAULT)。
              * 読めなければ 0 のまま進む。 */
-            rc = query_cap(d, &s_hi.cmd, MLX5_CAP_ROCE, "QUERY_HCA_CAP(roce)");
+            rc = query_cap(d, &s_hi[d->port].cmd, MLX5_CAP_ROCE, "QUERY_HCA_CAP(roce)");
             if (rc == BFM_INPROGRESS) return rc;
-            d->qp_ts_format = (rc == BFM_OK && (s_cap_out[16 + 3] & 0x03u)) ? 1u : 0u;
-            s_hi.step = H_INIT_QUERY;
+            d->qp_ts_format = (rc == BFM_OK && (s_cap_out[d->port][16 + 3] & 0x03u)) ? 1u : 0u;
+            s_hi[d->port].step = H_INIT_QUERY;
             break;
         case H_INIT_HCA: {
             uint8_t in[32] = {0}, out[16];
             bfm_wr16be(&in[0], MLX5_CMD_INIT_HCA);
-            if ((rc = mlx5_cmd_run(d, &s_hi.cmd, in, sizeof(in), out, sizeof(out), "INIT_HCA")) != BFM_OK) return rc;
+            if ((rc = mlx5_cmd_run(d, &s_hi[d->port].cmd, in, sizeof(in), out, sizeof(out), "INIT_HCA")) != BFM_OK) return rc;
             if ((rc = mlx5_eq_prepare(d)) != BFM_OK) return rc;
-            s_hi.step = H_EQ_UAR;
+            s_hi[d->port].step = H_EQ_UAR;
             break;
         }
         case H_EQ_UAR:
-            if ((rc = mlx5_alloc_uar(d, &s_hi.cmd, &d->eq_uarn)) != BFM_OK) return rc;
-            s_hi.step = H_EQ_CREATE;
+            if ((rc = mlx5_alloc_uar(d, &s_hi[d->port].cmd, &d->eq_uarn)) != BFM_OK) return rc;
+            s_hi[d->port].step = H_EQ_CREATE;
             break;
         case H_EQ_CREATE:
-            if ((rc = mlx5_eq_create(d, &s_hi.cmd)) != BFM_OK) return rc;
-            s_hi.step = H_PD;
+            if ((rc = mlx5_eq_create(d, &s_hi[d->port].cmd)) != BFM_OK) return rc;
+            s_hi[d->port].step = H_PD;
             break;
         case H_PD:
-            if ((rc = alloc_pd(d, &s_hi.cmd, &d->pdn)) != BFM_OK) return rc;
-            s_hi.step = H_LKEY;
+            if ((rc = alloc_pd(d, &s_hi[d->port].cmd, &d->pdn)) != BFM_OK) return rc;
+            s_hi[d->port].step = H_LKEY;
             break;
         case H_LKEY:
-            if ((rc = create_mkey_pa(d, &s_hi.cmd, 0x0cu, 0, 0, 0, &d->lkey, "CREATE_MKEY(local)")) != BFM_OK)
+            if ((rc = create_mkey_pa(d, &s_hi[d->port].cmd, 0x0cu, 0, 0, 0, &d->lkey, "CREATE_MKEY(local)")) != BFM_OK)
                 return rc;
             d->rkey_key8 = (uint8_t)(bfm_port_time_ns() >> 10);
-            s_hi.step = H_RKEY;
+            s_hi[d->port].step = H_RKEY;
             break;
         case H_RKEY:
-            if ((rc = create_mkey_pa(d, &s_hi.cmd, 0x7cu, g_bfm_mr_base, g_bfm_mr_size, d->rkey_key8, &d->rkey,
+            if ((rc = create_mkey_pa(d, &s_hi[d->port].cmd, 0x7cu, g_bfm_mr_base, g_bfm_mr_size, d->rkey_key8, &d->rkey,
                                      "CREATE_MKEY(公開メモリ)")) != BFM_OK) return rc;
-            s_hi.step = g_bfm_port_mtu ? H_MTU_READ : H_LINK_UP;
+            s_hi[d->port].step = g_bfm_port_mtu ? H_MTU_READ : H_LINK_UP;
             break;
         case H_MTU_READ: {
             /* ポートの MTU を IP の MTU(Linux の ip link set mtu と同じ意味)で設定する。上限を先に読む。 */
-            if (!s_hi.cmd.posted) {
-                memset(s_hi.reg, 0, sizeof(s_hi.reg));
-                s_hi.reg[1] = 1u;                              /* local_port */
+            if (!s_hi[d->port].cmd.posted) {
+                memset(s_hi[d->port].reg, 0, sizeof(s_hi[d->port].reg));
+                s_hi[d->port].reg[1] = 1u;                              /* local_port */
             }
-            rc = access_reg(d, &s_hi.cmd, MLX5_REG_PMTU, 1, s_hi.reg, "ACCESS_REG(PMTU 読み)");
+            rc = access_reg(d, &s_hi[d->port].cmd, MLX5_REG_PMTU, 1, s_hi[d->port].reg, "ACCESS_REG(PMTU 読み)");
             if (rc == BFM_INPROGRESS) return rc;
             if (rc != BFM_OK) return BFM_E_HW;
-            uint32_t max = bfm_rd16be(&s_hi.reg[4]);
+            uint32_t max = bfm_rd16be(&s_hi[d->port].reg[4]);
             if (max == 0) max = 0xffffu;
-            s_hi.frame = (uint32_t)g_bfm_port_mtu + PORT_MTU_OVERHEAD;
-            if (s_hi.frame > max) {
+            s_hi[d->port].frame = (uint32_t)g_bfm_port_mtu + PORT_MTU_OVERHEAD;
+            if (s_hi[d->port].frame > max) {
                 BFM_LOG("bfm: g_bfm_port_mtu=%u がポートの上限(フレーム長 %u)を超えるので切り詰める\n",
                         g_bfm_port_mtu, max);
-                s_hi.frame = max;
+                s_hi[d->port].frame = max;
             }
-            s_hi.step = H_MTU_WRITE;
+            s_hi[d->port].step = H_MTU_WRITE;
             break;
         }
         case H_MTU_WRITE:
-            if (!s_hi.cmd.posted) {
-                memset(s_hi.reg, 0, sizeof(s_hi.reg));
-                s_hi.reg[1] = 1u;
-                bfm_wr16be(&s_hi.reg[8], (uint16_t)s_hi.frame);  /* admin_mtu */
+            if (!s_hi[d->port].cmd.posted) {
+                memset(s_hi[d->port].reg, 0, sizeof(s_hi[d->port].reg));
+                s_hi[d->port].reg[1] = 1u;
+                bfm_wr16be(&s_hi[d->port].reg[8], (uint16_t)s_hi[d->port].frame);  /* admin_mtu */
             }
-            if ((rc = access_reg(d, &s_hi.cmd, MLX5_REG_PMTU, 0, s_hi.reg, "ACCESS_REG(PMTU 書き)")) != BFM_OK)
+            if ((rc = access_reg(d, &s_hi[d->port].cmd, MLX5_REG_PMTU, 0, s_hi[d->port].reg, "ACCESS_REG(PMTU 書き)")) != BFM_OK)
                 return rc;
-            s_hi.step = H_LINK_UP;
+            s_hi[d->port].step = H_LINK_UP;
             break;
         case H_LINK_UP:
-            if (!s_hi.cmd.posted) {
-                memset(s_hi.reg, 0, sizeof(s_hi.reg));
-                s_hi.reg[1] = 1u;                              /* local_port */
-                s_hi.reg[2] = 1u;                              /* admin_status = UP */
-                s_hi.reg[4] = 0x80u;                           /* ase */
+            if (!s_hi[d->port].cmd.posted) {
+                memset(s_hi[d->port].reg, 0, sizeof(s_hi[d->port].reg));
+                s_hi[d->port].reg[1] = 1u;                              /* local_port */
+                s_hi[d->port].reg[2] = 1u;                              /* admin_status = UP */
+                s_hi[d->port].reg[4] = 0x80u;                           /* ase */
             }
-            rc = access_reg(d, &s_hi.cmd, MLX5_REG_PAOS, 0, s_hi.reg, "ACCESS_REG(PAOS 書き)");
+            rc = access_reg(d, &s_hi[d->port].cmd, MLX5_REG_PAOS, 0, s_hi[d->port].reg, "ACCESS_REG(PAOS 書き)");
             if (rc == BFM_INPROGRESS) return rc;
             if (rc != BFM_OK) return BFM_E_HW;
-            s_hi.t0 = bfm_port_time_ns();
-            s_hi.read_ok = 0;
-            s_hi.step = H_LINK_READ;
+            s_hi[d->port].t0 = bfm_port_time_ns();
+            s_hi[d->port].read_ok = 0;
+            s_hi[d->port].step = H_LINK_READ;
             break;
         case H_LINK_READ:
-            if (!s_hi.cmd.posted) {
-                memset(s_hi.reg, 0, sizeof(s_hi.reg));
-                s_hi.reg[1] = 1u;
+            if (!s_hi[d->port].cmd.posted) {
+                memset(s_hi[d->port].reg, 0, sizeof(s_hi[d->port].reg));
+                s_hi[d->port].reg[1] = 1u;
             }
-            rc = access_reg(d, &s_hi.cmd, MLX5_REG_PAOS, 1, s_hi.reg, "ACCESS_REG(PAOS 読み)");
+            rc = access_reg(d, &s_hi[d->port].cmd, MLX5_REG_PAOS, 1, s_hi[d->port].reg, "ACCESS_REG(PAOS 読み)");
             if (rc == BFM_INPROGRESS) return rc;
-            s_hi.read_ok = (rc == BFM_OK);
-            if (s_hi.read_ok && (s_hi.reg[3] & 0x0fu) == 1u) {
+            s_hi[d->port].read_ok = (rc == BFM_OK);
+            if (s_hi[d->port].read_ok && (s_hi[d->port].reg[3] & 0x0fu) == 1u) {
                 d->link_up = 1;
-                s_hi.step = H_MTU_LOG;
-            } else if (ms_since(s_hi.t0) > g_bfm_link_wait_ms) {
-                if (!s_hi.read_ok) {
+                s_hi[d->port].step = H_MTU_LOG;
+            } else if (ms_since(s_hi[d->port].t0) > g_bfm_link_wait_ms) {
+                if (!s_hi[d->port].read_ok) {
                     BFM_LOG("bfm: ポートの状態(PAOS)が読めない\n");
                     return BFM_E_HW;
                 }
                 BFM_LOG("bfm: 注意: リンクが %u ms で上がらない(このまま進む。上がれば EQ で分かる)\n",
                         g_bfm_link_wait_ms);
-                s_hi.step = H_MTU_LOG;
+                s_hi[d->port].step = H_MTU_LOG;
             } else {
-                s_hi.t1 = bfm_port_time_ns();
-                s_hi.step = H_LINK_PAUSE;
+                s_hi[d->port].t1 = bfm_port_time_ns();
+                s_hi[d->port].step = H_LINK_PAUSE;
             }
             break;
         case H_LINK_PAUSE:
-            if (ms_since(s_hi.t1) < LINK_POLL_MS) return BFM_INPROGRESS;
-            s_hi.step = H_LINK_READ;
+            if (ms_since(s_hi[d->port].t1) < LINK_POLL_MS) return BFM_INPROGRESS;
+            s_hi[d->port].step = H_LINK_READ;
             break;
         case H_MTU_LOG:
             /* 今のポートの MTU(IP の MTU に直したもの)を表示する。読めなければ表示しない。 */
-            if (!s_hi.cmd.posted) {
-                memset(s_hi.reg, 0, sizeof(s_hi.reg));
-                s_hi.reg[1] = 1u;
+            if (!s_hi[d->port].cmd.posted) {
+                memset(s_hi[d->port].reg, 0, sizeof(s_hi[d->port].reg));
+                s_hi[d->port].reg[1] = 1u;
             }
-            rc = access_reg(d, &s_hi.cmd, MLX5_REG_PMTU, 1, s_hi.reg, "ACCESS_REG(PMTU 読み)");
+            rc = access_reg(d, &s_hi[d->port].cmd, MLX5_REG_PMTU, 1, s_hi[d->port].reg, "ACCESS_REG(PMTU 読み)");
             if (rc == BFM_INPROGRESS) return rc;
             if (rc == BFM_OK)
                 BFM_LOG("bfm: ポートの MTU: 設定 %u / 実際 %u(IP の MTU。上限 %u)\n",
-                        frame_to_ip_mtu(bfm_rd16be(&s_hi.reg[8])), frame_to_ip_mtu(bfm_rd16be(&s_hi.reg[12])),
-                        frame_to_ip_mtu(bfm_rd16be(&s_hi.reg[4])));
-            s_hi.step = H_ROCE_EN;
+                        frame_to_ip_mtu(bfm_rd16be(&s_hi[d->port].reg[8])), frame_to_ip_mtu(bfm_rd16be(&s_hi[d->port].reg[12])),
+                        frame_to_ip_mtu(bfm_rd16be(&s_hi[d->port].reg[4])));
+            s_hi[d->port].step = H_ROCE_EN;
             break;
         case H_ROCE_EN: {
             static const uint8_t zero[6] = {0, 0, 0, 0, 0, 0};
-            if ((rc = vport_enable_roce(d, &s_hi.cmd)) != BFM_OK) return rc;
-            if (memcmp(g_bfm_local_mac, zero, 6) != 0) {
-                memcpy(d->mac, g_bfm_local_mac, 6);
-                s_hi.step = H_ROCE_ADDR;
+            if ((rc = vport_enable_roce(d, &s_hi[d->port].cmd)) != BFM_OK) return rc;
+            if (memcmp(g_bfm_local_mac[d->port], zero, 6) != 0) {
+                memcpy(d->mac, g_bfm_local_mac[d->port], 6);
+                s_hi[d->port].step = H_ROCE_ADDR;
             } else {
-                s_hi.step = H_MAC;
+                s_hi[d->port].step = H_MAC;
             }
-            d->ip = g_bfm_local_ip;
+            d->ip = g_bfm_local_ip[d->port];
             mlx5_gid_from_ipv4(d->ip, d->gid);
             break;
         }
         case H_MAC:
-            if ((rc = vport_query_mac(d, &s_hi.cmd, d->mac)) != BFM_OK) return rc;
-            s_hi.step = H_ROCE_ADDR;
+            if ((rc = vport_query_mac(d, &s_hi[d->port].cmd, d->mac)) != BFM_OK) return rc;
+            s_hi[d->port].step = H_ROCE_ADDR;
             break;
         case H_ROCE_ADDR:
-            if ((rc = set_roce_address(d, &s_hi.cmd)) != BFM_OK) return rc;
-            s_hi.t0 = s_hi.t1 = bfm_port_time_ns();
-            s_hi.step = H_SETTLE;
+            if ((rc = set_roce_address(d, &s_hi[d->port].cmd)) != BFM_OK) return rc;
+            s_hi[d->port].t0 = s_hi[d->port].t1 = bfm_port_time_ns();
+            s_hi[d->port].step = H_SETTLE;
             break;
         case H_SETTLE:
             /* INIT_HCA の後に FW がページを追加で求めてくる。100ms 来なくなるまで答える(上限 2 秒)。 */
-            if (mlx5_eq_poll(d) > 0 || mlx5_eq_busy()) s_hi.t1 = bfm_port_time_ns();
-            if (ms_since(s_hi.t0) < PAGE_SETTLE_MS && ms_since(s_hi.t1) <= PAGE_QUIET_MS) return BFM_INPROGRESS;
-            BFM_LOG("bfm: HCA 準備完了: MAC %02x:%02x:%02x:%02x:%02x:%02x IP %u.%u.%u.%u リンク %s"
+            if (mlx5_eq_poll(d) > 0 || mlx5_eq_busy(d)) s_hi[d->port].t1 = bfm_port_time_ns();
+            if (ms_since(s_hi[d->port].t0) < PAGE_SETTLE_MS && ms_since(s_hi[d->port].t1) <= PAGE_QUIET_MS) return BFM_INPROGRESS;
+            BFM_LOG("bfm: ポート %u: HCA 準備完了: MAC %02x:%02x:%02x:%02x:%02x:%02x IP %u.%u.%u.%u リンク %s"
                     " FW ページ %u 公開メモリ 0x%llx+0x%llx rkey 0x%08x\n",
-                    d->mac[0], d->mac[1], d->mac[2], d->mac[3], d->mac[4], d->mac[5],
+                    d->port, d->mac[0], d->mac[1], d->mac[2], d->mac[3], d->mac[4], d->mac[5],
                     d->ip >> 24, (d->ip >> 16) & 0xffu, (d->ip >> 8) & 0xffu, d->ip & 0xffu,
                     d->link_up ? "UP" : "DOWN", d->fw_pages_used,
                     (unsigned long long)g_bfm_mr_base, (unsigned long long)g_bfm_mr_size, d->rkey);
-            s_hi.step = H_DONE;
+            s_hi[d->port].step = H_DONE;
             break;
         default:   /* H_DONE */
             return BFM_OK;
@@ -721,19 +721,19 @@ int mlx5_hca_teardown(bfm_dev_t *d)
     for (;;) {
         uint8_t in[16] = {0}, out[16];
         bfm_wr16be(&in[0], MLX5_CMD_TEARDOWN_HCA);
-        bfm_wr16be(&in[10], s_td.prof);
-        const int rc = mlx5_cmd_run(d, &s_td.cmd, in, sizeof(in), out, sizeof(out),
-                                    s_td.prof ? "TEARDOWN_HCA(force)" : "TEARDOWN_HCA(graceful)");
+        bfm_wr16be(&in[10], s_td[d->port].prof);
+        const int rc = mlx5_cmd_run(d, &s_td[d->port].cmd, in, sizeof(in), out, sizeof(out),
+                                    s_td[d->port].prof ? "TEARDOWN_HCA(force)" : "TEARDOWN_HCA(graceful)");
         if (rc == BFM_INPROGRESS) return rc;
-        if (rc == BFM_OK && !(s_td.prof == 1u && (out[15] & 1u))) break;
-        if (s_td.prof == 0u) {
-            s_td.prof = 1u;
+        if (rc == BFM_OK && !(s_td[d->port].prof == 1u && (out[15] & 1u))) break;
+        if (s_td[d->port].prof == 0u) {
+            s_td[d->port].prof = 1u;
             continue;
         }
         BFM_LOG("bfm: 注意: TEARDOWN_HCA が graceful / force とも通らなかった(次の立ち上げの FLR で戻す)\n");
         break;
     }
-    s_td.prof = 0u;
+    s_td[d->port].prof = 0u;
     d->hca_enabled = 0;
     return BFM_OK;
 }

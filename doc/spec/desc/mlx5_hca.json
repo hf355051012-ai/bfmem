@@ -1,6 +1,6 @@
 {
   "file": "src/mlx5_hca.c",
-  "summary": "HCA の立ち上げと停止、QP 以外の資源(UAR・PD・MKey・CQ)、ポート、RoCE のアドレスを扱う。立ち上げの手順は Linux の mlx5_core と同じ順(FW の初期化待ち → コマンドキュー → `ENABLE_HCA` → ISSI → boot のページ → `HOST_ENDIANNESS` → HCA の能力(general / atomic / roce)→ init のページ → `INIT_HCA`)で、その後に EQ・PD・MKey(自分用 / 公開用)・ポート・vport の `roce_en`・GID を用意する。\n\n立ち上げは状態機械(`mlx5_hca_init_step()`。状態は静的な `s_hi` に持ち、`mlx5_hca_init_reset()` で最初に戻す)で、待つところ(FW の初期化・コマンドの完了・リンク・ページ要求)では待たずに `BFM_INPROGRESS`(= 1)を返す。呼び出し側は `BFM_OK` か失敗になるまで同じ関数を呼び続ける。FW のコマンドを出す関数は `bfm_cmd_t *j` を受け取って `mlx5_cmd_run()` に渡し、コマンドが完了するまでは `BFM_INPROGRESS` を返す(その間は同じ `j` と引数で呼び直す)。停止(`mlx5_hca_teardown()`)も同じ形で、状態は静的な `s_td` に持つ。\n\nConnectX-4〜7 の違いは、能力を 4096 バイトまるごと読み書きする、BlueFlame の窓の大きさを `log_bf_reg_size` から求める、QP の `ts_format` を RoCE の能力に合わせる、`num_vhca_ports` が 0 でなければ `SET_ROCE_ADDRESS` にポート番号を入れる、FW のページの上限を `g_bfm_fw_pages_max` にする、で吸収する。能力の読み書きには静的な緩衝 `s_cap_out` / `s_cap_in` を使う。",
+  "summary": "HCA の立ち上げと停止、QP 以外の資源(UAR・PD・MKey・CQ)、ポート、RoCE のアドレスを扱う。立ち上げの手順は Linux の mlx5_core と同じ順(FW の初期化待ち → コマンドキュー → `ENABLE_HCA` → ISSI → boot のページ → `HOST_ENDIANNESS` → HCA の能力(general / atomic / roce)→ init のページ → `INIT_HCA`)で、その後に EQ・PD・MKey(自分用 / 公開用)・ポート・vport の `roce_en`・GID を用意する。\n\nHCA・EQ・PD・MKey などはポート(`bfm_dev_t`、`g_bfm_dev[port]`。ConnectX のポート 1 つ = PCIe の function 1 つ)ごとに作る。立ち上げは状態機械(`mlx5_hca_init_step()`。状態はポートごとの静的な `s_hi[]` に持ち、`mlx5_hca_init_reset()` で最初に戻す)で、待つところ(FW の初期化・コマンドの完了・リンク・ページ要求)では待たずに `BFM_INPROGRESS`(= 1)を返す。呼び出し側は `BFM_OK` か失敗になるまで同じ関数を呼び続ける。FW のコマンドを出す関数は `bfm_cmd_t *j` を受け取って `mlx5_cmd_run()` に渡し、コマンドが完了するまでは `BFM_INPROGRESS` を返す(その間は同じ `j` と引数で呼び直す)。停止(`mlx5_hca_teardown()`)も同じ形で、状態はポートごとの静的な `s_td[]` に持つ。\n\nConnectX-4〜7 の違いは、能力を 4096 バイトまるごと読み書きする、BlueFlame の窓の大きさを `log_bf_reg_size` から求める、QP の `ts_format` を RoCE の能力に合わせる、`num_vhca_ports` が 0 でなければ `SET_ROCE_ADDRESS` にポート番号を入れる、FW のページの上限を `g_bfm_fw_pages_max` にする、で吸収する。能力の読み書きにはポートごとの静的な緩衝 `s_cap_out[]` / `s_cap_in[]` を使う。",
   "functions": [
     {
       "func": "ms_since",
@@ -17,7 +17,7 @@
     {
       "func": "fw_initializing",
       "summary": "FW が初期化中か(Initialization Segment の `MLX5_ISEG_INITIALIZING` の最上位ビット)を返す。",
-      "args": {"d": "装置"},
+      "args": {"d": "ポートの装置(`g_bfm_dev[port]`)"},
       "ret": "1: 初期化中。0: 初期化が終わった。",
       "pre": "`d->bar0` が張られていること。",
       "notes": "特になし。",
@@ -29,7 +29,7 @@
     {
       "func": "simple_cmd",
       "summary": "入力が 16 バイトで opcode と op_mod だけを入れるコマンドを、待たずに進める(`ENABLE_HCA` に使う)。",
-      "args": {"d": "装置", "j": "このコマンドの手順(出したかを覚える)", "opcode": "コマンドの opcode", "op_mod": "コマンドの op_mod", "what": "表示用のコマンドの名前"},
+      "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順(出したかを覚える)", "opcode": "コマンドの opcode", "op_mod": "コマンドの op_mod", "what": "表示用のコマンドの名前"},
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS`: まだ完了していない。`BFM_OK`: 成功。負: 失敗)。",
       "pre": "コマンドキューが使えること(`mlx5_cmd_init()` の後)。",
       "notes": "* `BFM_INPROGRESS` の間は同じ `j` と引数で呼び直す。\n* 出力(16 バイト)は捨てる。",
@@ -42,7 +42,7 @@
     {
       "func": "query_pages",
       "summary": "`QUERY_PAGES` を待たずに進め、完了したら FW が求めるページの数と、その関数の番号を返す。",
-      "args": {"d": "装置", "j": "このコマンドの手順", "op_mod": "1 = boot のページ、2 = init のページ", "func": "[出力] 関数の番号(出力の byte 10〜11)", "n": "[出力] 求めるページの数(出力の byte 12〜15。符号つき)"},
+      "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順", "op_mod": "1 = boot のページ、2 = init のページ", "func": "[出力] 関数の番号(出力の byte 10〜11)", "n": "[出力] 求めるページの数(出力の byte 12〜15。符号つき)"},
       "ret": "`BFM_OK`: 読めた。`BFM_INPROGRESS`: まだ完了していない。負: `mlx5_cmd_run()` の失敗。",
       "pre": "`ENABLE_HCA` の後であること。",
       "notes": "* `BFM_INPROGRESS` の間は同じ `j` と引数で呼び直す。\n* `BFM_OK` 以外のときは `*func` と `*n` を書き換えない。",
@@ -57,7 +57,7 @@
     {
       "func": "access_reg",
       "summary": "`ACCESS_REG` で装置のレジスタ(16 バイト)を読む、または書くコマンドを、待たずに進める。完了したら(読んだときも書いたときも)出力のレジスタの内容を `data` に写す。",
-      "args": {"d": "装置", "j": "このコマンドの手順", "reg": "レジスタの番号(`MLX5_REG_PMTU` など)", "read": "0 以外なら読む(op_mod 1)、0 なら書く(op_mod 0)", "data": "[入出力] レジスタの内容 16 バイト。書くときは書く値、成功したら出力の内容に置き換わる", "what": "表示用のコマンドの名前"},
+      "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順", "reg": "レジスタの番号(`MLX5_REG_PMTU` など)", "read": "0 以外なら読む(op_mod 1)、0 なら書く(op_mod 0)", "data": "[入出力] レジスタの内容 16 バイト。書くときは書く値、成功したら出力の内容に置き換わる", "what": "表示用のコマンドの名前"},
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS`: まだ完了していない。`BFM_OK`: 成功。負: 失敗)。",
       "pre": "コマンドキューが使えること。",
       "notes": "* `BFM_INPROGRESS` の間は同じ `j` と引数で呼び直す(`data` を書き換えずに呼び直す。呼び出し側は `j->posted` が 0 のときだけ `data` を組む)。\n* `BFM_OK` 以外のときは `data` を書き換えない。",
@@ -70,40 +70,40 @@
     },
     {
       "func": "query_cap",
-      "summary": "`QUERY_HCA_CAP` で、指定した種類の能力の今の値(current)を読むコマンドを待たずに進める。完了したら出力をまるごと `s_cap_out` に置く。",
-      "args": {"d": "装置", "j": "このコマンドの手順", "type": "能力の種類(`MLX5_CAP_GENERAL` / `MLX5_CAP_ATOMIC` / `MLX5_CAP_ROCE`)", "what": "表示用のコマンドの名前"},
+      "summary": "`QUERY_HCA_CAP` で、指定した種類の能力の今の値(current)を読むコマンドを待たずに進める。完了したら出力をまるごと `s_cap_out[d->port]` に置く。",
+      "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順", "type": "能力の種類(`MLX5_CAP_GENERAL` / `MLX5_CAP_ATOMIC` / `MLX5_CAP_ROCE`)", "what": "表示用のコマンドの名前"},
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS`: まだ完了していない。`BFM_OK`: 成功。負: 失敗)。",
       "pre": "コマンドキューが使えること。",
-      "notes": "* `BFM_INPROGRESS` の間は同じ `j` と引数で呼び直す。\n* 結果は静的な緩衝 `s_cap_out`(16 + `MLX5_HCA_CAP_BYTES` バイト。能力は byte 16 から)に入る。次の `query_cap()` で上書きされる。op_mod は `(type << 1) OR 1`。",
+      "notes": "* `BFM_INPROGRESS` の間は同じ `j` と引数で呼び直す。\n* 結果は静的な緩衝 `s_cap_out[d->port]`(16 + `MLX5_HCA_CAP_BYTES` バイト。能力は byte 16 から)に入る。次の `query_cap()` で上書きされる。op_mod は `(type << 1) OR 1`。",
       "flow": [
         {"do": "in[16] を 0 で埋め、byte 0 に MLX5_CMD_QUERY_HCA_CAP、byte 6 に (type << 1) OR 1 を書く"},
-        {"call": "mlx5_cmd_run(d, j, in, 16, s_cap_out, sizeof(s_cap_out), what) を呼ぶ"},
+        {"call": "mlx5_cmd_run(d, j, in, 16, s_cap_out[d->port], sizeof(s_cap_out[d->port]), what) を呼ぶ"},
         {"return": "mlx5_cmd_run() の戻り値"}
       ]
     },
     {
       "func": "set_cap",
-      "summary": "`s_cap_out` にある能力(読んで書き換えたもの)を、そのまま `SET_HCA_CAP` で書くコマンドを待たずに進める。",
-      "args": {"d": "装置", "j": "このコマンドの手順", "type": "能力の種類", "what": "表示用のコマンドの名前"},
+      "summary": "`s_cap_out[d->port]` にある能力(読んで書き換えたもの)を、そのまま `SET_HCA_CAP` で書くコマンドを待たずに進める。",
+      "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順", "type": "能力の種類", "what": "表示用のコマンドの名前"},
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS`: まだ完了していない。`BFM_OK`: 成功。負: 失敗)。",
-      "pre": "直前に同じ種類の `query_cap()` で `s_cap_out` を埋めてあること。",
-      "notes": "* `BFM_INPROGRESS` の間は同じ `j` と引数で呼び直す。\n* 入力は静的な緩衝 `s_cap_in` で組む。組むのはまだ出していないとき(`j->posted` が 0)だけ。op_mod は `type << 1`。",
+      "pre": "直前に同じ種類の `query_cap()` で `s_cap_out[d->port]` を埋めてあること。",
+      "notes": "* `BFM_INPROGRESS` の間は同じ `j` と引数で呼び直す。\n* 入力は静的な緩衝 `s_cap_in[d->port]` で組む。組むのはまだ出していないとき(`j->posted` が 0)だけ。op_mod は `type << 1`。",
       "flow": [
         {"if": "!j->posted ?", "then": [
-          {"do": "s_cap_in の先頭 16 バイトを 0 で埋め、byte 0 に MLX5_CMD_SET_HCA_CAP、byte 6 に type << 1 を書く"},
-          {"do": "s_cap_out の byte 16 から MLX5_HCA_CAP_BYTES バイトを s_cap_in の byte 16 へ写す"}
+          {"do": "s_cap_in[d->port] の先頭 16 バイトを 0 で埋め、byte 0 に MLX5_CMD_SET_HCA_CAP、byte 6 に type << 1 を書く"},
+          {"do": "s_cap_out[d->port] の byte 16 から MLX5_HCA_CAP_BYTES バイトを s_cap_in[d->port] の byte 16 へ写す"}
         ]},
-        {"call": "mlx5_cmd_run(d, j, s_cap_in, sizeof(s_cap_in), out, 16, what) を呼ぶ"},
+        {"call": "mlx5_cmd_run(d, j, s_cap_in[d->port], sizeof(s_cap_in[d->port]), out, 16, what) を呼ぶ"},
         {"return": "mlx5_cmd_run() の戻り値"}
       ]
     },
     {
       "func": "parse_general_caps",
-      "summary": "`s_cap_out` にある general の能力から、要るもの(`page_request_disable`・`log_max_ra_req_qp`・`log_max_ra_res_qp`・`port_type`・`roce`・`bf`・`log_bf_reg_size`・`num_vhca_ports`・署名オフロードの `sho`・`umr_fence`)を取り出して `d` に入れる。BlueFlame の 1 面の大きさ `bf_buf_size` を `2^log_bf_reg_size / 2`(上限 `BFM_WQE_MAX`)にする。",
-      "args": {"d": "装置"},
+      "summary": "`s_cap_out[d->port]` にある general の能力から、要るもの(`page_request_disable`・`log_max_ra_req_qp`・`log_max_ra_res_qp`・`port_type`・`roce`・`bf`・`log_bf_reg_size`・`num_vhca_ports`・署名オフロードの `sho`・`umr_fence`)を取り出して `d` に入れる。BlueFlame の 1 面の大きさ `bf_buf_size` を `2^log_bf_reg_size / 2`(上限 `BFM_WQE_MAX`)にする。",
+      "args": {"d": "ポートの装置(`g_bfm_dev[port]`)"},
       "ret": "`BFM_OK`: 取り出せた。`BFM_E_HW`: ポートが Ethernet でない。",
-      "pre": "`query_cap(MLX5_CAP_GENERAL)` が完了して `s_cap_out` に general の能力が入っていること。",
-      "notes": "* 能力の位置は `struct mlx5_ifc_cmd_hca_cap_bits` のビット位置 / 8。\n* `s_cap_out` は書き換えない(書き戻すのは読んだ値のまま。Linux も今の値を写してから一部を変えて書く。ここでは変えるものが無い)。\n* `umr_fence` は Linux の `mlx5_get_umr_fence()` と同じ換算(0 = STRONG、1 = SMALL、2 = 要らない)。\n* RoCE の能力ビットが立っていなくても注意を表示するだけで進む。\n* `log_bf_reg_size` が 8〜12 の外なら注意を表示し、9(512 バイト)として扱う。",
+      "pre": "`query_cap(MLX5_CAP_GENERAL)` が完了して `s_cap_out[d->port]` に general の能力が入っていること。",
+      "notes": "* 能力の位置は `struct mlx5_ifc_cmd_hca_cap_bits` のビット位置 / 8。\n* `s_cap_out[d->port]` は書き換えない(書き戻すのは読んだ値のまま。Linux も今の値を写してから一部を変えて書く。ここでは変えるものが無い)。\n* `umr_fence` は Linux の `mlx5_get_umr_fence()` と同じ換算(0 = STRONG、1 = SMALL、2 = 要らない)。\n* RoCE の能力ビットが立っていなくても注意を表示するだけで進む。\n* `log_bf_reg_size` が 8〜12 の外なら注意を表示し、9(512 バイト)として扱う。",
       "flow": [
         {"do": "c = &s_cap_out[16]。能力から page_request_disable・log_max_ra_req_qp・log_max_ra_res_qp・bf_cap・num_vhca_ports・sho を d へ、port_type・roce・log_bf を局所変数へ取り出す"},
         {"do": "d->umr_fence = umr_fence が 1 なら MLX5_FENCE_SMALL、2 なら 0、それ以外は MLX5_FENCE_STRONG"},
@@ -124,10 +124,10 @@
     },
     {
       "func": "parse_atomic_caps",
-      "summary": "`s_cap_out` にある atomic の能力を読み、対応する演算(`atomic_ops`、byte 18〜19)と大きさ(`atomic_size_qp`、byte 22〜23)を `d` に入れる。8 バイトの atomic をホストのバイト順で扱う設定(byte 8 の上位 2 ビット `atomic_req_8B_endianness_mode` = 1)になっていなければ、`s_cap_out` のその欄を 1 に書き換えて、書き戻しが要ることを返す(Linux の `handle_hca_cap_atomic()` と同じ)。その設定に対応していない装置は断る。",
-      "args": {"d": "装置"},
-      "ret": "0: 書き戻し不要(もうホスト順)。1: `s_cap_out` を書き換えた(呼び出し側が `SET_HCA_CAP` で書く)。`BFM_E_HW`: 装置が atomic をホストのバイト順にできない。",
-      "pre": "`query_cap(MLX5_CAP_ATOMIC)` が完了して `s_cap_out` に atomic の能力が入っていること。",
+      "summary": "`s_cap_out[d->port]` にある atomic の能力を読み、対応する演算(`atomic_ops`、byte 18〜19)と大きさ(`atomic_size_qp`、byte 22〜23)を `d` に入れる。8 バイトの atomic をホストのバイト順で扱う設定(byte 8 の上位 2 ビット `atomic_req_8B_endianness_mode` = 1)になっていなければ、`s_cap_out[d->port]` のその欄を 1 に書き換えて、書き戻しが要ることを返す(Linux の `handle_hca_cap_atomic()` と同じ)。その設定に対応していない装置は断る。",
+      "args": {"d": "ポートの装置(`g_bfm_dev[port]`)"},
+      "ret": "0: 書き戻し不要(もうホスト順)。1: `s_cap_out[d->port]` を書き換えた(呼び出し側が `SET_HCA_CAP` で書く)。`BFM_E_HW`: 装置が atomic をホストのバイト順にできない。",
+      "pre": "`query_cap(MLX5_CAP_ATOMIC)` が完了して `s_cap_out[d->port]` に atomic の能力が入っていること。",
       "notes": "* atomic の元の値は中継バッファからホスト順として読む(`atomic_result()`)ので、ホストのバイト順にできない装置は使えない。\n* ホスト順にできるかは byte 8 のビット 1(`supported_atomic_req_8B_endianness_mode_1`)で見る。",
       "flow": [
         {"do": "c = &s_cap_out[16]。d->atomic_ops = 能力の byte 18〜19、d->atomic_size_qp = 能力の byte 22〜23"},
@@ -143,7 +143,7 @@
     {
       "func": "decide_atomic_mode",
       "summary": "QP の `atomic_mode` を決めて `d->atomic_mode` に入れる(Linux の `get_atomic_mode()` と同じ規則)。拡張 atomic(拡張 CS / 拡張 FA)があれば、`atomic_size_qp` で対応する最大の大きさの log2(3 未満なら 3 = 8 バイト)。なければ、標準の CS / FA の両方に対応していれば 1(IB_COMP)。どちらでもなければ 0。",
-      "args": {"d": "装置"},
+      "args": {"d": "ポートの装置(`g_bfm_dev[port]`)"},
       "ret": "なし",
       "pre": "`parse_atomic_caps()` で `d->atomic_ops` と `d->atomic_size_qp` が入っていること。",
       "notes": "8 バイトの CAS と FAA の両方に対応していなければ注意を表示する(失敗にはしない)。",
@@ -168,7 +168,7 @@
     {
       "func": "mlx5_alloc_uar",
       "summary": "`ALLOC_UAR` で UAR を 1 つ取るコマンドを待たずに進め、完了したらその番号を返す。",
-      "args": {"d": "装置", "j": "このコマンドの手順", "uarn": "[出力] UAR の番号(出力の byte 9〜11)"},
+      "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順", "uarn": "[出力] UAR の番号(出力の byte 9〜11)"},
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS`: まだ完了していない。`BFM_OK`: 取れた。負: 失敗)。",
       "pre": "`INIT_HCA` の後であること。",
       "notes": "* `BFM_INPROGRESS` の間は同じ `j` と引数で呼び直す。\n* `BFM_OK` 以外のときは `*uarn` を書き換えない。返すことはしない(解放のコマンドを出さない)。",
@@ -182,7 +182,7 @@
     {
       "func": "alloc_pd",
       "summary": "`ALLOC_PD` で PD を 1 つ取るコマンドを待たずに進め、完了したらその番号を返す。",
-      "args": {"d": "装置", "j": "このコマンドの手順", "pdn": "[出力] PD の番号(出力の byte 9〜11)"},
+      "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順", "pdn": "[出力] PD の番号(出力の byte 9〜11)"},
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS`: まだ完了していない。`BFM_OK`: 取れた。負: 失敗)。",
       "pre": "`INIT_HCA` の後であること。",
       "notes": "* `BFM_INPROGRESS` の間は同じ `j` と引数で呼び直す。\n* `BFM_OK` 以外のときは `*pdn` を書き換えない。",
@@ -196,7 +196,7 @@
     {
       "func": "create_mkey_pa",
       "summary": "`CREATE_MKEY` で PA(物理アドレスをそのまま使う)モードの MKey を作るコマンドを待たずに進める。特定の QP に結びつけず、PD は `d->pdn`。`len` が 0 なら全アドレス(`length64`)にする。完了したら、出力の MKey の番号を 8 ビット左へずらし、下位 8 ビットを `key8` にしたものを鍵として返す。",
-      "args": {"d": "装置", "j": "このコマンドの手順", "access": "mkc の byte 2(`umr_en a rw rr lw lr` と `access_mode_1_0`)。`access_mode_1_0` は 0(PA)", "start": "先頭のアドレス", "len": "長さ(バイト)。0 なら全アドレス", "key8": "鍵の下位 8 ビット(`mkey_7_0`)", "mkey": "[出力] 作った鍵", "what": "表示用のコマンドの名前"},
+      "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順", "access": "mkc の byte 2(`umr_en a rw rr lw lr` と `access_mode_1_0`)。`access_mode_1_0` は 0(PA)", "start": "先頭のアドレス", "len": "長さ(バイト)。0 なら全アドレス", "key8": "鍵の下位 8 ビット(`mkey_7_0`)", "mkey": "[出力] 作った鍵", "what": "表示用のコマンドの名前"},
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS`: まだ完了していない。`BFM_OK`: 作れた。負: 失敗)。",
       "pre": "`d->pdn` が取ってあること(`alloc_pd()` の後)。",
       "notes": "* `BFM_INPROGRESS` の間は同じ `j` と引数で呼び直す。\n* `BFM_OK` 以外のときは `*mkey` を書き換えない。",
@@ -213,7 +213,7 @@
     {
       "func": "mlx5_create_psv2",
       "summary": "PSV(署名の途中の状態を持つもの)を 2 つ作るコマンド(`CREATE_PSV`、Linux の `mlx5_core_create_psv()`)を待たずに進める。`psv[0]` をメモリ側、`psv[1]` をワイヤ側に使う。",
-      "args": {"d": "装置", "j": "このコマンドの手順", "psv": "[出力] 作った PSV の番号を入れる先(2 個)"},
+      "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順", "psv": "[出力] 作った PSV の番号を入れる先(2 個)"},
       "ret": "`BFM_OK`: 作れた。`BFM_INPROGRESS`: まだ完了していない。負: `mlx5_cmd_run()` の失敗。",
       "pre": "PD を作ってあること。",
       "notes": "* `BFM_INPROGRESS` の間は同じ `j` と引数で呼び直す。\n* 入力: [8] num_psv << 4、[9..11] pd。出力: [17..19] psv0_index、[21..23] psv1_index。",
@@ -228,7 +228,7 @@
     {
       "func": "mlx5_create_sig_mkey",
       "summary": "署名つきの MKey を作るコマンドを待たずに進める(Linux の `mlx5_alloc_integrity_descs()` の MKey と同じ形)。中身は使うたびに UMR で入れるので、空き(free)・umr_en・KLM の形で、BSF 4 octword と変換 4 octword の枠を持たせる。ローカルの読み書きだけを許す。",
-      "args": {"d": "装置", "j": "このコマンドの手順", "key8": "鍵の下位 8 ビット", "mkey": "[出力] 作った MKey を入れる先"},
+      "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順", "key8": "鍵の下位 8 ビット", "mkey": "[出力] 作った MKey を入れる先"},
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS`: まだ完了していない。`BFM_OK`: 作れた。負: 失敗)。",
       "pre": "PD を作ってあること。",
       "notes": "* `BFM_INPROGRESS` の間は同じ `j` と引数で呼び直す。\n* mkc: [0] free、[2] umr_en | lw | lr | access_mode = KLM(0x8e)、[4..6] qpn = 0xffffff、[7] mkey_7_0、[12] bsf_en、[13..15] pd、[32..35] bsf_octword_size = 4、[52..55] translations_octword_size = 4。",
@@ -242,7 +242,7 @@
     {
       "func": "mlx5_cq_create",
       "summary": "`CREATE_CQ` で CQ を作るコマンドを待たずに進める。CQE は 64 バイトで `2^log_n` 個。まだ出していなければ、CQE を全部「まだ書かれていない」(opcode = `MLX5_CQE_INVALID`、owner = 0)にし、ドアベルのレコードを 0 にする。CQ の文脈(大きさ・UAR・EQ・ドアベルのレコードのアドレス)と各ページの物理アドレスを渡す。",
-      "args": {"d": "装置", "j": "このコマンドの手順", "uarn": "CQ に結びつける UAR の番号", "buf": "CQE の緩衝(DMA 領域。4KiB のページの並び)", "log_n": "CQE の数の log2", "dbr": "ドアベルのレコード(DMA 領域。8 バイト)", "cqn": "[出力] CQ の番号"},
+      "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順", "uarn": "CQ に結びつける UAR の番号", "buf": "CQE の緩衝(DMA 領域。4KiB のページの並び)", "log_n": "CQE の数の log2", "dbr": "ドアベルのレコード(DMA 領域。8 バイト)", "cqn": "[出力] CQ の番号"},
       "ret": "`BFM_OK`: 作れた。`BFM_INPROGRESS`: まだ完了していない。`BFM_E_PARAM`: `log_n` が 10 を超える(緩衝が 16 ページを超える)。そのほか負: `mlx5_cmd_run()` の失敗。",
       "pre": "`d->eqn` が作ってあること(`mlx5_eq_create()` の後)。`buf` が `2^log_n` × 64 バイト以上あること。",
       "notes": "* `BFM_INPROGRESS` の間は同じ `j` と引数で呼び直す。CQE とドアベルのレコードの初期化は、まだ出していないとき(`j->posted` が 0)だけ行う。\n* 割り込みは使わない(arm しない)。\n* ページの大きさは 4KiB(`log_page_size` = 0)。\n* `log_n` の検査は `buf` / `dbr` に触る前に行う(CQE は 1024 個 x 64 バイト = 16 ページまで。入力の PAS の数で決まる)。\n* `BFM_OK` 以外のときは `*cqn` を書き換えない。",
@@ -287,7 +287,7 @@
     {
       "func": "vport_enable_roce",
       "summary": "`MODIFY_NIC_VPORT_CONTEXT` で vport の `roce_en` を立てる(`field_select.roce_en` と `nic_vport_context.roce_en`)コマンドを待たずに進める。",
-      "args": {"d": "装置", "j": "このコマンドの手順"},
+      "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順"},
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS`: まだ完了していない。`BFM_OK`: 成功。負: 失敗)。",
       "pre": "`INIT_HCA` の後であること。",
       "notes": "* `BFM_INPROGRESS` の間は同じ `j` で呼び直す。\n* 立てないと QP の `INIT2RTR` が断られる。入力(516 バイト)は静的な緩衝に組む(呼ぶたびに組み直す)。",
@@ -300,7 +300,7 @@
     {
       "func": "vport_query_mac",
       "summary": "`QUERY_NIC_VPORT_CONTEXT` で vport の `permanent_address`(`nic_vport_context` のビット 0x7b0 から 6 バイト)を読むコマンドを待たずに進め、完了したら MAC アドレスとして返す。",
-      "args": {"d": "装置", "j": "このコマンドの手順", "mac": "[出力] MAC アドレス 6 バイト"},
+      "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順", "mac": "[出力] MAC アドレス 6 バイト"},
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS`: まだ完了していない。`BFM_OK`: 読めた。負: 失敗)。",
       "pre": "`INIT_HCA` の後であること。",
       "notes": "* `BFM_INPROGRESS` の間は同じ `j` と引数で呼び直す。\n* `BFM_OK` 以外のときは `mac` を書き換えない。出力(272 バイト)は静的な緩衝で受ける。",
@@ -314,7 +314,7 @@
     {
       "func": "set_roce_address",
       "summary": "`SET_ROCE_ADDRESS` で GID の表の 0 番に、`d->gid`(自分の IPv4 から作った RoCE v2 の GID)と `d->mac` を入れる(L3 の種類は IPv4、RoCE の版は v2)コマンドを待たずに進める。",
-      "args": {"d": "装置", "j": "このコマンドの手順"},
+      "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順"},
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS`: まだ完了していない。`BFM_OK`: 成功。負: 失敗)。",
       "pre": "`d->gid` と `d->mac` が入っていること。",
       "notes": "* `BFM_INPROGRESS` の間は同じ `j` で呼び直す。\n* `d->num_vhca_ports` が 0 でなければ `vhca_port_num` に 1 を入れる(ConnectX-7 への備え)。",
@@ -341,27 +341,27 @@
     },
     {
       "func": "mlx5_hca_init_reset",
-      "summary": "立ち上げの状態(`s_hi`)を最初(`H_START`)に戻し、停止の状態(`s_td`。graceful から始める)も空にし、EQ のページ要求に答える手順を空にする(`mlx5_eq_reset()`)。",
-      "args": {},
+      "summary": "ポート `d` の立ち上げの状態(`s_hi[d->port]`)を最初(`H_START`)に戻し、停止の状態(`s_td[d->port]`。graceful から始める)も空にし、EQ のページ要求に答える手順を空にする(`mlx5_eq_reset()`)。",
+      "args": {"d": "ポートの装置(`g_bfm_dev[port]`)"},
       "ret": "なし",
       "pre": "特になし。",
-      "notes": "`bfm_init()` が立ち上げを始めるときに呼ぶ。この後、`mlx5_hca_init_step()` を呼び続ける。",
+      "notes": "`bfm_dev_step()` がポートの立ち上げを始めるとき(`D_IDLE`)に呼ぶ。この後、`mlx5_hca_init_step()` を呼び続ける(`D_HCA`)。",
       "flow": [
-        {"do": "s_hi を 0 で埋める(step = H_START)"},
-        {"do": "s_td を 0 で埋める(prof = 0)"},
-        {"call": "mlx5_eq_reset() を呼ぶ"}
+        {"do": "s_hi[d->port] を 0 で埋める(step = H_START)"},
+        {"do": "s_td[d->port] を 0 で埋める(prof = 0)"},
+        {"call": "mlx5_eq_reset(d) を呼ぶ"}
       ]
     },
     {
       "func": "mlx5_hca_init_step",
-      "summary": "HCA の立ち上げを、待つところまで進める(状態機械。状態は `s_hi.step`)。FW の版とコマンドの版を確かめ、FW の初期化待ち → コマンドキューの登録 → 10ms 待ち → FW の初期化待ち → `ENABLE_HCA` → ISSI → boot のページ(FW 用のページの区画もここで確保)→ `HOST_ENDIANNESS` → general / atomic / roce の能力 → init のページ → `INIT_HCA` の順に進める。その後、EQ(UAR と `CREATE_EQ`)・PD・MKey(自分用の全アドレス、公開メモリ用)を作り、ポートの MTU の設定・ポートを上げてリンクを待つ・MTU の表示・vport の `roce_en`・MAC と IP と GID の用意・`SET_ROCE_ADDRESS` を行う。最後に、FW が追加で求めるページに、要求が 100ms 来なくなるまで(上限 2 秒)EQ を見て答える。待つところ(FW の初期化・コマンドの完了・リンク・ページ要求)では `BFM_INPROGRESS` を返す。",
-      "args": {"d": "装置"},
+      "summary": "HCA の立ち上げを、待つところまで進める(状態機械。状態は `s_hi[d->port].step`)。FW の版とコマンドの版を確かめ、FW の初期化待ち → コマンドキューの登録 → 10ms 待ち → FW の初期化待ち → `ENABLE_HCA` → ISSI → boot のページ(FW 用のページの区画もここで確保)→ `HOST_ENDIANNESS` → general / atomic / roce の能力 → init のページ → `INIT_HCA` の順に進める。その後、EQ(UAR と `CREATE_EQ`)・PD・MKey(自分用の全アドレス、公開メモリ用)を作り、ポートの MTU の設定・ポートを上げてリンクを待つ・MTU の表示・vport の `roce_en`・MAC と IP と GID の用意・`SET_ROCE_ADDRESS` を行う。最後に、FW が追加で求めるページに、要求が 100ms 来なくなるまで(上限 2 秒)EQ を見て答える。待つところ(FW の初期化・コマンドの完了・リンク・ページ要求)では `BFM_INPROGRESS` を返す。",
+      "args": {"d": "ポートの装置(`g_bfm_dev[port]`)"},
       "ret": "`BFM_INPROGRESS`: 途中(また呼ぶ)。`BFM_OK`: 立ち上がった(済んだ後に呼んでも `BFM_OK`)。`BFM_E_HW`: 装置が見えない、コマンドの版が違う、ポートが Ethernet でない、コマンドの失敗など。`BFM_E_TIMEOUT`: FW の初期化やコマンドが時間切れ。`BFM_E_NOMEM`: FW 用のページの区画が取れない、または FW の求めるページが多すぎる。そのほか途中で呼ぶ関数の戻り値。",
       "pre": "`mlx5_hca_init_reset()` の後であること。`d->bar0` が張られ、PCIe の設定(Bus Master など)が済んでいること。DMA 領域の切り出しが初期化済みであること。",
-      "notes": "* `BFM_OK` か失敗になるまで呼び続ける。1 回の呼び出しで、待たずに進める状態は続けて進める(`for (;;)` の中の `switch`)。\n* 途中で失敗しても、ここでは取ったものを返さない(呼び出し側が `hca_enabled` を見て FW を止める)。\n* `ENABLE_HCA` が完了した時点で `d->hca_enabled = 1` にする。\n* コマンドは全部 `s_hi.cmd` で出す。`ACCESS_REG` のデータ `s_hi.reg` は、まだ出していないとき(`s_hi.cmd.posted` が 0)だけ組む。\n* atomic の能力・PMTU の読み・PAOS の書きの失敗は `BFM_E_HW` にする。RoCE の能力が読めなければ `qp_ts_format` を 0 のまま進む。表示用の PMTU が読めなければ表示しない。\n* 公開メモリの鍵の下位 8 ビットは、自分用の鍵を作った後の時刻(ns を 10 ビット右へずらしたもの)から作る。自分用の鍵(`lkey`)の下位 8 ビットは 0。\n* `g_bfm_port_mtu` が 0 なら MTU を設定しない。`g_bfm_local_mac` が全部 0 なら vport の MAC を使う。\n* リンクが `g_bfm_link_wait_ms` で上がらなければ注意を表示して進む(後で上がれば EQ で分かる)。そのとき最後の PAOS の読みが失敗していれば `BFM_E_HW`。",
+      "notes": "* `BFM_OK` か失敗になるまで呼び続ける。1 回の呼び出しで、待たずに進める状態は続けて進める(`for (;;)` の中の `switch`)。\n* 途中で失敗しても、ここでは取ったものを返さない(呼び出し側が `hca_enabled` を見て FW を止める)。\n* `ENABLE_HCA` が完了した時点で `d->hca_enabled = 1` にする。\n* コマンドは全部 `s_hi[d->port].cmd` で出す。`ACCESS_REG` のデータ `s_hi[d->port].reg` は、まだ出していないとき(`s_hi[d->port].cmd.posted` が 0)だけ組む。\n* atomic の能力・PMTU の読み・PAOS の書きの失敗は `BFM_E_HW` にする。RoCE の能力が読めなければ `qp_ts_format` を 0 のまま進む。表示用の PMTU が読めなければ表示しない。\n* 公開メモリの鍵の下位 8 ビットは、自分用の鍵を作った後の時刻(ns を 10 ビット右へずらしたもの)から作る。自分用の鍵(`lkey`)の下位 8 ビットは 0。\n* `g_bfm_port_mtu` が 0 なら MTU を設定しない。`g_bfm_local_mac[d->port]` が全部 0 なら vport の MAC を使う。\n* リンクが `g_bfm_link_wait_ms` で上がらなければ注意を表示して進む(後で上がれば EQ で分かる)。そのとき最後の PAOS の読みが失敗していれば `BFM_E_HW`。",
       "flow": [
         {"loop": "BFM_INPROGRESS・BFM_OK・失敗のどれかを返すまで", "body": [
-          {"switch": "s_hi.step", "cases": [
+          {"switch": "s_hi[d->port].step", "cases": [
             {"case": "H_START", "body": [
               {"call": "fw = bfm_mmio_rd32be(d->bar0, MLX5_ISEG_FW_REV)、cmdif = bfm_mmio_rd32be(d->bar0, MLX5_ISEG_CMDIF_REV) を呼ぶ"},
               {"if": "fw == 0xffffffff ?", "then": [
@@ -373,241 +373,241 @@
                 {"do": "BFM_LOG で「コマンドの版が違う」を表示"},
                 {"return": "BFM_E_HW"}
               ]},
-              {"call": "s_hi.t0 = bfm_port_time_ns() を呼ぶ"},
-              {"do": "s_hi.step = H_FW_WAIT1"}
+              {"call": "s_hi[d->port].t0 = bfm_port_time_ns() を呼ぶ"},
+              {"do": "s_hi[d->port].step = H_FW_WAIT1"}
             ]},
             {"case": "H_FW_WAIT1・H_FW_WAIT2", "body": [
               {"if": "fw_initializing(d) が 0 以外(初期化中)?", "then": [
-                {"if": "ms_since(s_hi.t0) <= FW_INIT_TIMEOUT_MS(120 秒)?", "then": [{"return": "BFM_INPROGRESS"}]},
+                {"if": "ms_since(s_hi[d->port].t0) <= FW_INIT_TIMEOUT_MS(120 秒)?", "then": [{"return": "BFM_INPROGRESS"}]},
                 {"do": "BFM_LOG で「FW の初期化が終わらない」を表示"},
                 {"return": "BFM_E_TIMEOUT"}
               ]},
-              {"do": "s_hi.step = (s_hi.step == H_FW_WAIT1) ? H_CMDQ : H_ENABLE"}
+              {"do": "s_hi[d->port].step = (s_hi[d->port].step == H_FW_WAIT1) ? H_CMDQ : H_ENABLE"}
             ]},
             {"case": "H_CMDQ", "body": [
               {"call": "rc = mlx5_cmd_init(d) を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-              {"call": "s_hi.t0 = bfm_port_time_ns() を呼ぶ"},
-              {"do": "s_hi.step = H_CMDQ_WAIT"}
+              {"call": "s_hi[d->port].t0 = bfm_port_time_ns() を呼ぶ"},
+              {"do": "s_hi[d->port].step = H_CMDQ_WAIT"}
             ]},
             {"case": "H_CMDQ_WAIT", "body": [
-              {"if": "ms_since(s_hi.t0) < CMDQ_SETTLE_MS(10ms)?", "then": [{"return": "BFM_INPROGRESS"}]},
-              {"call": "s_hi.t0 = bfm_port_time_ns() を呼ぶ"},
-              {"do": "s_hi.step = H_FW_WAIT2"}
+              {"if": "ms_since(s_hi[d->port].t0) < CMDQ_SETTLE_MS(10ms)?", "then": [{"return": "BFM_INPROGRESS"}]},
+              {"call": "s_hi[d->port].t0 = bfm_port_time_ns() を呼ぶ"},
+              {"do": "s_hi[d->port].step = H_FW_WAIT2"}
             ]},
             {"case": "H_ENABLE", "body": [
-              {"call": "rc = simple_cmd(d, &s_hi.cmd, MLX5_CMD_ENABLE_HCA, 0, \"ENABLE_HCA\") を呼ぶ"},
+              {"call": "rc = simple_cmd(d, &s_hi[d->port].cmd, MLX5_CMD_ENABLE_HCA, 0, \"ENABLE_HCA\") を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-              {"do": "d->hca_enabled = 1、s_hi.step = H_QUERY_ISSI"}
+              {"do": "d->hca_enabled = 1、s_hi[d->port].step = H_QUERY_ISSI"}
             ]},
             {"case": "H_QUERY_ISSI", "body": [
               {"do": "in[16] を 0 で埋め、byte 0 に MLX5_CMD_QUERY_ISSI を書く"},
-              {"call": "rc = mlx5_cmd_run(d, &s_hi.cmd, in, 16, out, 112, \"QUERY_ISSI\") を呼ぶ"},
+              {"call": "rc = mlx5_cmd_run(d, &s_hi[d->port].cmd, in, 16, out, 112, \"QUERY_ISSI\") を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
               {"if": "out の byte 108〜111 のビット 1 が立つ(ISSI 1 に対応)?", "then": [
-                {"do": "s_hi.step = H_SET_ISSI"}
+                {"do": "s_hi[d->port].step = H_SET_ISSI"}
               ], "else": [
                 {"do": "BFM_LOG で「ISSI 0 のまま進む」を表示"},
-                {"do": "s_hi.step = H_BOOT_QUERY"}
+                {"do": "s_hi[d->port].step = H_BOOT_QUERY"}
               ]}
             ]},
             {"case": "H_SET_ISSI", "body": [
               {"do": "in[16] を 0 で埋め、byte 0 に MLX5_CMD_SET_ISSI、byte 10〜11 に 1 を書く"},
-              {"call": "rc = mlx5_cmd_run(d, &s_hi.cmd, in, 16, out, 16, \"SET_ISSI\") を呼ぶ"},
+              {"call": "rc = mlx5_cmd_run(d, &s_hi[d->port].cmd, in, 16, out, 16, \"SET_ISSI\") を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-              {"do": "s_hi.step = H_BOOT_QUERY"}
+              {"do": "s_hi[d->port].step = H_BOOT_QUERY"}
             ]},
             {"case": "H_BOOT_QUERY・H_INIT_QUERY", "body": [
-              {"do": "boot = (s_hi.step == H_BOOT_QUERY)"},
+              {"do": "boot = (s_hi[d->port].step == H_BOOT_QUERY)"},
               {"if": "boot かつ d->fw_pages == NULL ?", "then": [
                 {"call": "d->fw_pages = bfm_mem_alloc(g_bfm_fw_pages_max × BFM_PAGE, BFM_PAGE) を呼ぶ"},
                 {"if": "d->fw_pages == NULL ?", "then": [{"return": "BFM_E_NOMEM"}]},
                 {"do": "d->fw_pages_used = 0"}
               ]},
               {"do": "func = 0、n = 0"},
-              {"call": "rc = query_pages(d, &s_hi.cmd, boot ? 1 : 2, &func, &n) を呼ぶ"},
+              {"call": "rc = query_pages(d, &s_hi[d->port].cmd, boot ? 1 : 2, &func, &n) を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
               {"do": "BFM_DBG で求められたページの数を表示"},
-              {"call": "rc = mlx5_pages_start(d, &s_hi.pages, func, n) を呼ぶ"},
+              {"call": "rc = mlx5_pages_start(d, &s_hi[d->port].pages, func, n) を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-              {"do": "s_hi.step = boot ? H_BOOT_GIVE : H_INIT_GIVE"}
+              {"do": "s_hi[d->port].step = boot ? H_BOOT_GIVE : H_INIT_GIVE"}
             ]},
             {"case": "H_BOOT_GIVE・H_INIT_GIVE", "body": [
-              {"call": "rc = mlx5_pages_step(d, &s_hi.pages) を呼ぶ"},
+              {"call": "rc = mlx5_pages_step(d, &s_hi[d->port].pages) を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-              {"do": "s_hi.step = (s_hi.step == H_BOOT_GIVE) ? H_HOST_ENDIAN : H_INIT_HCA"}
+              {"do": "s_hi[d->port].step = (s_hi[d->port].step == H_BOOT_GIVE) ? H_HOST_ENDIAN : H_INIT_HCA"}
             ]},
             {"case": "H_HOST_ENDIAN", "body": [
-              {"if": "!s_hi.cmd.posted ?", "then": [{"do": "s_hi.reg を 0 で埋める(x86 はリトルエンディアンなので 0)"}]},
-              {"call": "rc = access_reg(d, &s_hi.cmd, MLX5_REG_HOST_ENDIANNESS, 0, s_hi.reg, \"ACCESS_REG(HOST_ENDIANNESS)\") を呼ぶ"},
+              {"if": "!s_hi[d->port].cmd.posted ?", "then": [{"do": "s_hi[d->port].reg を 0 で埋める(x86 はリトルエンディアンなので 0)"}]},
+              {"call": "rc = access_reg(d, &s_hi[d->port].cmd, MLX5_REG_HOST_ENDIANNESS, 0, s_hi[d->port].reg, \"ACCESS_REG(HOST_ENDIANNESS)\") を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-              {"do": "s_hi.step = H_GEN_QUERY"}
+              {"do": "s_hi[d->port].step = H_GEN_QUERY"}
             ]},
             {"case": "H_GEN_QUERY", "body": [
-              {"call": "rc = query_cap(d, &s_hi.cmd, MLX5_CAP_GENERAL, \"QUERY_HCA_CAP(general)\") を呼ぶ"},
+              {"call": "rc = query_cap(d, &s_hi[d->port].cmd, MLX5_CAP_GENERAL, \"QUERY_HCA_CAP(general)\") を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
               {"call": "rc = parse_general_caps(d) を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-              {"do": "s_hi.step = H_GEN_SET"}
+              {"do": "s_hi[d->port].step = H_GEN_SET"}
             ]},
             {"case": "H_GEN_SET", "body": [
-              {"call": "rc = set_cap(d, &s_hi.cmd, MLX5_CAP_GENERAL, \"SET_HCA_CAP(general)\") を呼ぶ"},
+              {"call": "rc = set_cap(d, &s_hi[d->port].cmd, MLX5_CAP_GENERAL, \"SET_HCA_CAP(general)\") を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-              {"do": "s_hi.step = H_ATOM_QUERY"}
+              {"do": "s_hi[d->port].step = H_ATOM_QUERY"}
             ]},
             {"case": "H_ATOM_QUERY", "body": [
-              {"call": "rc = query_cap(d, &s_hi.cmd, MLX5_CAP_ATOMIC, \"QUERY_HCA_CAP(atomic)\") を呼ぶ"},
+              {"call": "rc = query_cap(d, &s_hi[d->port].cmd, MLX5_CAP_ATOMIC, \"QUERY_HCA_CAP(atomic)\") を呼ぶ"},
               {"if": "rc == BFM_INPROGRESS ?", "then": [{"return": "rc"}]},
               {"if": "rc != BFM_OK ?", "then": [{"return": "BFM_E_HW"}]},
               {"call": "rc = parse_atomic_caps(d) を呼ぶ"},
               {"if": "rc < 0 ?", "then": [{"return": "rc"}]},
               {"if": "rc == 0 ?", "then": [{"call": "decide_atomic_mode(d) を呼ぶ"}]},
-              {"do": "s_hi.step = (rc == 1) ? H_ATOM_SET : H_ROCE_QUERY"}
+              {"do": "s_hi[d->port].step = (rc == 1) ? H_ATOM_SET : H_ROCE_QUERY"}
             ]},
             {"case": "H_ATOM_SET", "body": [
-              {"call": "rc = set_cap(d, &s_hi.cmd, MLX5_CAP_ATOMIC, \"SET_HCA_CAP(atomic)\") を呼ぶ"},
+              {"call": "rc = set_cap(d, &s_hi[d->port].cmd, MLX5_CAP_ATOMIC, \"SET_HCA_CAP(atomic)\") を呼ぶ"},
               {"if": "rc == BFM_INPROGRESS ?", "then": [{"return": "rc"}]},
               {"if": "rc != BFM_OK ?", "then": [{"return": "BFM_E_HW"}]},
               {"call": "decide_atomic_mode(d) を呼ぶ"},
-              {"do": "s_hi.step = H_ROCE_QUERY"}
+              {"do": "s_hi[d->port].step = H_ROCE_QUERY"}
             ]},
             {"case": "H_ROCE_QUERY", "body": [
-              {"call": "rc = query_cap(d, &s_hi.cmd, MLX5_CAP_ROCE, \"QUERY_HCA_CAP(roce)\") を呼ぶ"},
+              {"call": "rc = query_cap(d, &s_hi[d->port].cmd, MLX5_CAP_ROCE, \"QUERY_HCA_CAP(roce)\") を呼ぶ"},
               {"if": "rc == BFM_INPROGRESS ?", "then": [{"return": "rc"}]},
-              {"do": "d->qp_ts_format = (rc == BFM_OK かつ s_cap_out[16 + 3] AND 0x03 != 0) ? 1 : 0"},
-              {"do": "s_hi.step = H_INIT_QUERY"}
+              {"do": "d->qp_ts_format = (rc == BFM_OK かつ s_cap_out[d->port][16 + 3] AND 0x03 != 0) ? 1 : 0"},
+              {"do": "s_hi[d->port].step = H_INIT_QUERY"}
             ]},
             {"case": "H_INIT_HCA", "body": [
               {"do": "in[32] を 0 で埋め、byte 0 に MLX5_CMD_INIT_HCA を書く"},
-              {"call": "rc = mlx5_cmd_run(d, &s_hi.cmd, in, 32, out, 16, \"INIT_HCA\") を呼ぶ"},
+              {"call": "rc = mlx5_cmd_run(d, &s_hi[d->port].cmd, in, 32, out, 16, \"INIT_HCA\") を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
               {"call": "rc = mlx5_eq_prepare(d) を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-              {"do": "s_hi.step = H_EQ_UAR"}
+              {"do": "s_hi[d->port].step = H_EQ_UAR"}
             ]},
             {"case": "H_EQ_UAR", "body": [
-              {"call": "rc = mlx5_alloc_uar(d, &s_hi.cmd, &d->eq_uarn) を呼ぶ"},
+              {"call": "rc = mlx5_alloc_uar(d, &s_hi[d->port].cmd, &d->eq_uarn) を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-              {"do": "s_hi.step = H_EQ_CREATE"}
+              {"do": "s_hi[d->port].step = H_EQ_CREATE"}
             ]},
             {"case": "H_EQ_CREATE", "body": [
-              {"call": "rc = mlx5_eq_create(d, &s_hi.cmd) を呼ぶ"},
+              {"call": "rc = mlx5_eq_create(d, &s_hi[d->port].cmd) を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-              {"do": "s_hi.step = H_PD"}
+              {"do": "s_hi[d->port].step = H_PD"}
             ]},
             {"case": "H_PD", "body": [
-              {"call": "rc = alloc_pd(d, &s_hi.cmd, &d->pdn) を呼ぶ"},
+              {"call": "rc = alloc_pd(d, &s_hi[d->port].cmd, &d->pdn) を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-              {"do": "s_hi.step = H_LKEY"}
+              {"do": "s_hi[d->port].step = H_LKEY"}
             ]},
             {"case": "H_LKEY", "body": [
-              {"call": "rc = create_mkey_pa(d, &s_hi.cmd, 0x0c, 0, 0, 0, &d->lkey, \"CREATE_MKEY(local)\") を呼ぶ"},
+              {"call": "rc = create_mkey_pa(d, &s_hi[d->port].cmd, 0x0c, 0, 0, 0, &d->lkey, \"CREATE_MKEY(local)\") を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
               {"call": "d->rkey_key8 = bfm_port_time_ns() >> 10 の下位 8 ビット"},
-              {"do": "s_hi.step = H_RKEY"}
+              {"do": "s_hi[d->port].step = H_RKEY"}
             ]},
             {"case": "H_RKEY", "body": [
-              {"call": "rc = create_mkey_pa(d, &s_hi.cmd, 0x7c, g_bfm_mr_base, g_bfm_mr_size, d->rkey_key8, &d->rkey, \"CREATE_MKEY(公開メモリ)\") を呼ぶ"},
+              {"call": "rc = create_mkey_pa(d, &s_hi[d->port].cmd, 0x7c, g_bfm_mr_base, g_bfm_mr_size, d->rkey_key8, &d->rkey, \"CREATE_MKEY(公開メモリ)\") を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-              {"do": "s_hi.step = g_bfm_port_mtu ? H_MTU_READ : H_LINK_UP"}
+              {"do": "s_hi[d->port].step = g_bfm_port_mtu ? H_MTU_READ : H_LINK_UP"}
             ]},
             {"case": "H_MTU_READ", "body": [
-              {"if": "!s_hi.cmd.posted ?", "then": [{"do": "s_hi.reg を 0 で埋め、local_port(reg[1])= 1"}]},
-              {"call": "rc = access_reg(d, &s_hi.cmd, MLX5_REG_PMTU, 1, s_hi.reg, \"ACCESS_REG(PMTU 読み)\") を呼ぶ"},
+              {"if": "!s_hi[d->port].cmd.posted ?", "then": [{"do": "s_hi[d->port].reg を 0 で埋め、local_port(reg[1])= 1"}]},
+              {"call": "rc = access_reg(d, &s_hi[d->port].cmd, MLX5_REG_PMTU, 1, s_hi[d->port].reg, \"ACCESS_REG(PMTU 読み)\") を呼ぶ"},
               {"if": "rc == BFM_INPROGRESS ?", "then": [{"return": "rc"}]},
               {"if": "rc != BFM_OK ?", "then": [{"return": "BFM_E_HW"}]},
-              {"do": "max = s_hi.reg の byte 4〜5(max_mtu)"},
+              {"do": "max = s_hi[d->port].reg の byte 4〜5(max_mtu)"},
               {"if": "max == 0 ?", "then": [{"do": "max = 0xffff"}]},
-              {"do": "s_hi.frame = g_bfm_port_mtu + PORT_MTU_OVERHEAD(22。32bit)"},
-              {"if": "s_hi.frame > max ?", "then": [
+              {"do": "s_hi[d->port].frame = g_bfm_port_mtu + PORT_MTU_OVERHEAD(22。32bit)"},
+              {"if": "s_hi[d->port].frame > max ?", "then": [
                 {"do": "BFM_LOG で「切り詰める」を表示"},
-                {"do": "s_hi.frame = max"}
+                {"do": "s_hi[d->port].frame = max"}
               ]},
-              {"do": "s_hi.step = H_MTU_WRITE"}
+              {"do": "s_hi[d->port].step = H_MTU_WRITE"}
             ]},
             {"case": "H_MTU_WRITE", "body": [
-              {"if": "!s_hi.cmd.posted ?", "then": [{"do": "s_hi.reg を 0 で埋め、local_port = 1、byte 8〜9(admin_mtu)に s_hi.frame の下位 16bit を書く"}]},
-              {"call": "rc = access_reg(d, &s_hi.cmd, MLX5_REG_PMTU, 0, s_hi.reg, \"ACCESS_REG(PMTU 書き)\") を呼ぶ"},
+              {"if": "!s_hi[d->port].cmd.posted ?", "then": [{"do": "s_hi[d->port].reg を 0 で埋め、local_port = 1、byte 8〜9(admin_mtu)に s_hi[d->port].frame の下位 16bit を書く"}]},
+              {"call": "rc = access_reg(d, &s_hi[d->port].cmd, MLX5_REG_PMTU, 0, s_hi[d->port].reg, \"ACCESS_REG(PMTU 書き)\") を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-              {"do": "s_hi.step = H_LINK_UP"}
+              {"do": "s_hi[d->port].step = H_LINK_UP"}
             ]},
             {"case": "H_LINK_UP", "body": [
-              {"if": "!s_hi.cmd.posted ?", "then": [{"do": "s_hi.reg を 0 で埋め、local_port = 1、admin_status = 1(UP)、ase = 1"}]},
-              {"call": "rc = access_reg(d, &s_hi.cmd, MLX5_REG_PAOS, 0, s_hi.reg, \"ACCESS_REG(PAOS 書き)\") を呼ぶ"},
+              {"if": "!s_hi[d->port].cmd.posted ?", "then": [{"do": "s_hi[d->port].reg を 0 で埋め、local_port = 1、admin_status = 1(UP)、ase = 1"}]},
+              {"call": "rc = access_reg(d, &s_hi[d->port].cmd, MLX5_REG_PAOS, 0, s_hi[d->port].reg, \"ACCESS_REG(PAOS 書き)\") を呼ぶ"},
               {"if": "rc == BFM_INPROGRESS ?", "then": [{"return": "rc"}]},
               {"if": "rc != BFM_OK ?", "then": [{"return": "BFM_E_HW"}]},
-              {"call": "s_hi.t0 = bfm_port_time_ns() を呼ぶ"},
-              {"do": "s_hi.read_ok = 0、s_hi.step = H_LINK_READ"}
+              {"call": "s_hi[d->port].t0 = bfm_port_time_ns() を呼ぶ"},
+              {"do": "s_hi[d->port].read_ok = 0、s_hi[d->port].step = H_LINK_READ"}
             ]},
             {"case": "H_LINK_READ", "body": [
-              {"if": "!s_hi.cmd.posted ?", "then": [{"do": "s_hi.reg を 0 で埋め、local_port = 1"}]},
-              {"call": "rc = access_reg(d, &s_hi.cmd, MLX5_REG_PAOS, 1, s_hi.reg, \"ACCESS_REG(PAOS 読み)\") を呼ぶ"},
+              {"if": "!s_hi[d->port].cmd.posted ?", "then": [{"do": "s_hi[d->port].reg を 0 で埋め、local_port = 1"}]},
+              {"call": "rc = access_reg(d, &s_hi[d->port].cmd, MLX5_REG_PAOS, 1, s_hi[d->port].reg, \"ACCESS_REG(PAOS 読み)\") を呼ぶ"},
               {"if": "rc == BFM_INPROGRESS ?", "then": [{"return": "rc"}]},
-              {"do": "s_hi.read_ok = (rc == BFM_OK)"},
-              {"if": "s_hi.read_ok かつ oper_status(reg[3] の下位 4 ビット)== 1 ?", "then": [
-                {"do": "d->link_up = 1、s_hi.step = H_MTU_LOG"}
+              {"do": "s_hi[d->port].read_ok = (rc == BFM_OK)"},
+              {"if": "s_hi[d->port].read_ok かつ oper_status(reg[3] の下位 4 ビット)== 1 ?", "then": [
+                {"do": "d->link_up = 1、s_hi[d->port].step = H_MTU_LOG"}
               ], "else": [
-                {"if": "ms_since(s_hi.t0) > g_bfm_link_wait_ms ?", "then": [
-                  {"if": "!s_hi.read_ok ?", "then": [
+                {"if": "ms_since(s_hi[d->port].t0) > g_bfm_link_wait_ms ?", "then": [
+                  {"if": "!s_hi[d->port].read_ok ?", "then": [
                     {"do": "BFM_LOG で「ポートの状態(PAOS)が読めない」を表示"},
                     {"return": "BFM_E_HW"}
                   ]},
                   {"do": "BFM_LOG で「リンクが上がらない(このまま進む)」を表示"},
-                  {"do": "s_hi.step = H_MTU_LOG"}
+                  {"do": "s_hi[d->port].step = H_MTU_LOG"}
                 ], "else": [
-                  {"call": "s_hi.t1 = bfm_port_time_ns() を呼ぶ"},
-                  {"do": "s_hi.step = H_LINK_PAUSE"}
+                  {"call": "s_hi[d->port].t1 = bfm_port_time_ns() を呼ぶ"},
+                  {"do": "s_hi[d->port].step = H_LINK_PAUSE"}
                 ]}
               ]}
             ]},
             {"case": "H_LINK_PAUSE", "body": [
-              {"if": "ms_since(s_hi.t1) < LINK_POLL_MS(10ms)?", "then": [{"return": "BFM_INPROGRESS"}]},
-              {"do": "s_hi.step = H_LINK_READ"}
+              {"if": "ms_since(s_hi[d->port].t1) < LINK_POLL_MS(10ms)?", "then": [{"return": "BFM_INPROGRESS"}]},
+              {"do": "s_hi[d->port].step = H_LINK_READ"}
             ]},
             {"case": "H_MTU_LOG", "body": [
-              {"if": "!s_hi.cmd.posted ?", "then": [{"do": "s_hi.reg を 0 で埋め、local_port = 1"}]},
-              {"call": "rc = access_reg(d, &s_hi.cmd, MLX5_REG_PMTU, 1, s_hi.reg, \"ACCESS_REG(PMTU 読み)\") を呼ぶ"},
+              {"if": "!s_hi[d->port].cmd.posted ?", "then": [{"do": "s_hi[d->port].reg を 0 で埋め、local_port = 1"}]},
+              {"call": "rc = access_reg(d, &s_hi[d->port].cmd, MLX5_REG_PMTU, 1, s_hi[d->port].reg, \"ACCESS_REG(PMTU 読み)\") を呼ぶ"},
               {"if": "rc == BFM_INPROGRESS ?", "then": [{"return": "rc"}]},
               {"if": "rc == BFM_OK ?", "then": [
                 {"call": "frame_to_ip_mtu() で設定・実際・上限を IP の MTU に直し、BFM_LOG で表示する"}
               ]},
-              {"do": "s_hi.step = H_ROCE_EN"}
+              {"do": "s_hi[d->port].step = H_ROCE_EN"}
             ]},
             {"case": "H_ROCE_EN", "body": [
-              {"call": "rc = vport_enable_roce(d, &s_hi.cmd) を呼ぶ"},
+              {"call": "rc = vport_enable_roce(d, &s_hi[d->port].cmd) を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-              {"if": "g_bfm_local_mac が全部 0 でない?", "then": [
-                {"do": "d->mac に g_bfm_local_mac を写す"},
-                {"do": "s_hi.step = H_ROCE_ADDR"}
+              {"if": "g_bfm_local_mac[d->port] が全部 0 でない?", "then": [
+                {"do": "d->mac に g_bfm_local_mac[d->port] を写す"},
+                {"do": "s_hi[d->port].step = H_ROCE_ADDR"}
               ], "else": [
-                {"do": "s_hi.step = H_MAC"}
+                {"do": "s_hi[d->port].step = H_MAC"}
               ]},
-              {"do": "d->ip = g_bfm_local_ip"},
+              {"do": "d->ip = g_bfm_local_ip[d->port]"},
               {"call": "mlx5_gid_from_ipv4(d->ip, d->gid) を呼ぶ"}
             ]},
             {"case": "H_MAC", "body": [
-              {"call": "rc = vport_query_mac(d, &s_hi.cmd, d->mac) を呼ぶ"},
+              {"call": "rc = vport_query_mac(d, &s_hi[d->port].cmd, d->mac) を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-              {"do": "s_hi.step = H_ROCE_ADDR"}
+              {"do": "s_hi[d->port].step = H_ROCE_ADDR"}
             ]},
             {"case": "H_ROCE_ADDR", "body": [
-              {"call": "rc = set_roce_address(d, &s_hi.cmd) を呼ぶ"},
+              {"call": "rc = set_roce_address(d, &s_hi[d->port].cmd) を呼ぶ"},
               {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-              {"call": "s_hi.t0 = s_hi.t1 = bfm_port_time_ns() を呼ぶ"},
-              {"do": "s_hi.step = H_SETTLE"}
+              {"call": "s_hi[d->port].t0 = s_hi[d->port].t1 = bfm_port_time_ns() を呼ぶ"},
+              {"do": "s_hi[d->port].step = H_SETTLE"}
             ]},
             {"case": "H_SETTLE", "body": [
               {"call": "mlx5_eq_poll(d) を呼ぶ"},
               {"if": "mlx5_eq_poll() > 0 ?", "then": [
-                {"call": "s_hi.t1 = bfm_port_time_ns() を呼ぶ"}
+                {"call": "s_hi[d->port].t1 = bfm_port_time_ns() を呼ぶ"}
               ], "else": [
-                {"if": "mlx5_eq_busy() が 0 以外(ページ要求に答えている途中)?", "then": [
-                  {"call": "s_hi.t1 = bfm_port_time_ns() を呼ぶ"}
+                {"if": "mlx5_eq_busy(d) が 0 以外(ページ要求に答えている途中)?", "then": [
+                  {"call": "s_hi[d->port].t1 = bfm_port_time_ns() を呼ぶ"}
                 ]}
               ]},
-              {"if": "ms_since(s_hi.t0) < PAGE_SETTLE_MS(2 秒)かつ ms_since(s_hi.t1) <= PAGE_QUIET_MS(100ms)?", "then": [{"return": "BFM_INPROGRESS"}]},
+              {"if": "ms_since(s_hi[d->port].t0) < PAGE_SETTLE_MS(2 秒)かつ ms_since(s_hi[d->port].t1) <= PAGE_QUIET_MS(100ms)?", "then": [{"return": "BFM_INPROGRESS"}]},
               {"do": "BFM_LOG で「HCA 準備完了」(MAC・IP・リンク・FW のページ数・公開メモリ・rkey)を表示"},
-              {"do": "s_hi.step = H_DONE"}
+              {"do": "s_hi[d->port].step = H_DONE"}
             ]},
             {"default": true, "body": [
               {"return": "BFM_OK"}
@@ -648,7 +648,7 @@
           {"id": "H_LINK_READ", "text": "ACCESS_REG(PAOS 読み。リンクが上がったか)", "wait": "コマンドの完了", "next": [{"to": "H_MTU_LOG", "label": "上がった / 時間切れ"}, {"to": "H_LINK_PAUSE", "label": "まだ"}]},
           {"id": "H_LINK_PAUSE", "text": "読み直すまで待つ", "wait": "10ms たつ", "next": [{"to": "H_LINK_READ"}]},
           {"id": "H_MTU_LOG", "text": "ACCESS_REG(PMTU 読み。表示する)", "wait": "コマンドの完了"},
-          {"id": "H_ROCE_EN", "text": "MODIFY_NIC_VPORT_CONTEXT(roce_en)。IP と GID を用意する", "wait": "コマンドの完了", "next": [{"to": "H_MAC", "label": "g_bfm_local_mac が全部 0"}, {"to": "H_ROCE_ADDR", "label": "それ以外"}]},
+          {"id": "H_ROCE_EN", "text": "MODIFY_NIC_VPORT_CONTEXT(roce_en)。IP と GID を用意する", "wait": "コマンドの完了", "next": [{"to": "H_MAC", "label": "g_bfm_local_mac[d->port] が全部 0"}, {"to": "H_ROCE_ADDR", "label": "それ以外"}]},
           {"id": "H_MAC", "text": "QUERY_NIC_VPORT_CONTEXT(vport の MAC を読む)", "wait": "コマンドの完了"},
           {"id": "H_ROCE_ADDR", "text": "SET_ROCE_ADDRESS", "wait": "コマンドの完了"},
           {"id": "H_SETTLE", "text": "追加のページ要求に EQ を見て答える", "wait": "ページ要求が 100ms 来なくなる(上限 2 秒)"},
@@ -660,26 +660,26 @@
     },
     {
       "func": "mlx5_hca_teardown",
-      "summary": "`TEARDOWN_HCA` で FW を止めるコマンドを待たずに進める。まず graceful(profile 0)で出し、断られたら force(profile 1)で出す。済んだら `d->hca_enabled = 0` にする。状態(今の profile と出しているコマンド)は静的な `s_td` に持つ。",
-      "args": {"d": "装置"},
+      "summary": "`TEARDOWN_HCA` で FW を止めるコマンドを待たずに進める。まず graceful(profile 0)で出し、断られたら force(profile 1)で出す。済んだら `d->hca_enabled = 0` にする。状態(今の profile と出しているコマンド)は静的な `s_td[d->port]` に持つ。",
+      "args": {"d": "ポートの装置(`g_bfm_dev[port]`)"},
       "ret": "`BFM_INPROGRESS`: まだ(また呼ぶ)。`BFM_OK`: 済んだ(`hca_enabled` が 0 のときと、graceful / force とも通らなかったときも)。",
       "pre": "呼び出し側が、この後に Bus Master を落とすこと。",
-      "notes": "* `d->hca_enabled` が 0 なら何もしない。\n* この後は FW にコマンドを出さない(資源を壊さずに止めた後の `MANAGE_PAGES`・`DISABLE_HCA` は返らないことがある。vfio_nvme で実機確認済み)。\n* force も失敗した(コマンドが失敗した、または出力の byte 15 のビット 0 が立っていた)ときは、注意(次の立ち上げの FLR で戻す)を表示し、`BFM_OK` を返して `hca_enabled` を 0 にする。\n* 済んだら `s_td.prof` を 0 に戻す(次の停止は graceful から)。",
+      "notes": "* `d->hca_enabled` が 0 なら何もしない。\n* この後は FW にコマンドを出さない(資源を壊さずに止めた後の `MANAGE_PAGES`・`DISABLE_HCA` は返らないことがある。vfio_nvme で実機確認済み)。\n* force も失敗した(コマンドが失敗した、または出力の byte 15 のビット 0 が立っていた)ときは、注意(次の立ち上げの FLR で戻す)を表示し、`BFM_OK` を返して `hca_enabled` を 0 にする。\n* 済んだら `s_td[d->port].prof` を 0 に戻す(次の停止は graceful から)。",
       "flow": [
         {"if": "!d->hca_enabled ?", "then": [{"return": "BFM_OK"}]},
         {"loop": "TEARDOWN_HCA が通るか、graceful / force とも通らないまで", "body": [
-          {"do": "in[16] を 0 で埋め、byte 0 に MLX5_CMD_TEARDOWN_HCA、byte 10〜11 に s_td.prof を書く"},
-          {"call": "rc = mlx5_cmd_run(d, &s_td.cmd, in, 16, out, 16, s_td.prof ? \"TEARDOWN_HCA(force)\" : \"TEARDOWN_HCA(graceful)\") を呼ぶ"},
+          {"do": "in[16] を 0 で埋め、byte 0 に MLX5_CMD_TEARDOWN_HCA、byte 10〜11 に s_td[d->port].prof を書く"},
+          {"call": "rc = mlx5_cmd_run(d, &s_td[d->port].cmd, in, 16, out, 16, s_td[d->port].prof ? \"TEARDOWN_HCA(force)\" : \"TEARDOWN_HCA(graceful)\") を呼ぶ"},
           {"if": "rc == BFM_INPROGRESS ?", "then": [{"return": "rc"}]},
-          {"if": "rc == BFM_OK かつ !(s_td.prof == 1 かつ out の byte 15 のビット 0 が立つ)?", "then": [{"break": true}]},
-          {"if": "s_td.prof == 0 ?", "then": [
-            {"do": "s_td.prof = 1"},
+          {"if": "rc == BFM_OK かつ !(s_td[d->port].prof == 1 かつ out の byte 15 のビット 0 が立つ)?", "then": [{"break": true}]},
+          {"if": "s_td[d->port].prof == 0 ?", "then": [
+            {"do": "s_td[d->port].prof = 1"},
             {"continue": true}
           ]},
           {"do": "BFM_LOG で「TEARDOWN_HCA が graceful / force とも通らなかった」を表示"},
           {"break": true}
         ]},
-        {"do": "s_td.prof = 0、d->hca_enabled = 0"},
+        {"do": "s_td[d->port].prof = 0、d->hca_enabled = 0"},
         {"return": "BFM_OK"}
       ]
     }

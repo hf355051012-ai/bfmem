@@ -1,20 +1,25 @@
-/* bfmem の試験プログラム(Linux + VFIO)。
+/* bfmem の試験プログラム(Linux + VFIO)。**両方のノードで同じものを動かす**(双方向)。
  *
- *   bfmem_test [オプション] server                 受け側。公開メモリを決まった模様で埋めて待つ
- *   bfmem_test [オプション] client <IP> [MAC]      掛け側。相手の公開メモリへ一通りの操作をして確かめ、速さを測る
- *   bfmem_test [オプション] info                   立ち上げて能力を表示するだけ
- *   bfmem_test [-t 本数] mt <IP> [MAC]             掛け側。複数のスレッド(コア)から別々の接続で同時に転送する
+ *   bfmem_test [オプション] run <相手のIP> [ポート1の相手のIP]
+ *       代表 API bfm_run() を -t 本のスレッドから同時に呼び続けて、全部の接続を張る。張れたら
+ *       両方のノードが同時に、相手の公開メモリへ一通りの操作をして確かめ(接続 (0,0))、続けて
+ *       接続ごとに 1 本のスレッドで同時に転送する(全部の接続。mt)。最後に相手と足並みをそろえて止める。
+ *   bfmem_test [オプション] serve <相手のIP> [ポート1の相手のIP]
+ *       接続を張って保つだけ(bench の相手)。Ctrl-\(SIGQUIT)で自分の公開メモリの hash を出す
+ *   bfmem_test [オプション] bench <相手のIP>    接続 1 本で多重度ごとの速さを測る(相手は serve -c 1)
+ *   bfmem_test [オプション] info <相手のIP>     ポートを立ち上げて能力を表示するだけ
  *
- * MAC を省くと、相手の MAC は bfm_connect() が自動で取る(REQ を同報で送り、REP から取る)。
+ * ポート 1 を使うのは、ポート 1 の相手の IP を書いたとき(-D・-I でポート 1 の装置と自分の IP)。
+ * 掛け側・受け側は IP の大小で自動で決まる(小さいほうが掛け側)。相手の MAC は自動で取る。
  *
- * 相手は別の機械で動かす同じプログラムの server(相手は常に bfmem)。
- *
- * 公開メモリの取り決め(server が埋める):
+ * 公開メモリの取り決め(どちらのノードも、自分の公開メモリを最初に埋める):
  *   [0, 64KiB)          データ領域。(i * 7 + 3) & 0xff で埋める
  *   [64KiB, 64KiB+4KiB) 8 バイトの atomic 語 x 512(0 で埋める)
- * client はデータ領域の中身を自分でも持っておき(模型)、最後に読み戻して突き合わせ、
- * FNV-1a 64 の hash を表示する。server は Ctrl-\(SIGQUIT)か切断のときに自分のメモリの
- * hash を表示するので、両方の値が同じことを見る(両側が同じ間違い方をしても気付けるように)。 */
+ *   SYNC_OFF            足並みをそろえる語(相手が自分の進み具合を書きに来る。0 で埋める)
+ * 相手のデータ領域の中身を自分でも持っておき(模型)、最後に読み戻して突き合わせ、
+ * FNV-1a 64 の hash を表示する。止める前に自分の公開メモリの hash も表示するので、
+ * 「相手の模型の hash」と「自分の公開メモリの hash」が同じことを、両方の向きで見る
+ * (両側が同じ間違い方をしても気付けるように)。 */
 #define _GNU_SOURCE
 #include "bfm.h"
 #include "../src/bfm_internal.h"
@@ -32,16 +37,19 @@
 #define ATOM_OFF     65536u
 #define ATOM_WORDS   512u
 #define AREA_BYTES   (ATOM_OFF + ATOM_WORDS * 8u)
+#define SYNC_OFF     (3u * 1024u * 1024u)   /* 足並みをそろえる語(相手が書きに来る)*/
 
-static volatile sig_atomic_t g_stop; /* 止める合図(SIGINT / SIGTERM、server 以外では SIGQUIT も)*/
-static volatile sig_atomic_t g_dump; /* hash を出す合図(server で SIGQUIT)*/
-static int g_server;                 /* server のときだけ SIGQUIT で hash を出す */
-static uint8_t g_model[DATA_BYTES];  /* 相手のデータ領域にあるはずの中身(client の模型)*/
+static volatile sig_atomic_t g_stop; /* 止める合図(SIGINT / SIGTERM、serve 以外では SIGQUIT も)*/
+static volatile sig_atomic_t g_dump; /* hash を出す合図(serve で SIGQUIT)*/
+static int g_serve;                  /* serve のときだけ SIGQUIT で hash を出す */
+static int g_quiet;                  /* -q: こちらからは転送せず、相手からの転送を受けるだけ(片方向の速さを測るため)*/
+static int g_perf;                   /* -P: run で一通りの検査を飛ばし、mt(全部の接続での転送と速さ)だけを行う */
+static uint8_t g_model[DATA_BYTES];  /* 相手のデータ領域にあるはずの中身(模型)*/
 
 static void on_sig(int s)
 {
-    if (s == SIGQUIT && g_server) g_dump = 1;
-    else g_stop = 1;                 /* server 以外では SIGQUIT も止める合図(後片付けをしてから終わる)*/
+    if (s == SIGQUIT && g_serve) g_dump = 1;
+    else g_stop = 1;                 /* serve 以外では SIGQUIT も止める合図(後片付けをしてから終わる)*/
 }
 
 static uint64_t now_ns(void)
@@ -74,32 +82,30 @@ static int parse_ip(const char *s, uint32_t *out)
     return 0;
 }
 
-static int parse_mac(const char *s, uint8_t mac[6])
-{
-    unsigned v[6];
-    if (sscanf(s, "%x:%x:%x:%x:%x:%x", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) return -1;
-    for (int i = 0; i < 6; i++) mac[i] = (uint8_t)v[i];
-    return 0;
-}
-
 static void usage(void)
 {
-    printf("使い方: bfmem_test [-d BDF] [-i 自分のIP] [-p ポート] [-m 経路MTU 1-5] [-M ポートのMTU] [-n 回数] [-B] [-S] [-C] [-x] [-v]\n"
-           "                   [-t スレッド数] server | client <相手のIP> [相手のMAC] | bench <相手のIP> [相手のMAC] |\n"
-           "                   mt <相手のIP> [相手のMAC] | info\n"
-           "  相手のMAC を省くと自動で取る(REQ を同報で送り、REP に入った MAC を使う)\n"
+    printf("使い方: bfmem_test [-d BDF] [-i 自分のIP] [-D ポート1のBDF] [-I ポート1の自分のIP] [-c 接続数/ポート]\n"
+           "                   [-t スレッド数] [-p 接続の番号] [-m 経路MTU 1-5] [-M ポートのMTU] [-n 回数]\n"
+           "                   [-B] [-S] [-C] [-x] [-q] [-P] [-v]\n"
+           "                   run <相手のIP> [ポート1の相手のIP] | serve <相手のIP> [ポート1の相手のIP] |\n"
+           "                   bench <相手のIP> | info <相手のIP>\n"
+           "  両方のノードで同じものを動かす。IP の小さいほうが掛け側になる(自動)。相手の MAC も自動で取る\n"
+           "  run: -t 本(既定 4)のスレッドが bfm_run() を同時に呼んで全部の接続(-c 本 x ポート。既定 16)を張り、\n"
+           "       両方向に一通りの操作を確かめ、全部の接続で同時に write / read / atomic / T10-DIF を確かめ、\n"
+           "       8 バイトの write / read / FAA を -n 回(既定 100000)ずつ、64KiB の write / read を -n/50 回ずつ\n"
+           "       同時に打って合計の速さを出す(区間ごとに相手と足並みをそろえるので、相手も同時に打つ = 両方向)\n"
            "  bench: write / read を 4B〜256KiB、多重度 1・4・8・16 で -n 回(既定 100000)ずつ流し、\n"
-           "         IOPS・MB/s・平均遅延を出す\n"
+           "         IOPS・MB/s・平均遅延を出す(接続 1 本。相手は serve -c 1)\n"
            "  -B  BlueFlame を使わない(8 バイトのドアベルだけ。比べるため)\n"
            "  -S  read / atomic の応答を CQE に書かせない(scatter to CQE を使わない)\n"
            "  -C  CPU を深い省電力状態に入れない設定(g_bfm_cpu_awake)を切る\n"
-           "  -x  最後に公開メモリの範囲の外を読み、相手の NIC が断ることを確かめる(接続はエラーになる)\n"
-           "  mt: -t 本(既定 4)のスレッドが同時に別々の接続を張り、write / read / atomic / T10-DIF を確かめ、\n"
-           "      8 バイトの write / read / FAA を -n 回(既定 100000)ずつ同時に打って合計の速さを出す\n");
+           "  -x  最後に公開メモリの範囲の外を読み、相手の NIC が断ることを確かめ、その接続を張り直す\n"
+           "  -q  run で、こちらからは転送せず相手からの転送を受けるだけ(片方向の速さを測るとき、受ける側に付ける)\n"
+           "  -P  run で一通りの検査を飛ばし、全部の接続での転送と速さ(mt)だけを行う(本数を変えて速さを測るとき)\n");
 }
 
 /* ---------------------------------------------------------------------
- * 待ちを返す関数を最後まで進める(BFM_INPROGRESS の間、少し眠っては呼び直す)
+ * 代表 API を回す
  * ------------------------------------------------------------------- */
 
 /* 呼び直すまでの合間(本番ではここでほかの仕事をする)。 */
@@ -108,36 +114,89 @@ static void idle(void)
     usleep(50);
 }
 
-static int do_init(void)
-{
-    int rc;
-    while ((rc = bfm_init()) == BFM_INPROGRESS) idle();
-    return rc;
-}
-
 static void do_shutdown(void)
 {
     while (bfm_shutdown() == BFM_INPROGRESS) idle();
 }
 
-/* 接続する。失敗なら NULL(理由は bfmem が表示する)。 */
-static bfm_conn_t *do_connect(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t ms)
+/* bfm_run() を回すスレッド(-t 本)。全部の接続が使えるか、失敗か、止める合図まで呼び続ける。 */
+struct up_arg {
+    pthread_t th;                        /* このスレッド */
+    int idx;                             /* スレッドの番号(CPU を決める)*/
+    uint64_t calls;                      /* bfm_run() を呼んだ回数 */
+    int rc;                              /* 最後の戻り値 */
+};
+
+static volatile int g_up_done;           /* 1 = 誰かが BFM_OK か失敗を見た(全員やめる)*/
+
+static void reconnect_down(void);
+
+static void *up_worker(void *p)
 {
-    bfm_conn_t *c = NULL;
-    int rc;
-    while ((rc = bfm_connect(&c, ip, mac, port, ms)) == BFM_INPROGRESS) idle();
-    return (rc == BFM_OK) ? c : NULL;
+    struct up_arg *a = (struct up_arg *)p;
+    const long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    cpu_set_t cs;
+    CPU_ZERO(&cs);
+    CPU_SET((int)(a->idx % (ncpu > 0 ? ncpu : 1)), &cs);
+    (void)pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
+    while (!g_up_done && !g_stop) {
+        a->rc = bfm_run();
+        a->calls++;
+        if (a->rc == BFM_OK || (a->rc < 0 && a->rc != BFM_E_STATE)) g_up_done = 1;
+        else {
+            if (a->rc == BFM_E_STATE) reconnect_down();   /* 立ち上げの途中で切れた接続は張り直す */
+            idle();
+        }
+    }
+    return NULL;
 }
 
-static int do_disconnect(bfm_conn_t *c)
+/* 全部の接続が使えるようになるまで、nthreads 本のスレッドから bfm_run() を同時に呼ぶ。
+ * 戻り値: BFM_OK か失敗の理由。 */
+static int run_up(uint32_t nthreads)
 {
-    int rc;
-    while ((rc = bfm_disconnect(c)) == BFM_INPROGRESS) idle();
+    static struct up_arg args[64];
+    if (nthreads == 0) nthreads = 1;
+    if (nthreads > 64u) nthreads = 64u;
+    const uint64_t t0 = now_ns();
+    g_up_done = 0;
+    for (uint32_t t = 0; t < nthreads; t++) {
+        memset(&args[t], 0, sizeof(args[t]));
+        args[t].idx = (int)t;
+        args[t].rc = BFM_INPROGRESS;
+        pthread_create(&args[t].th, NULL, up_worker, &args[t]);
+    }
+    int rc = BFM_INPROGRESS;
+    for (uint32_t t = 0; t < nthreads; t++) {
+        pthread_join(args[t].th, NULL);
+        if (args[t].rc == BFM_OK || (args[t].rc < 0 && args[t].rc != BFM_E_STATE)) rc = args[t].rc;
+    }
+    if (rc == BFM_INPROGRESS) rc = bfm_run();
+    printf("run: bfm_run() を %u 本のスレッドから呼んだ(", nthreads);
+    for (uint32_t t = 0; t < nthreads; t++)
+        printf("%s%llu", t ? " / " : "", (unsigned long long)args[t].calls);
+    printf(" 回)。%.2f 秒で %s\n", (double)(now_ns() - t0) / 1e9, rc == BFM_OK ? "全部の接続が使える" : bfm_strerror(rc));
     return rc;
 }
 
+/* 使う接続の数(全部のポート)。 */
+static unsigned conn_total(void)
+{
+    unsigned n = 0;
+    for (unsigned p = 0; p < BFM_MAX_PORT; p++) n += g_bfm_port_conn[p];
+    return n;
+}
+
+/* エラー・相手が切った接続を張り直すよう頼む(転送していないときに呼ぶ)。 */
+static void reconnect_down(void)
+{
+    for (unsigned p = 0; p < BFM_MAX_PORT; p++)
+        for (unsigned i = 0; i < g_bfm_port_conn[p]; i++)
+            if (bfm_conn_state(p, i) == BFM_ST_DOWN) (void)bfm_reconnect(p, i);
+}
+
 /* ---------------------------------------------------------------------
- * server
+ * 自分の公開メモリ
  * ------------------------------------------------------------------- */
 
 static void fill_area(void)
@@ -145,64 +204,58 @@ static void fill_area(void)
     volatile uint8_t *m = (volatile uint8_t *)(uintptr_t)g_bfm_mr_base;
     for (uint32_t i = 0; i < DATA_BYTES; i++) m[i] = pattern(i);
     for (uint32_t i = 0; i < ATOM_WORDS * 8u; i++) m[ATOM_OFF + i] = 0;
+    *(volatile uint64_t *)(uintptr_t)(g_bfm_mr_base + SYNC_OFF) = 0;
 }
 
-static void dump_area(const char *why)
+static void dump_area(const char *who, const char *why)
 {
     const volatile uint8_t *m = (const volatile uint8_t *)(uintptr_t)g_bfm_mr_base;
-    printf("server: [%s] データ領域の hash = %016llx\n", why, (unsigned long long)fnv1a(m, DATA_BYTES));
+    printf("%s: [%s] 自分の公開メモリのデータ領域の hash = %016llx(相手の「模型の hash」と同じはず)\n", who, why,
+           (unsigned long long)fnv1a(m, DATA_BYTES));
     for (unsigned w = 0; w < 3u; w++) {
         const volatile uint8_t *p = m + ATOM_OFF + w * 8u;
         uint64_t le = 0;
         for (int i = 7; i >= 0; i--) le = (le << 8) | p[i];
-        printf("server:   atomic 語 %u: %02x %02x %02x %02x %02x %02x %02x %02x(LE として %llu)\n", w,
+        printf("%s:   atomic 語 %u: %02x %02x %02x %02x %02x %02x %02x %02x(LE として %llu)\n", who, w,
                p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], (unsigned long long)le);
     }
 }
 
-static int run_server(uint16_t port)
+/* 相手と足並みをそろえる: 相手の SYNC_OFF へ stage を書き、自分の SYNC_OFF が stage 以上になる
+ * (相手もそこまで来た)まで bfm_run() を回して待つ。待つ間、切れた接続は張り直す。 */
+static int sync_peer(bfm_conn_t *c, uint64_t stage, const char *what)
 {
-    if (g_bfm_mr_size < AREA_BYTES) {
-        printf("server: 公開メモリが小さすぎる\n");
-        return 1;
+    volatile uint64_t *own = (volatile uint64_t *)(uintptr_t)(g_bfm_mr_base + SYNC_OFF);
+    const int rc = bfm_write(c, SYNC_OFF, &stage, 8);
+    if (rc != BFM_OK) {
+        printf("run: 相手へ進み具合を書けない: %s\n", bfm_strerror(rc));
+        return rc;
     }
-    /* 接続を同時にいくつでも(接続の枠の数まで)受ける。全部が切れたら hash を出して埋め直す。
-     * 受け付けの途中の枠(pending)を 1 つ持ち、回るたびに bfm_accept() で進める。 */
-    static bfm_conn_t *conns[BFM_MAX_CONN];
-    bfm_conn_t *pending = NULL;
-    unsigned n = 0;
-    fill_area();
-    printf("server: ポート %u で接続を待つ(Ctrl-C で終わる、Ctrl-\\ で hash)\n", port);
+    const uint64_t t0 = now_ns();
+    while (*own < stage && !g_stop) {
+        (void)bfm_run();
+        reconnect_down();
+        usleep(200);
+        if (now_ns() - t0 > 600ull * 1000000000ull) {
+            printf("run: 相手が「%s」まで来ない(10 分)\n", what);
+            return BFM_E_TIMEOUT;
+        }
+    }
+    return g_stop ? BFM_E_STATE : BFM_OK;
+}
+
+/* serve: 接続を張って保つ。切れた接続は張り直す。 */
+static int run_serve(uint32_t nthreads)
+{
+    printf("serve: 接続を張って保つ(Ctrl-C で終わる、Ctrl-\\ で hash)\n");
+    int rc = run_up(nthreads);
     while (!g_stop) {
-        if (n < g_bfm.nconn) {                     /* 受け付けの途中の枠も含めて枠の数まで */
-            const int rc = bfm_accept(&pending, port, 0);
-            if (rc == BFM_OK) {
-                conns[n++] = pending;
-                pending = NULL;
-            }
-        }
-        (void)bfm_poll();
-        if (g_dump) { g_dump = 0; dump_area("要求"); }
-        unsigned k = 0;
-        int closed = 0;
-        for (unsigned i = 0; i < n; i++) {
-            if (bfm_is_up(conns[i])) {
-                conns[k++] = conns[i];
-            } else {
-                (void)do_disconnect(conns[i]);
-                closed = 1;
-            }
-        }
-        n = k;
-        if (closed && n == 0) {
-            dump_area("切断");
-            fill_area();
-            printf("server: ポート %u で接続を待つ(Ctrl-C で終わる、Ctrl-\\ で hash)\n", port);
-        }
-        usleep(n == g_bfm.nconn ? 1000 : 50);
+        rc = bfm_run();
+        reconnect_down();
+        if (g_dump) { g_dump = 0; dump_area("serve", "要求"); }
+        usleep(rc == BFM_OK ? 1000 : 50);
     }
-    if (pending != NULL) (void)do_disconnect(pending);
-    for (unsigned i = 0; i < n; i++) (void)do_disconnect(conns[i]);
+    dump_area("serve", "終わり");
     return 0;
 }
 
@@ -214,7 +267,7 @@ static int g_ng;                     /* client の検査で NG になった数 *
 
 static void check(const char *what, int ok)
 {
-    printf("client: %-58s %s\n", what, ok ? "OK" : "NG");
+    printf("run: %-58s %s\n", what, ok ? "OK" : "NG");
     if (!ok) g_ng++;
 }
 
@@ -254,22 +307,20 @@ static void lat(bfm_conn_t *c, const char *name, op_fn fn, uint32_t n)
     if (m == 0) return;
     n = m;
     qsort(g_lat, n, sizeof(g_lat[0]), cmp_u32);
-    printf("client: 遅延 %-9s x%u: 中央値 %u ns / 平均 %llu / 最小 %u / p99 %u / p99.9 %u\n", name, n,
+    printf("run: 遅延 %-9s x%u: 中央値 %u ns / 平均 %llu / 最小 %u / p99 %u / p99.9 %u\n", name, n,
            g_lat[n / 2u], (unsigned long long)(sum / n), g_lat[0], g_lat[(uint64_t)n * 99u / 100u],
            g_lat[(uint64_t)n * 999u / 1000u]);
 }
 
 static void run_dif(bfm_conn_t *c, uint32_t iters);
 
-static int run_client(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t iters, int oob)
+/* 接続 c で相手の公開メモリへ一通りの操作をして確かめる(相手も同時に、こちらへ同じことをしている)。 */
+static int run_checks(bfm_conn_t *c, uint32_t iters)
 {
-    bfm_conn_t *c = do_connect(ip, mac, port, 0);
-    if (c == NULL) return 1;
-    printf("client: 相手の公開メモリ %llu バイト、BlueFlame %s、inline %u バイトまで\n",
+    printf("run: 相手の公開メモリ %llu バイト、BlueFlame %s、inline %u バイトまで\n",
            (unsigned long long)bfm_remote_size(c), bfm_bf_active(c) ? "あり" : "なし", bfm_inline_max());
-    if (bfm_remote_size(c) < AREA_BYTES) {
-        printf("client: 相手の公開メモリが小さすぎる(%u バイト要る)\n", AREA_BYTES);
-        (void)do_disconnect(c);
+    if (bfm_remote_size(c) < SYNC_OFF + 8u) {
+        printf("run: 相手の公開メモリが小さすぎる(%u バイト要る)\n", SYNC_OFF + 8u);
         return 1;
     }
     for (uint32_t i = 0; i < DATA_BYTES; i++) g_model[i] = pattern(i);
@@ -282,7 +333,7 @@ static int run_client(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t
         for (uint32_t len = 1; len <= 300u && ok; len += (len < 40u) ? 1u : 37u) {
             const uint32_t off = (len * 977u) % (DATA_BYTES - len);
             memset(buf, 0xee, len + 8u);
-            if ((rc = bfm_read(c, off, buf, len)) != BFM_OK) { printf("client: read: %s\n", bfm_strerror(rc)); ok = 0; break; }
+            if ((rc = bfm_read(c, off, buf, len)) != BFM_OK) { printf("run: read: %s\n", bfm_strerror(rc)); ok = 0; break; }
             if (memcmp(buf, &g_model[off], len) != 0 || buf[len] != 0xee) ok = 0;
         }
         rc = bfm_read(c, 0, buf, DATA_BYTES);
@@ -359,7 +410,7 @@ static int run_client(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t
         uint8_t b[8] = {0};
         uint64_t v = 0;
         rc = bfm_read(c, ATOM_OFF + 16u, b, 8);
-        printf("client: 相手のメモリ +16..+23: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+        printf("run: 相手のメモリ +16..+23: %02x %02x %02x %02x %02x %02x %02x %02x\n",
                b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
         check("[4b] 相手のメモリがホスト順(04 03 02 01 0d 0c 0b 0a)",
               rc == BFM_OK && b[0] == 4 && b[1] == 3 && b[2] == 2 && b[3] == 1 &&
@@ -405,7 +456,7 @@ static int run_client(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t
             if (bfm_write_post(c, (i & 63u) * 64u, g_src, 8) != BFM_OK) { g_ng++; break; }
         if (bfm_flush(c) != BFM_OK) g_ng++;
         const uint64_t dt = now_ns() - t0;
-        printf("client: write_post 8B x%u: %.2f Mops\n", n, (double)n * 1000.0 / (double)dt);
+        printf("run: write_post 8B x%u: %.2f Mops\n", n, (double)n * 1000.0 / (double)dt);
         /* 測る間に書いたもの: 64 か所(64 バイトおき)が全部 g_src の先頭 64 バイトになっている。 */
         for (uint32_t k = 0; k < 64u; k++) memcpy(&g_model[k * 64u], g_src, 64);
         rc = bfm_read(c, 0, buf, DATA_BYTES);
@@ -413,21 +464,37 @@ static int run_client(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t
     }
     /* [8] T10-DIF(データ領域とは別の所を使う)。 */
     if (!g_stop) run_dif(c, iters);
-    printf("client: 模型の hash = %016llx(相手の server が切断のときに出す値と同じはず)\n",
-           (unsigned long long)fnv1a(g_model, DATA_BYTES));
-    /* [7] 範囲の外。相手の NIC が REMOTE_ACCESS で断ること(相手の MKey が範囲を持っていること)。 */
-    if (oob && !g_stop) {
-        struct bfm_conn *ci = (struct bfm_conn *)c;
-        const uint64_t real = ci->rlen;
-        ci->rlen = real + 4096u;                  /* 手元の範囲検査だけをすり抜ける */
-        uint8_t d[8];
-        rc = bfm_read(c, real, d, 8);
-        ci->rlen = real;
-        check("[7] 公開メモリの外を読むと相手が断る(REMOTE_ACCESS)", rc == BFM_E_REMOTE);
-    }
-    printf("client: 結果 %s(NG %d 件)\n", g_ng ? "NG" : "OK", g_ng);
-    (void)do_disconnect(c);
+    printf("run: 結果 %s(NG %d 件)\n", g_ng ? "NG" : "OK", g_ng);
     return g_ng ? 1 : 0;
+}
+
+/* [7] 範囲の外。相手の NIC が REMOTE_ACCESS で断ること(相手の MKey が範囲を持っていること)。
+ * 接続はエラーになるので、bfm_reconnect() で張り直し、張り直した接続で読めることも確かめる
+ * (相手は BYE を受けて、自分の側を張り直す)。 */
+static void run_oob(bfm_conn_t *c, unsigned port, unsigned i)
+{
+    struct bfm_conn *ci = (struct bfm_conn *)c;
+    const uint64_t real = ci->rlen;
+    ci->rlen = real + 4096u;                  /* 手元の範囲検査だけをすり抜ける */
+    uint8_t d[8];
+    int rc = bfm_read(c, real, d, 8);
+    ci->rlen = real;
+    check("[7] 公開メモリの外を読むと相手が断る(REMOTE_ACCESS)", rc == BFM_E_REMOTE);
+    for (int k = 0; k < 100 && bfm_conn_state(port, i) != BFM_ST_DOWN; k++) {   /* bfm_run() が K_DOWN に移す */
+        (void)bfm_run();
+        idle();
+    }
+    check("[7] 断られた接続は BFM_ST_DOWN になる", bfm_conn_state(port, i) == BFM_ST_DOWN);
+    rc = bfm_reconnect(port, i);
+    const uint64_t t0 = now_ns();
+    while (rc == BFM_OK && bfm_conn(port, i) == NULL && !g_stop && now_ns() - t0 < 30ull * 1000000000ull) {
+        (void)bfm_run();
+        idle();
+    }
+    bfm_conn_t *c2 = bfm_conn(port, i);
+    uint64_t v = 0;
+    check("[7] bfm_reconnect() で張り直して、読める", rc == BFM_OK && c2 != NULL &&
+          bfm_read(c2, ATOM_OFF + 8u, &v, 8) == BFM_OK);
 }
 
 /* ---------------------------------------------------------------------
@@ -677,14 +744,14 @@ static void dif_tput(bfm_conn_t *c, uint8_t mode, uint8_t op, int is_read, uint3
         const int rc = is_read ? bfm_dif_read(c, DIF_OFF, g_dout, DIF_N, &d, NULL)
                                : bfm_dif_write(c, DIF_OFF, src, DIF_N, &d, NULL);
         if (rc != BFM_OK) {
-            printf("client: DIF のスループット: %s(rc=%d)\n", bfm_strerror(rc), rc);
+            printf("run: DIF のスループット: %s(rc=%d)\n", bfm_strerror(rc), rc);
             g_ng++;
             return;
         }
     }
     const double ns = (double)(now_ns() - t0);
     static const char *ops[] = {"CHECK", "CHECK_SWAP", "INSERT", "CHECK_DELETE"};
-    printf("client: スループット DIF %s %-5s %-12s %u ブロック x%u: %.1f MB/s(1 回 %.1f us)\n",
+    printf("run: スループット DIF %s %-5s %-12s %u ブロック x%u: %.1f MB/s(1 回 %.1f us)\n",
            mode == BFM_DIF_HW ? "HW" : "SW", is_read ? "read" : "write", ops[op], DIF_N, reps,
            (double)DIF_N * BFM_DIF_BLOCK * reps / ns * 1000.0, ns / reps / 1000.0);
 }
@@ -708,7 +775,7 @@ static void dif_lat(bfm_conn_t *c, uint8_t mode, uint8_t op, int is_read, uint32
                                : bfm_dif_write(c, remote, op == BFM_DIF_INSERT ? (const void *)g_dplain
                                                                               : (const void *)g_dpi, 8u, &d, NULL);
         if (rc != BFM_OK) {
-            printf("client: DIF の遅延: %s(rc=%d)\n", bfm_strerror(rc), rc);
+            printf("run: DIF の遅延: %s(rc=%d)\n", bfm_strerror(rc), rc);
             g_ng++;
             return;
         }
@@ -716,17 +783,17 @@ static void dif_lat(bfm_conn_t *c, uint8_t mode, uint8_t op, int is_read, uint32
     }
     qsort(g_lat, n, sizeof(g_lat[0]), cmp_u32);
     static const char *ops[] = {"CHECK", "CHECK_SWAP", "INSERT", "CHECK_DELETE"};
-    printf("client: 遅延 DIF %s %-5s %-12s 4KiB x%u: 中央値 %u ns / p99 %u\n", mode == BFM_DIF_HW ? "HW" : "SW",
+    printf("run: 遅延 DIF %s %-5s %-12s 4KiB x%u: 中央値 %u ns / p99 %u\n", mode == BFM_DIF_HW ? "HW" : "SW",
            is_read ? "read" : "write", ops[op], n, g_lat[n / 2u], g_lat[(uint64_t)n * 99u / 100u]);
 }
 
 static void run_dif(bfm_conn_t *c, uint32_t iters)
 {
     if (bfm_remote_size(c) < DIF_R2 + DIF_N * DIF_BS) {
-        printf("client: [8] 相手の公開メモリが小さいので T10-DIF の検査を飛ばす\n");
+        printf("run: [8] 相手の公開メモリが小さいので T10-DIF の検査を飛ばす\n");
         return;
     }
-    printf("client: [8] T10-DIF(%u ブロック)。オフロード %s\n", DIF_N,
+    printf("run: [8] T10-DIF(%u ブロック)。オフロード %s\n", DIF_N,
            bfm_dif_hw_supported() ? "あり(SW と HW を試す)" : "なし(SW だけ)");
     dif_tests(c, BFM_DIF_SW);
     dif_async_tests(c, BFM_DIF_SW);
@@ -764,14 +831,15 @@ static void run_dif(bfm_conn_t *c, uint32_t iters)
 /* ---------------------------------------------------------------------
  * mt: 複数のコア(スレッド)から同時に転送する
  *
- * スレッドごとに別の接続を bfm_connect() で同時に作り、相手の公開メモリの
- * MT_OFF + スレッドの番号 x MT_SPAN(スレッドごとに別の区画)で次を確かめる。
+ * 張ってある全部の接続(全部のポート)に 1 本ずつスレッドを付け、相手の公開メモリの
+ * MT_OFF + スレッドの番号 x MT_SPAN(スレッドごとに別の区画)で次を確かめる。相手も同時に、
+ * こちらの公開メモリへ同じことをしている(両方向)。
  *   [1] 4KiB の write(中継バッファから)と read で読み戻す(64 回)
  *   [2] 8 バイトの write と read で読み戻す
  *   [3] 全スレッドが同じ語へ FAA を n 回ずつ打つ -> 最後に n x スレッド数になる(接続をまたいだ atomic)
  *   [4] T10-DIF(SW)の write INSERT と read CHECK_DELETE で元のデータに戻る(起動と完了確認を分けた形)
  * そのあと全スレッドで同時に、8 バイトの write / read / FAA(自分の語)を n 回ずつ打ち、合計の速さを出す。
- * 間ずっと別のスレッドが bfm_poll() を回す(鍵を取る側も同時に動かす)。最後に全スレッドが同時に切断する。
+ * 間ずっと別のスレッドが bfm_run() を回す(鍵を取る側も同時に動かす)。
  * スレッドは CPU に 1 つずつ固定する(CPU の数より多ければ重ねる)。
  * ------------------------------------------------------------------- */
 
@@ -779,24 +847,36 @@ static void run_dif(bfm_conn_t *c, uint32_t iters)
 #define MT_SPAN    (64u * 1024u)
 #define MT_CNT_OFF (MT_OFF + BFM_MAX_CONN * MT_SPAN)   /* 全スレッドで共有する FAA の語 */
 #define MT_DIF_N   16u
+#define MT_PH      5u                     /* 速さの区間の数(write 8B / read 8B / FAA / write 64KiB / read 64KiB)*/
+#define MT_SYNC    10u                    /* 速さの区間ごとに相手と足並みをそろえる段の番号の起点 */
+#define MT_BIG     (64u * 1024u)          /* 帯域を測る write / read の長さ */
+
+static const char *g_mt_names[MT_PH] = {"write 8B", "read 8B", "FAA", "write 64KiB", "read 64KiB"};
+static uint8_t g_mt_big[MT_BIG];          /* 帯域を測る write の元(どのスレッドも読むだけ)*/
+static __thread uint8_t mt_rbuf[MT_BIG];  /* 帯域を測る read の着地点(スレッドごと)*/
+
+/* 帯域の区間の回数(8 バイトの区間の 1/50。1 本あたり 100,000 回なら 2,000 回 = 128MiB)。 */
+static uint32_t mt_big_reps(uint32_t n)
+{
+    return (n / 50u) ? n / 50u : 1u;
+}
+
+static int sync_at(uint64_t stage, const char *what);
 
 struct mt_arg {
     pthread_t th;                        /* このスレッド */
     int idx;                             /* スレッドの番号(区画の位置と CPU を決める)*/
-    uint32_t ip;                         /* 相手の IPv4 */
-    const uint8_t *mac;                  /* 相手の MAC */
-    uint16_t port;                       /* 接続の番号 */
-    bfm_conn_t *c;                       /* このスレッドの接続(NULL = 接続できなかった)*/
+    bfm_conn_t *c;                       /* このスレッドの接続(NULL = 使えない)*/
     int ng;                              /* NG の数 */
     char why[200];                       /* 最初の NG の内容 */
-    uint64_t ns[3];                      /* 速さの区間(write / read / FAA)にかかった時間 */
+    uint64_t ns[MT_PH];                  /* 速さの区間ごとにかかった時間 */
 };
 
 static pthread_barrier_t g_mt_bar;       /* 全スレッドで足並みをそろえる(同時に接続・測る・切断する)*/
 static char g_mt_msg[200];               /* 結果の行を組み立てる置き場 */
-static volatile int g_mt_poll_stop;      /* 1 = bfm_poll() を回すスレッドを止める */
+static volatile int g_mt_poll_stop;      /* 1 = bfm_run() を回すスレッドを止める */
 static uint32_t g_mt_n;                  /* 1 本のスレッドが速さの区間で打つ回数(-n)*/
-static uint32_t g_mt_threads;            /* スレッドの数(-t)*/
+static uint32_t g_mt_threads;            /* スレッドの数(= 接続の数)*/
 static uint64_t g_mt_counter;            /* [3] の結果(スレッド 0 が読む)*/
 
 static void mt_fail(struct mt_arg *a, const char *what, int rc)
@@ -808,7 +888,7 @@ static void *mt_poller(void *p)
 {
     (void)p;
     while (!g_mt_poll_stop) {
-        (void)bfm_poll();
+        (void)bfm_run();
         usleep(200);
     }
     return NULL;
@@ -877,9 +957,8 @@ static void *mt_worker(void *p)
     CPU_SET((int)(a->idx % (ncpu > 0 ? ncpu : 1)), &cs);
     (void)pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
 
-    pthread_barrier_wait(&g_mt_bar);                         /* 全スレッドで同時に接続する */
-    a->c = do_connect(a->ip, a->mac, a->port, 20000u);
-    if (a->c == NULL) mt_fail(a, "接続できない", 0);
+    pthread_barrier_wait(&g_mt_bar);                         /* 全スレッドで同時に始める */
+    if (a->c == NULL) mt_fail(a, "接続が使えない", 0);
     pthread_barrier_wait(&g_mt_bar);
     int rc;
     if (a->idx == 0 && a->c) {                               /* 共有の語を 0 に */
@@ -898,44 +977,49 @@ static void *mt_worker(void *p)
         if ((rc = bfm_read(a->c, MT_CNT_OFF, &g_mt_counter, 8)) != BFM_OK) mt_fail(a, "[3] 共有の語を読む", rc);
     }
 
-    /* 速さ: write / read / FAA(自分の語)を全スレッドで同時に */
+    /* 速さ: 区間ごとに相手と足並みをそろえ(スレッド 0 が)、全スレッドで同時に打つ。
+     * 相手も同じ区間を同時に打つ(-q の相手は打たずに足並みだけそろえる)ので、両方向の速さになる。 */
     const uint64_t own = MT_OFF + (uint64_t)a->idx * MT_SPAN + 4096u + 512u;
-    for (int ph = 0; ph < 3; ph++) {
+    const uint64_t big = MT_OFF + (uint64_t)a->idx * MT_SPAN;
+    for (unsigned ph = 0; ph < MT_PH; ph++) {
+        if (a->idx == 0 && sync_at(MT_SYNC + ph, g_mt_names[ph]) != BFM_OK) mt_fail(a, "相手と足並みをそろえられない", 0);
         pthread_barrier_wait(&g_mt_bar);
         const uint64_t t0 = now_ns();
-        for (uint32_t k = 0; k < g_mt_n && a->c && !a->ng; k++) {
+        const uint32_t reps = (ph < 3) ? g_mt_n : mt_big_reps(g_mt_n);
+        for (uint32_t k = 0; k < reps && a->c && !a->ng; k++) {
             uint64_t v = k, old;
             rc = (ph == 0) ? bfm_write(a->c, own, &v, 8) : (ph == 1) ? bfm_read(a->c, own, &v, 8)
-                                                                      : bfm_faa(a->c, own + 8u, 1, &old);
-            if (rc != BFM_OK) mt_fail(a, ph == 0 ? "速さ write" : ph == 1 ? "速さ read" : "速さ FAA", rc);
+               : (ph == 2) ? bfm_faa(a->c, own + 8u, 1, &old)
+               : (ph == 3) ? bfm_write(a->c, big, g_mt_big, MT_BIG) : bfm_read(a->c, big, mt_rbuf, MT_BIG);
+            if (rc != BFM_OK) mt_fail(a, g_mt_names[ph], rc);
         }
         a->ns[ph] = now_ns() - t0;
     }
-    pthread_barrier_wait(&g_mt_bar);                         /* 全スレッドで同時に切断する */
-    if (a->c && do_disconnect(a->c) != BFM_OK) mt_fail(a, "切断", 0);
+    pthread_barrier_wait(&g_mt_bar);
     return NULL;
 }
 
-static int run_mt(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t nthreads, uint32_t n)
+static int run_mt(uint32_t n)
 {
     static struct mt_arg args[BFM_MAX_CONN];
-    if (nthreads == 0 || nthreads > g_bfm.nconn) {
-        printf("mt: スレッドの数は 1〜%u(-t)\n", g_bfm.nconn);
-        return 2;
-    }
+    uint32_t nthreads = 0;
+    for (unsigned p = 0; p < BFM_MAX_PORT; p++)
+        for (unsigned i = 0; i < g_bfm_port_conn[p]; i++) {
+            memset(&args[nthreads], 0, sizeof(args[nthreads]));
+            args[nthreads].idx = (int)nthreads;
+            args[nthreads].c = bfm_conn(p, i);
+            nthreads++;
+        }
+    if (nthreads == 0) return 2;
     g_mt_n = n;
     g_mt_threads = nthreads;
     g_mt_poll_stop = 0;
-    printf("mt: スレッド %u 本(CPU %ld 個)、各 %u 回\n", nthreads, sysconf(_SC_NPROCESSORS_ONLN), n);
+    printf("mt: 接続 %u 本(全部のポート)に 1 本ずつスレッド(CPU %ld 個)、各 %u 回。相手も同時にこちらへ打つ\n", nthreads,
+           sysconf(_SC_NPROCESSORS_ONLN), n);
     pthread_barrier_init(&g_mt_bar, NULL, nthreads);
     pthread_t poller;
     pthread_create(&poller, NULL, mt_poller, NULL);
     for (uint32_t t = 0; t < nthreads; t++) {
-        memset(&args[t], 0, sizeof(args[t]));
-        args[t].idx = (int)t;
-        args[t].ip = ip;
-        args[t].mac = mac;
-        args[t].port = port;
         pthread_create(&args[t].th, NULL, mt_worker, &args[t]);
     }
     for (uint32_t t = 0; t < nthreads; t++) pthread_join(args[t].th, NULL);
@@ -951,7 +1035,7 @@ static int run_mt(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t nth
             printf("mt: スレッド %u: NG %s\n", t, args[t].why);
         }
     }
-    snprintf(g_mt_msg, sizeof(g_mt_msg), "%u 本のスレッドが同時に接続した(%u 本)", nthreads, up);
+    snprintf(g_mt_msg, sizeof(g_mt_msg), "%u 本の接続が全部使える(%u 本)", nthreads, up);
     check(g_mt_msg, up == nthreads);
     snprintf(g_mt_msg, sizeof(g_mt_msg), "[1][2][4] スレッドごとの write / read / T10-DIF(NG のスレッド %u 本)", ng);
     check(g_mt_msg, ng == 0);
@@ -959,14 +1043,19 @@ static int run_mt(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t nth
              (unsigned long long)g_mt_counter, (unsigned long long)n * nthreads);
     check(g_mt_msg, g_mt_counter == (uint64_t)n * nthreads);
     if (ng == 0) {
-        static const char *names[] = {"write 8B", "read 8B", "FAA"};
-        for (int ph = 0; ph < 3; ph++) {
+        for (unsigned ph = 0; ph < MT_PH; ph++) {
             uint64_t worst = 0, sum = 0;
             for (uint32_t t = 0; t < nthreads; t++) {
                 if (args[t].ns[ph] > worst) worst = args[t].ns[ph];
                 sum += args[t].ns[ph];
             }
-            printf("mt: 速さ %-8s スレッド %2u 本: 合計 %.2f Mops(1 本あたり %.2f Mops、1 回 %.0f ns)\n", names[ph],
+            if (ph >= 3) {
+                const double mb = (double)mt_big_reps(n) * MT_BIG * nthreads / ((double)worst / 1e9) / 1e6;
+                printf("mt: 速さ %-11s スレッド %2u 本: 合計 %.0f MB/s(%.2f Gbit/s)\n", g_mt_names[ph], nthreads, mb,
+                       mb * 8.0 / 1000.0);
+                continue;
+            }
+            printf("mt: 速さ %-11s スレッド %2u 本: 合計 %.2f Mops(1 本あたり %.2f Mops、1 回 %.0f ns)\n", g_mt_names[ph],
                    nthreads, (double)n * nthreads / (double)worst * 1000.0,
                    (double)n / ((double)sum / nthreads) * 1000.0, (double)sum / nthreads / n);
         }
@@ -1040,11 +1129,12 @@ static int bench_one(bfm_conn_t *c, int is_read, uint32_t size, uint32_t qd, uin
     return 0;
 }
 
-static int run_bench(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t n)
+static int run_bench(uint32_t nthreads, uint32_t n)
 {
     static const uint32_t sizes[] = { 4, 8, 32, 64, 128, 256, 512, 8192, 65536, 262144 };
     static const uint32_t qds[] = { 1, 4, 8, 16 };
-    bfm_conn_t *c = do_connect(ip, mac, port, 0);
+    if (run_up(nthreads) != BFM_OK) return 1;
+    bfm_conn_t *c = bfm_conn(0, 0);
     if (c == NULL) return 1;
     tsc_calibrate();
     for (unsigned i = 0; i < sizeof(g_src); i++) g_src[i] = (uint8_t)(0x5a ^ i);
@@ -1062,21 +1152,122 @@ static int run_bench(uint32_t ip, const uint8_t mac[6], uint16_t port, uint32_t 
         for (unsigned s = 0; s < sizeof(sizes) / sizeof(sizes[0]) && !ng; s++)
             for (unsigned q = 0; q < sizeof(qds) / sizeof(qds[0]) && !ng; q++)
                 if (bench_one(c, is_read, sizes[s], qds[q], n) != 0) ng = 1;
-    (void)do_disconnect(c);
     return ng;
+}
+
+/* ---------------------------------------------------------------------
+ * run: 両方のノードで同じものを動かす
+ * ------------------------------------------------------------------- */
+
+/* 最初に使うポート(足並みをそろえる語と一通りの検査は、そのポートの接続 0 を使う)。 */
+static unsigned first_port(void)
+{
+    for (unsigned p = 0; p < BFM_MAX_PORT; p++)
+        if (g_bfm_port_conn[p] != 0) return p;
+    return 0;
+}
+
+/* 相手と足並みをそろえる(接続 (p0, 0) が使えるまで待ってから)。 */
+static int sync_at(uint64_t stage, const char *what)
+{
+    const unsigned p0 = first_port();
+    const uint64_t t0 = now_ns();
+    for (;;) {
+        bfm_conn_t *c = bfm_conn(p0, 0);
+        if (c != NULL && sync_peer(c, stage, what) == BFM_OK) {
+            printf("run: 相手も「%s」まで来た\n", what);
+            return BFM_OK;
+        }
+        if (g_stop || now_ns() - t0 > 60ull * 1000000000ull) {
+            printf("run: 相手と「%s」で足並みをそろえられない\n", what);
+            return BFM_E_TIMEOUT;
+        }
+        (void)bfm_run();
+        reconnect_down();
+        usleep(1000);
+    }
+}
+
+static int run_all(uint32_t nthreads, uint32_t iters, int oob)
+{
+    if (run_up(nthreads) != BFM_OK) return 1;
+    const unsigned p0 = first_port();
+    int ret = 0;
+
+    /* 一通りの検査(接続 (p0, 0)。相手も同時にこちらへ同じことをする)。-q なら相手からを受けるだけ */
+    if (!g_quiet && !g_perf) ret |= run_checks(bfm_conn(p0, 0), iters ? iters : 20000u);
+    if (g_stop || sync_at(1, "一通りの検査") != BFM_OK) return 1;
+
+    /* 全部の接続で同時に(相手も同時に)。-q なら速さの区間の足並みだけそろえる */
+    g_ng = 0;
+    if (!g_quiet) {
+        ret |= run_mt(iters ? iters : 100000u);
+    } else {
+        for (unsigned ph = 0; ph < MT_PH && !g_stop; ph++)
+            if (sync_at(MT_SYNC + ph, g_mt_names[ph]) != BFM_OK) return 1;
+    }
+    if (g_stop || sync_at(20, "全部の接続での転送") != BFM_OK) return 1;
+
+    /* 範囲の外と張り直し(最後の接続。相手は待つ間に自分の側を張り直す)*/
+    if (oob && !g_quiet) {
+        unsigned p = first_port(), i = g_bfm_port_conn[p] - 1u;
+        for (unsigned q = 0; q < BFM_MAX_PORT; q++)
+            if (g_bfm_port_conn[q] != 0) { p = q; i = g_bfm_port_conn[q] - 1u; }
+        g_ng = 0;
+        bfm_conn_t *c = bfm_conn(p, i);
+        if (c != NULL) run_oob(c, p, i);
+        else check("[7] 最後の接続が使える", 0);
+        ret |= g_ng ? 1 : 0;
+    }
+    if (g_stop || sync_at(30, "終わり") != BFM_OK) return 1;
+
+    if (!g_quiet)
+        printf("run: 模型の hash = %016llx(相手が出す「自分の公開メモリの hash」と同じはず)\n",
+               (unsigned long long)fnv1a(g_model, DATA_BYTES));
+    dump_area("run", "終わり");
+    printf("run: 結果 %s\n", ret ? "NG" : "OK");
+    return ret;
+}
+
+/* info: ポートを立ち上げて能力を表示する(接続は待たない)。 */
+static int run_info(void)
+{
+    const uint64_t t0 = now_ns();
+    int pending = 1;
+    while (pending && !g_stop && now_ns() - t0 < 180ull * 1000000000ull) {
+        const int rc = bfm_run();
+        if (rc < 0 && rc != BFM_E_STATE) return 1;
+        pending = 0;
+        for (unsigned p = 0; p < BFM_MAX_PORT; p++)
+            if (g_bfm_port_conn[p] != 0 && bfm_conn_state(p, 0) == BFM_ST_INIT) pending = 1;
+        idle();
+    }
+    for (unsigned p = 0; p < BFM_MAX_PORT; p++) {
+        const bfm_dev_t *d = &g_bfm_dev[p];
+        if (!d->used) continue;
+        printf("info: ポート %u: %s bf=%u bf_buf=%u atomic ops=0x%x size_qp=0x%x mode=%u ts_format=%u "
+               "read/atomic req/res=%u/%u FW ページ %u sho=%u\n", p, d->name ? d->name : "?",
+               d->bf_cap, d->bf_buf_size, d->atomic_ops, d->atomic_size_qp, d->atomic_mode,
+               d->qp_ts_format, 1u << d->log_max_ra_req_qp, 1u << d->log_max_ra_res_qp,
+               d->fw_pages_used, d->sho);
+    }
+    printf("info: T10-DIF オフロード %s\n", bfm_dif_hw_supported() ? "あり" : "なし");
+    return 0;
 }
 
 int main(int argc, char **argv)
 {
-    uint16_t port = 0;
-    uint32_t iters = 0, threads = 4;
+    uint32_t iters = 0, threads = 4, nconn = 0;
     int oob = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "d:i:p:m:M:n:t:BSCxvh")) != -1) {
+    while ((opt = getopt(argc, argv, "d:i:D:I:c:p:m:M:n:t:BSCxqPvh")) != -1) {
         switch (opt) {
-        case 'd': g_bfm_linux_pci_bdf = optarg; break;
-        case 'i': if (parse_ip(optarg, &g_bfm_local_ip) != 0) { usage(); return 2; } break;
-        case 'p': port = (uint16_t)atoi(optarg); break;
+        case 'd': g_bfm_linux_pci_bdf[0] = optarg; break;
+        case 'i': if (parse_ip(optarg, &g_bfm_local_ip[0]) != 0) { usage(); return 2; } break;
+        case 'D': g_bfm_linux_pci_bdf[1] = optarg; break;
+        case 'I': if (parse_ip(optarg, &g_bfm_local_ip[1]) != 0) { usage(); return 2; } break;
+        case 'c': nconn = (uint32_t)atoi(optarg); break;
+        case 'p': g_bfm_cm_port = (uint16_t)atoi(optarg); break;
         case 'm': g_bfm_path_mtu = (uint8_t)atoi(optarg); break;
         case 'M': g_bfm_port_mtu = (uint16_t)atoi(optarg); break;
         case 'n': iters = (uint32_t)atoi(optarg); break;
@@ -1085,52 +1276,62 @@ int main(int argc, char **argv)
         case 'S': g_bfm_scatter_cqe = 0; break;
         case 'C': g_bfm_cpu_awake = 0; break;
         case 'x': oob = 1; break;
+        case 'q': g_quiet = 1; break;
+        case 'P': g_perf = 1; break;
         case 'v': g_bfm_verbose = 1; break;
         default: usage(); return 2;
         }
     }
-    if (optind >= argc) { usage(); return 2; }
+    if (optind + 1 >= argc) { usage(); return 2; }
     const char *mode = argv[optind];
-    if (port == 0) port = g_bfm_cm_port;
+    if (parse_ip(argv[optind + 1], &g_bfm_peer_ip[0]) != 0) { usage(); return 2; }
+    /* ポート 1 は、その相手の IP を書いたときだけ使う */
+    if (optind + 2 < argc) {
+        if (parse_ip(argv[optind + 2], &g_bfm_peer_ip[1]) != 0) { usage(); return 2; }
+    } else {
+        g_bfm_port_conn[1] = 0;
+    }
+    /* -c は使う全部のポートの本数。ポート 1 は、その相手の IP を書いたときだけ使う */
+    if (nconn != 0) g_bfm_port_conn[0] = nconn;
+    if (optind + 2 < argc) g_bfm_port_conn[1] = nconn ? nconn : (g_bfm_port_conn[1] ? g_bfm_port_conn[1] : g_bfm_port_conn[0]);
 
     signal(SIGINT, on_sig);
     signal(SIGTERM, on_sig);
     signal(SIGQUIT, on_sig);
 
-    const int bench = (strcmp(mode, "bench") == 0), mt = (strcmp(mode, "mt") == 0);
-    g_server = (strcmp(mode, "server") == 0);
+    const int bench = (strcmp(mode, "bench") == 0);
+    g_serve = (strcmp(mode, "serve") == 0);
     if (bench) {
         g_bfm_stage_size = BENCH_QD_MAX * BENCH_SIZE_MAX;   /* 多重度ぶんの着地点 / 送り元 */
-        g_bfm_max_conn = 1;                                 /* 中継バッファが大きいので枠は 1 つだけ */
+        g_bfm_port_conn[0] = 1;                             /* 中継バッファが大きいので接続は 1 本だけ */
+        g_bfm_port_conn[1] = 0;
     }
-    if (do_init() != BFM_OK) return 1;
-    int ret = 0;
-    if (strcmp(mode, "server") == 0) {
-        ret = run_server(port);
-    } else if ((strcmp(mode, "client") == 0 || bench || mt) && optind + 1 < argc) {
-        uint32_t ip;
-        uint8_t mac[6] = {0, 0, 0, 0, 0, 0};       /* 全部 0 = 自動(bfm_connect() が REQ を同報で送る)*/
-        if (parse_ip(argv[optind + 1], &ip) != 0 ||
-            (optind + 2 < argc && parse_mac(argv[optind + 2], mac) != 0)) {
-            usage();
-            ret = 2;
-        } else if (bench) {
-            ret = run_bench(ip, mac, port, iters ? iters : 100000u);
-        } else if (mt) {
-            ret = run_mt(ip, mac, port, threads, iters ? iters : 100000u);
-        } else {
-            ret = run_client(ip, mac, port, iters ? iters : 20000u, oob);
-        }
-    } else if (strcmp(mode, "info") == 0) {
-        printf("info: %s bf=%u bf_buf=%u atomic ops=0x%x size_qp=0x%x mode=%u ts_format=%u "
-               "read/atomic req/res=%u/%u FW ページ %u sho=%u T10-DIF オフロード %s\n", g_bfm.name,
-               g_bfm.bf_cap, g_bfm.bf_buf_size, g_bfm.atomic_ops, g_bfm.atomic_size_qp, g_bfm.atomic_mode,
-               g_bfm.qp_ts_format, 1u << g_bfm.log_max_ra_req_qp, 1u << g_bfm.log_max_ra_res_qp,
-               g_bfm.fw_pages_used, g_bfm.sho, bfm_dif_hw_supported() ? "あり" : "なし");
-    } else {
+    if (strcmp(mode, "run") != 0 && !g_serve && !bench && strcmp(mode, "info") != 0) {
         usage();
-        ret = 2;
+        return 2;
     }
+    printf("%s: 接続 %u 本(ポート 0: %u 本、ポート 1: %u 本)\n", mode, conn_total(), g_bfm_port_conn[0],
+           g_bfm_port_conn[1]);
+
+    /* 最初の bfm_run() で公開メモリが張られる。相手が繋いでくる前に自分の公開メモリを埋める
+     * (ポートの立ち上げには何秒もかかるので、1 回目の呼び出しの後で間に合う) */
+    const int rc0 = bfm_run();
+    if (rc0 < 0 && rc0 != BFM_E_STATE) {
+        do_shutdown();
+        return 1;
+    }
+    if (g_bfm_mr_size < SYNC_OFF + 8u) {
+        printf("公開メモリが小さすぎる(%u バイト要る)\n", SYNC_OFF + 8u);
+        do_shutdown();
+        return 1;
+    }
+    fill_area();
+
+    int ret;
+    if (g_serve) ret = run_serve(threads);
+    else if (bench) ret = run_bench(threads, iters ? iters : 100000u);
+    else if (strcmp(mode, "info") == 0) ret = run_info();
+    else ret = run_all(threads, iters, oob);
     do_shutdown();
     return ret;
 }
