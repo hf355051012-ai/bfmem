@@ -239,9 +239,13 @@ int bfm_dev_step(bfm_dev_t *d)
 int bfm_run(void)
 {
     int st = __atomic_load_n(&s_run, __ATOMIC_ACQUIRE);
+
+    /* R_STOP: bfm_shutdown() の途中。表を進めない */
     if (st == R_STOP) return BFM_E_STATE;
+
+    /* R_IDLE: 最初の 1 回。鍵を取れたコアが表を作って R_RUN にする(取れなければ、ほかのコアが作っている)。
+     * 作れたら、同じ呼び出しのまま下の R_RUN の処理へ進む。 */
     if (st == R_IDLE) {
-        /* 最初の 1 回: 鍵を取れたコアが表を作る(取れなければ、ほかのコアが作っている)*/
         if (!bfm_trylock(&g_bfm_ctl_lock)) return BFM_INPROGRESS;
         int rc = BFM_OK;
         if (__atomic_load_n(&s_run, __ATOMIC_ACQUIRE) == R_IDLE) {
@@ -250,45 +254,52 @@ int bfm_run(void)
         }
         bfm_unlock(&g_bfm_ctl_lock);
         if (rc != BFM_OK) return rc;
-        if (__atomic_load_n(&s_run, __ATOMIC_ACQUIRE) != R_RUN) return BFM_E_STATE;
+        st = __atomic_load_n(&s_run, __ATOMIC_ACQUIRE);   /* ほかのコアが作ったときも R_RUN になっている */
     }
 
-    /* 接続の表を回り、鍵を取れた行の状態を 1 つ進める */
-    const unsigned start = __atomic_fetch_add(&s_rr, 1u, __ATOMIC_RELAXED) % BFM_MAX_CONN;
-    for (unsigned k = 0; k < BFM_MAX_CONN; k++) {
-        struct bfm_conn *c = &g_bfm_conn[(start + k) % BFM_MAX_CONN];
-        if (!c->used || !bfm_trylock(&c->lock)) continue;
-        if (bfm_trylock(&g_bfm_ctl_lock)) {
-            if (__atomic_load_n(&s_run, __ATOMIC_ACQUIRE) == R_RUN) (void)bfm_cm_conn_step(c);
+    /* R_RUN: 動いている。接続の表を進め、ポートの EQ と GSI を読み、全体の様子を返す */
+    if (st == R_RUN) {
+        /* 接続の表を回り、鍵を取れた行の状態を 1 つ進める */
+        const unsigned start = __atomic_fetch_add(&s_rr, 1u, __ATOMIC_RELAXED) % BFM_MAX_CONN;
+        for (unsigned k = 0; k < BFM_MAX_CONN; k++) {
+            struct bfm_conn *c = &g_bfm_conn[(start + k) % BFM_MAX_CONN];
+            if (!c->used || !bfm_trylock(&c->lock)) continue;
+            if (bfm_trylock(&g_bfm_ctl_lock)) {
+                /* 鍵を待つ間に bfm_shutdown() が始まっていれば進めない */
+                if (__atomic_load_n(&s_run, __ATOMIC_ACQUIRE) == R_RUN) (void)bfm_cm_conn_step(c);
+                bfm_unlock(&g_bfm_ctl_lock);
+            }
+            bfm_unlock(&c->lock);
+        }
+
+        /* 立ち上がったポートの EQ(FW のページ要求・エラー)と GSI(相手からの BYE など)*/
+        for (unsigned p = 0; p < BFM_MAX_PORT; p++) {
+            bfm_dev_t *d = &g_bfm_dev[p];
+            if (!d->used || d->phase != D_READY || !bfm_trylock(&g_bfm_ctl_lock)) continue;
+            if (d->phase == D_READY && __atomic_load_n(&s_run, __ATOMIC_ACQUIRE) == R_RUN) {
+                (void)mlx5_eq_poll(d);
+                (void)bfm_cm_poll(d);
+            }
             bfm_unlock(&g_bfm_ctl_lock);
         }
-        bfm_unlock(&c->lock);
-    }
 
-    /* 立ち上がったポートの EQ(FW のページ要求・エラー)と GSI(相手からの BYE など)*/
-    for (unsigned p = 0; p < BFM_MAX_PORT; p++) {
-        bfm_dev_t *d = &g_bfm_dev[p];
-        if (!d->used || d->phase != D_READY || !bfm_trylock(&g_bfm_ctl_lock)) continue;
-        if (d->phase == D_READY && __atomic_load_n(&s_run, __ATOMIC_ACQUIRE) == R_RUN) {
-            (void)mlx5_eq_poll(d);
-            (void)bfm_cm_poll(d);
+        /* 全体の様子: 失敗 > エラー・切断のまま > 途中 > 全部使える */
+        int fail = BFM_OK, down = 0, all_up = 1;
+        for (unsigned i = 0; i < BFM_MAX_CONN; i++) {
+            const struct bfm_conn *c = &g_bfm_conn[i];
+            if (!c->used) continue;
+            const int s = bfm_cm_conn_state(c);
+            if (s == BFM_ST_FAILED && fail == BFM_OK) fail = (c->result < 0) ? c->result : BFM_E_HW;
+            if (s == BFM_ST_DOWN) down = 1;
+            if (s != BFM_ST_UP) all_up = 0;
         }
-        bfm_unlock(&g_bfm_ctl_lock);
+        if (fail != BFM_OK) return fail;
+        if (down) return BFM_E_STATE;
+        return all_up ? BFM_OK : BFM_INPROGRESS;
     }
 
-    /* 全体の様子: 失敗 > エラー・切断のまま > 途中 > 全部使える */
-    int fail = BFM_OK, down = 0, all_up = 1;
-    for (unsigned i = 0; i < BFM_MAX_CONN; i++) {
-        const struct bfm_conn *c = &g_bfm_conn[i];
-        if (!c->used) continue;
-        const int s = bfm_cm_conn_state(c);
-        if (s == BFM_ST_FAILED && fail == BFM_OK) fail = (c->result < 0) ? c->result : BFM_E_HW;
-        if (s == BFM_ST_DOWN) down = 1;
-        if (s != BFM_ST_UP) all_up = 0;
-    }
-    if (fail != BFM_OK) return fail;
-    if (down) return BFM_E_STATE;
-    return all_up ? BFM_OK : BFM_INPROGRESS;
+    /* 表を作った直後に bfm_shutdown() が始まった(R_STOP)*/
+    return BFM_E_STATE;
 }
 
 int bfm_shutdown(void)

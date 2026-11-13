@@ -233,7 +233,7 @@
     },
     {
       "func": "bfm_run",
-      "summary": "代表 API。呼ぶたびに待たずに少しずつ進め、接続の表の全体の様子を返す。\n\n. 全体の状態が `R_STOP`(`bfm_shutdown()` の途中)なら `BFM_E_STATE` を返す。\n. `R_IDLE` なら、`g_bfm_ctl_lock` を取れたコアだけが(取ってからもう一度 `R_IDLE` を確かめて)`run_start()` で準備し、できたら `R_RUN` にする。鍵を取れなければ `BFM_INPROGRESS` を返す。\n. 接続の表を、コアごとにずらした行から 1 周回り、使う行の鍵 `c->lock` と `g_bfm_ctl_lock` の両方を取れた行について、`R_RUN` なら `bfm_cm_conn_step()` で状態を 1 つ進める。取れなければ待たずに次の行へ行く。\n. 使うポートで `D_READY` のものについて、`g_bfm_ctl_lock` を取れたら EQ(`mlx5_eq_poll()`)と GSI(`bfm_cm_poll()`)を処理する。\n. 使う行の状態(`bfm_cm_conn_state()`)をまとめて返す。",
+      "summary": "代表 API。呼ぶたびに待たずに少しずつ進め、接続の表の全体の様子を返す。全体の状態 `s_run` ごとに分けて処理する。\n\n. `R_STOP`(`bfm_shutdown()` の途中)なら `BFM_E_STATE` を返す。\n. `R_IDLE` なら、`g_bfm_ctl_lock` を取れたコアだけが(取ってからもう一度 `R_IDLE` を確かめて)`run_start()` で準備し、できたら `R_RUN` にする。鍵を取れなければ `BFM_INPROGRESS` を返す。準備できたら(ほかのコアが準備したときも)状態を読み直し、`R_RUN` なら同じ呼び出しのまま次へ進む。\n. `R_RUN` なら次の 3 つを行う。そうでなければ(表を作った直後に `bfm_shutdown()` が始まった)`BFM_E_STATE` を返す。\n. 接続の表を、コアごとにずらした行から 1 周回り、使う行の鍵 `c->lock` と `g_bfm_ctl_lock` の両方を取れた行について、`R_RUN` なら `bfm_cm_conn_step()` で状態を 1 つ進める。取れなければ待たずに次の行へ行く。\n. 使うポートで `D_READY` のものについて、`g_bfm_ctl_lock` を取れたら EQ(`mlx5_eq_poll()`)と GSI(`bfm_cm_poll()`)を処理する。\n. 使う行の状態(`bfm_cm_conn_state()`)をまとめて返す。",
       "args": {},
       "ret": "`BFM_OK`: 使う接続が全部使える(`BFM_ST_UP`)。`BFM_INPROGRESS`: 途中(立ち上げ・確立の途中の接続がある、または最初の準備をほかのコアがしている)。`BFM_E_STATE`: `bfm_shutdown()` の途中か、エラー・切断のままの接続(`BFM_ST_DOWN`)がある。そのほかの負: 失敗した接続(`BFM_ST_FAILED`)がある(最初に見つけた行の `c->result`。負でなければ `BFM_E_HW`)、または `run_start()` の失敗(`BFM_E_PARAM` / `BFM_E_HW`)。",
       "pre": "`include/bfm_config.h` の変数を設定し終えていること。どのコアから何本同時に呼んでもよい(データ経路の関数と同時でもよい)。",
@@ -251,44 +251,47 @@
           ]},
           {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
           {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
-          {"if": "s_run != R_RUN ?", "then": [{"return": "BFM_E_STATE"}]}
+          {"do": "st = s_run(acquire。ほかのコアが作ったときも R_RUN)"}
         ]},
-        {"do": "start = s_rr++(原子的)を BFM_MAX_CONN で割った余り"},
-        {"while": "k < BFM_MAX_CONN ?(k は 0 から)", "body": [
-          {"do": "c = &g_bfm_conn[(start + k) % BFM_MAX_CONN]"},
-          {"if": "!c->used ?", "then": [{"continue": true}]},
-          {"call": "bfm_trylock(&c->lock) を呼ぶ"},
-          {"if": "取れなかった?", "then": [{"continue": true}]},
-          {"call": "bfm_trylock(&g_bfm_ctl_lock) を呼ぶ"},
-          {"if": "取れた?", "then": [
-            {"if": "s_run == R_RUN ?", "then": [{"call": "bfm_cm_conn_step(c) を呼ぶ"}]},
+        {"if": "st == R_RUN ?", "then": [
+          {"do": "start = s_rr++(原子的)を BFM_MAX_CONN で割った余り"},
+          {"while": "k < BFM_MAX_CONN ?(k は 0 から)", "body": [
+            {"do": "c = &g_bfm_conn[(start + k) % BFM_MAX_CONN]"},
+            {"if": "!c->used ?", "then": [{"continue": true}]},
+            {"call": "bfm_trylock(&c->lock) を呼ぶ"},
+            {"if": "取れなかった?", "then": [{"continue": true}]},
+            {"call": "bfm_trylock(&g_bfm_ctl_lock) を呼ぶ"},
+            {"if": "取れた?", "then": [
+              {"if": "s_run == R_RUN ?", "then": [{"call": "bfm_cm_conn_step(c) を呼ぶ"}]},
+              {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"}
+            ]},
+            {"call": "bfm_unlock(&c->lock) を呼ぶ"}
+          ]},
+          {"while": "p < BFM_MAX_PORT ?(p は 0 から)", "body": [
+            {"do": "d = &g_bfm_dev[p]"},
+            {"if": "!d->used または d->phase != D_READY ?", "then": [{"continue": true}]},
+            {"call": "bfm_trylock(&g_bfm_ctl_lock) を呼ぶ"},
+            {"if": "取れなかった?", "then": [{"continue": true}]},
+            {"if": "d->phase == D_READY かつ s_run == R_RUN ?", "then": [
+              {"call": "mlx5_eq_poll(d) を呼ぶ"},
+              {"call": "bfm_cm_poll(d) を呼ぶ"}
+            ]},
             {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"}
           ]},
-          {"call": "bfm_unlock(&c->lock) を呼ぶ"}
-        ]},
-        {"while": "p < BFM_MAX_PORT ?(p は 0 から)", "body": [
-          {"do": "d = &g_bfm_dev[p]"},
-          {"if": "!d->used または d->phase != D_READY ?", "then": [{"continue": true}]},
-          {"call": "bfm_trylock(&g_bfm_ctl_lock) を呼ぶ"},
-          {"if": "取れなかった?", "then": [{"continue": true}]},
-          {"if": "d->phase == D_READY かつ s_run == R_RUN ?", "then": [
-            {"call": "mlx5_eq_poll(d) を呼ぶ"},
-            {"call": "bfm_cm_poll(d) を呼ぶ"}
+          {"do": "fail = BFM_OK、down = 0、all_up = 1"},
+          {"while": "i < BFM_MAX_CONN ?(i は 0 から)", "body": [
+            {"do": "c = &g_bfm_conn[i]"},
+            {"if": "!c->used ?", "then": [{"continue": true}]},
+            {"call": "s = bfm_cm_conn_state(c) を呼ぶ"},
+            {"if": "s == BFM_ST_FAILED かつ fail == BFM_OK ?", "then": [{"do": "fail = c->result が負ならそれ、そうでなければ BFM_E_HW"}]},
+            {"if": "s == BFM_ST_DOWN ?", "then": [{"do": "down = 1"}]},
+            {"if": "s != BFM_ST_UP ?", "then": [{"do": "all_up = 0"}]}
           ]},
-          {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"}
+          {"if": "fail != BFM_OK ?", "then": [{"return": "fail"}]},
+          {"if": "down ?", "then": [{"return": "BFM_E_STATE"}]},
+          {"if": "all_up ?", "then": [{"return": "BFM_OK"}], "else": [{"return": "BFM_INPROGRESS"}]}
         ]},
-        {"do": "fail = BFM_OK、down = 0、all_up = 1"},
-        {"while": "i < BFM_MAX_CONN ?(i は 0 から)", "body": [
-          {"do": "c = &g_bfm_conn[i]"},
-          {"if": "!c->used ?", "then": [{"continue": true}]},
-          {"call": "s = bfm_cm_conn_state(c) を呼ぶ"},
-          {"if": "s == BFM_ST_FAILED かつ fail == BFM_OK ?", "then": [{"do": "fail = c->result が負ならそれ、そうでなければ BFM_E_HW"}]},
-          {"if": "s == BFM_ST_DOWN ?", "then": [{"do": "down = 1"}]},
-          {"if": "s != BFM_ST_UP ?", "then": [{"do": "all_up = 0"}]}
-        ]},
-        {"if": "fail != BFM_OK ?", "then": [{"return": "fail"}]},
-        {"if": "down ?", "then": [{"return": "BFM_E_STATE"}]},
-        {"if": "all_up ?", "then": [{"return": "BFM_OK"}], "else": [{"return": "BFM_INPROGRESS"}]}
+        {"return": "BFM_E_STATE"}
       ]
     },
     {
