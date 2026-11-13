@@ -807,6 +807,7 @@ def layout_call(f, extra_callers, extra_callees, entry_note):
 # ---------------------------------------------------------------------------
 
 ST_W = 330
+ST_PORT_GAP = 16     # 状態の箱の右辺に付く線の点の間隔の下限(ラベル 1 行ぶん)
 
 
 class StateError(Exception):
@@ -829,24 +830,7 @@ def layout_states(st):
     start["h"] = len(start["lines"]) * LINE_H + 14
     lay.nodes.append(start)
     y += start["h"] + 30
-    boxes = []
-    for i, s in enumerate(items):
-        lines = [s["id"]] + wrap(s.get("text", ""), ST_W - 20)
-        if s.get("wait"):
-            lines += wrap("待つ: " + s["wait"], ST_W - 20)
-        nd = {"id": "s%d" % i, "kind": "statew" if s.get("wait") else "state", "text": "", "lines": lines,
-              "x": x, "y": y, "w": ST_W, "h": len(lines) * LINE_H + 12, "head": True}
-        lay.nodes.append(nd)
-        boxes.append(nd)
-        y += nd["h"] + 34
-    end = {"id": "s_end", "kind": "end", "text": "", "lines": wrap(st.get("end", "終わり"), ST_W - 40),
-           "x": x + 40, "y": y, "w": ST_W - 80}
-    end["h"] = len(end["lines"]) * LINE_H + 14
-    lay.nodes.append(end)
-    # 開始 -> 最初の状態
-    cx = x + ST_W / 2
-    lay.edges.append({"src": "s_start", "dst": "s0", "label": "", "pts": [(cx, start["y"] + start["h"]), (cx, boxes[0]["y"])]})
-    # 遷移を集める
+    # 遷移を集める(箱の高さを、右辺に付く線の数に合わせるので先に)
     trans = []
     for i, s in enumerate(items):
         nxt = s.get("next")
@@ -859,6 +843,29 @@ def layout_states(st):
             trans.append((i, len(items) if to == "END" else index[to], t.get("label", "")))
     down = [(a, b, lab) for a, b, lab in trans if b == a + 1]
     side = [(a, b, lab) for a, b, lab in trans if b != a + 1]
+    nport = {}
+    for a, b, lab in side:
+        nport[a] = nport.get(a, 0) + 1
+        nport[b] = nport.get(b, 0) + 1
+    boxes = []
+    for i, s in enumerate(items):
+        lines = [s["id"]] + wrap(s.get("text", ""), ST_W - 20)
+        if s.get("wait"):
+            lines += wrap("待つ: " + s["wait"], ST_W - 20)
+        # 右辺の線の点どうしは ST_PORT_GAP 以上あける(ラベルが重ならないように)
+        h = max(len(lines) * LINE_H + 12, (nport.get(i, 0) + 1) * ST_PORT_GAP)
+        nd = {"id": "s%d" % i, "kind": "statew" if s.get("wait") else "state", "text": "", "lines": lines,
+              "x": x, "y": y, "w": ST_W, "h": h, "head": True}
+        lay.nodes.append(nd)
+        boxes.append(nd)
+        y += nd["h"] + 34
+    end = {"id": "s_end", "kind": "end", "text": "", "lines": wrap(st.get("end", "終わり"), ST_W - 40),
+           "x": x + 40, "y": y, "w": ST_W - 80}
+    end["h"] = max(len(end["lines"]) * LINE_H + 14, (nport.get(len(items), 0) + 1) * ST_PORT_GAP)
+    lay.nodes.append(end)
+    # 開始 -> 最初の状態
+    cx = x + ST_W / 2
+    lay.edges.append({"src": "s_start", "dst": "s0", "label": "", "pts": [(cx, start["y"] + start["h"]), (cx, boxes[0]["y"])]})
     for a, b, lab in down:
         src = boxes[a]
         dst = boxes[b] if b < len(boxes) else end

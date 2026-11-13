@@ -102,11 +102,11 @@ static int run_start(void)
         d->initiator = (g_bfm_local_ip[p] < g_bfm_peer_ip[p]) ? 1u : 0u;
         d->phase = D_IDLE;
     }
-    bfm_cm_table_init();
     if (bfm_port_init() != 0) {
         BFM_LOG("bfm: ポート層の初期化に失敗\n");
         return BFM_E_HW;
     }
+    bfm_cm_table_init();                    /* 状態遷移の記録に時刻を書くので、ポート層(TSC)を開いた後 */
     bfm_mem_reset();
     for (unsigned p = 0; p < BFM_MAX_PORT; p++) {
         const bfm_dev_t *d = &g_bfm_dev[p];

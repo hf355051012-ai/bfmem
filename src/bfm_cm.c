@@ -132,10 +132,29 @@ static int mac_is_zero(const uint8_t mac[6])
     return 1;
 }
 
-/* 手順を変える。K_UP にするときは、それまでに書いたデータ経路の値が bfm_conn() から見えるように
- * release で書く(読む側は acquire)。 */
+static uint64_t s_slog_t0;                      /* 状態遷移の記録の時刻の起点(接続の表を作った時刻)*/
+
+/* 接続 c の状態遷移の記録に from -> to を足す。直前の 1 件に、そこにとどまった時間を書く。 */
+static void steplog_add(struct bfm_conn *c, uint8_t from, uint8_t to)
+{
+    const uint64_t now = bfm_port_time_ns();
+    if (c->slog_cnt != 0u) {
+        struct bfm_steplog *p = &c->slog[(c->slog_cnt - 1u) % BFM_STEPLOG_N];
+        p->stay = now - p->t;
+    }
+    struct bfm_steplog *e = &c->slog[c->slog_cnt % BFM_STEPLOG_N];
+    e->t = now;
+    e->stay = 0;
+    e->from = from;
+    e->to = to;
+    c->slog_cnt++;
+}
+
+/* 手順を変える(変わるときは状態遷移の記録に足す)。K_UP にするときは、それまでに書いたデータ経路の
+ * 値が bfm_conn() から見えるように release で書く(読む側は acquire)。 */
 static void set_step(struct bfm_conn *c, uint8_t step)
 {
+    if (c->step != step) steplog_add(c, c->step, step);
     __atomic_store_n(&c->step, step, __ATOMIC_RELEASE);
 }
 
@@ -638,12 +657,14 @@ int bfm_cm_conn_state(const struct bfm_conn *c)
 
 /*=================================================================
  * 接続の表を作る(bfm_run() の最初。ほかのコアが表を触っていないとき)。ポートごとに
- * g_bfm_port_conn[] 本を使う行にし、K_PORT(ポートの立ち上げ待ち)に置く。
+ * g_bfm_port_conn[] 本を使う行にし、K_PORT(ポートの立ち上げ待ち)に置く。前の状態遷移の記録は消え、
+ * 時刻の起点をここにする(ポート層を開いた後に呼ぶ。bfm_port_time_ns() を使うため)。
  * 装置(g_bfm_dev[])の port・used・nconn は呼び出し側が先に入れておく。
  * ===============================================================*/
 void bfm_cm_table_init(void)
 {
     memset(g_bfm_conn, 0, sizeof(g_bfm_conn));
+    s_slog_t0 = bfm_port_time_ns();
     for (unsigned p = 0; p < BFM_MAX_PORT; p++) {
         bfm_dev_t *d = &g_bfm_dev[p];
         d->conn = &g_bfm_conn[p * BFM_MAX_PORT_CONN];
@@ -653,7 +674,8 @@ void bfm_cm_table_init(void)
             c->pidx = (uint16_t)i;
             c->dev = d;
             c->used = (d->used && i < d->nconn) ? 1u : 0u;
-            c->step = c->used ? K_PORT : K_IDLE;
+            c->step = K_IDLE;
+            if (c->used) set_step(c, K_PORT);    /* 最初の遷移 IDLE -> PORT も記録する */
         }
     }
 }
@@ -867,4 +889,56 @@ int bfm_reconnect(unsigned port, unsigned i)
     if (ok) c->reconnect = 1;
     bfm_unlock(&c->lock);
     return ok ? BFM_OK : BFM_E_STATE;
+}
+
+/* 手順(K_*)の名前(状態遷移の記録の表示に使う)。 */
+static const char *step_name(uint8_t s)
+{
+    static const char *const name[] = {
+        [K_IDLE] = "IDLE", [K_PORT] = "PORT", [K_WAIT_REQ] = "WAIT_REQ", [K_CQ] = "CQ", [K_QP] = "QP",
+        [K_INIT] = "INIT", [K_WAIT_REP] = "WAIT_REP", [K_RTR] = "RTR", [K_RTS] = "RTS", [K_REP] = "REP",
+        [K_UP] = "UP", [K_DOWN] = "DOWN", [K_BYE] = "BYE", [K_DESTROY] = "DESTROY", [K_FAILED] = "FAILED"
+    };
+    return (s < sizeof(name) / sizeof(name[0]) && name[s] != NULL) ? name[s] : "?";
+}
+
+int bfm_conn_steplog(unsigned port, unsigned i)
+{
+    if (port >= BFM_MAX_PORT || i >= BFM_MAX_PORT_CONN) return BFM_E_PARAM;
+    struct bfm_conn *c = &g_bfm_conn[port * BFM_MAX_PORT_CONN + i];
+    if (!c->used) return BFM_E_PARAM;
+
+    /* 書き手(状態を進める側)は c->lock か g_bfm_ctl_lock(bfm_shutdown())を持つので、両方を取って写す。
+     * 表示は遅いので、鍵を離してから行う。 */
+    struct bfm_steplog log[BFM_STEPLOG_N];
+    bfm_lock(&c->lock);
+    bfm_lock(&g_bfm_ctl_lock);
+    const uint32_t cnt = c->slog_cnt;
+    const uint8_t now_step = c->step;
+    const uint64_t now = bfm_port_time_ns();
+    memcpy(log, c->slog, sizeof(log));
+    bfm_unlock(&g_bfm_ctl_lock);
+    bfm_unlock(&c->lock);
+
+    const uint32_t n = (cnt < BFM_STEPLOG_N) ? cnt : BFM_STEPLOG_N;
+    /* ほかのコアの表示と混ざらないよう、1 行は 1 回の BFM_LOG で出す */
+    if (cnt > n)
+        BFM_LOG("bfm: ポート %u の接続 %u の状態遷移(今 %s、全 %u 回。古いものは上書きされ、ここには最後の %u 回。"
+                "時刻は接続の表を作った時から、単位は ms)\n", port, i, step_name(now_step), cnt, n);
+    else
+        BFM_LOG("bfm: ポート %u の接続 %u の状態遷移(今 %s、全 %u 回。時刻は接続の表を作った時から、単位は ms)\n",
+                port, i, step_name(now_step), cnt);
+    BFM_LOG("bfm:   番号               時刻  遷移                     とどまった時間\n");
+    for (uint32_t k = cnt - n; k < cnt; k++) {
+        const struct bfm_steplog *e = &log[k % BFM_STEPLOG_N];
+        const uint64_t t = e->t - s_slog_t0;
+        const int last = (k + 1u == cnt);
+        const uint64_t stay = last ? now - e->t : e->stay;
+        BFM_LOG("bfm:   %-6u %9llu.%06llu  %-8s -> %-10s %9llu.%06llu%s\n", k,
+                (unsigned long long)(t / 1000000u), (unsigned long long)(t % 1000000u),
+                step_name(e->from), step_name(e->to),
+                (unsigned long long)(stay / 1000000u), (unsigned long long)(stay % 1000000u),
+                last ? "(今もとどまっている)" : "");
+    }
+    return BFM_OK;
 }

@@ -325,6 +325,13 @@ struct bfm_aslot {
 };
 enum { BFM_AK_WRITE = 0, BFM_AK_WRITE_NOACK = 1, BFM_AK_READ = 2, BFM_AK_ATOMIC = 3, BFM_AK_ATOMIC32 = 4 };
 
+/* 接続の状態遷移の記録 1 件(set_step() が書く)。 */
+struct bfm_steplog {
+    uint64_t t;                      /* 移った時刻(bfm_port_time_ns())*/
+    uint64_t stay;                   /* 移った先にとどまった時間(ns。次に移ったときに書く。最新の 1 件は未定)*/
+    uint8_t  from, to;               /* 移る前と後の手順(bfm_cm.c の K_*)*/
+};
+
 /* 接続 1 本 = 接続の表(g_bfm_conn)の 1 行。行ごとに状態機械(step)を持ち、bfm_run() は鍵(lock)を
  * 取れた行の状態を 1 つ進める。コアごとに別の接続を使うので、隣の接続とキャッシュラインを分ける。 */
 struct __attribute__((aligned(64))) bfm_conn {
@@ -395,6 +402,10 @@ struct __attribute__((aligned(64))) bfm_conn {
     uint64_t t0;                     /* 確立を始めた時刻 */
     uint64_t t_sent;                 /* 掛け側: REQ を最後に送った時刻。畳む: BYE を出し始めた時刻 */
     bfm_cmd_t cmd;                   /* この接続が出している FW のコマンド */
+
+    /* 状態遷移の記録(set_step() が書き、bfm_conn_steplog() が表示する。古いものから上書きする)*/
+    uint32_t slog_cnt;               /* これまでの遷移の数(次に書くのは slog[slog_cnt % BFM_STEPLOG_N])*/
+    struct bfm_steplog slog[BFM_STEPLOG_N];
 };
 
 /* 接続の表。ポート p の接続 i は g_bfm_conn[p * BFM_MAX_PORT_CONN + i]。 */

@@ -42,13 +42,30 @@
       ]
     },
     {
+      "func": "steplog_add",
+      "summary": "接続 `c` の状態遷移の記録(`c->slog[]`。`BFM_STEPLOG_N` 件の輪)に `from` → `to` を今の時刻で足す。記録が 1 件以上あれば、直前の 1 件に、そこにとどまった時間(今 − その時刻)を書く。",
+      "args": {"c": "接続", "from": "移る前の手順(`K_*`)", "to": "移った後の手順(`K_*`)"},
+      "ret": "なし",
+      "pre": "`set_step()` から呼ぶ(その行を進めていること)。",
+      "notes": "* 書く場所は `c->slog_cnt % BFM_STEPLOG_N`。埋まったら古いものから上書きする。\n* 足した 1 件の `stay` は 0(次に移ったときに書く)。",
+      "flow": [
+        {"do": "now = bfm_port_time_ns()"},
+        {"if": "c->slog_cnt != 0 ?", "then": [
+          {"do": "p = &c->slog[(c->slog_cnt - 1) % BFM_STEPLOG_N]、p->stay = now - p->t"}
+        ]},
+        {"do": "e = &c->slog[c->slog_cnt % BFM_STEPLOG_N]、e->t = now、e->stay = 0、e->from = from、e->to = to"},
+        {"do": "c->slog_cnt を 1 増やす"}
+      ]
+    },
+    {
       "func": "set_step",
-      "summary": "接続 `c` の手順 `c->step` を `step` にする(release で書く)。",
+      "summary": "接続 `c` の手順 `c->step` を `step` にする(release で書く)。手順が変わるときは、状態遷移の記録に足す(`steplog_add()`)。",
       "args": {"c": "接続", "step": "新しい手順(`K_*`)"},
       "ret": "なし",
       "pre": "その行を進めている(`c->lock` と `g_bfm_ctl_lock` を持つ、または `bfm_shutdown()` の中)こと。",
-      "notes": "`K_UP` にするとき、それまでに書いたデータ経路の値が、`bfm_conn()` / `bfm_cm_conn_state()`(acquire で読む)を通したほかのコアから見えるようにするため。",
+      "notes": "* `K_UP` にするとき、それまでに書いたデータ経路の値が、`bfm_conn()` / `bfm_cm_conn_state()`(acquire で読む)を通したほかのコアから見えるようにするため。\n* 手順はすべてここを通して変える(状態遷移の記録に漏れが出ないように)。",
       "flow": [
+        {"if": "c->step != step ?", "then": [{"call": "steplog_add(c, c->step, step) を呼ぶ"}]},
         {"do": "c->step = step(release)"}
       ]
     },
@@ -307,7 +324,7 @@
       "args": {"c": "接続の表の行"},
       "ret": "`BFM_INPROGRESS`: 途中(コマンドの完了・REQ / REP・GSI の送信の空き・ポートの立ち上げを待っている、または次の手順へ移った)。`BFM_OK`: 使える(`K_UP`)か、停止で畳み終えた。`BFM_E_STATE`: エラー・切断のまま(`K_DOWN`)、または使わない行(`K_IDLE`)。そのほかの負: 失敗した(`K_FAILED`。その理由)。",
       "pre": "`g_bfm_ctl_lock` と `c->lock` を持っていること(`bfm_run()` から)。`bfm_shutdown()` からの停止(`bfm_cm_fini_step()`)は `g_bfm_ctl_lock` だけで呼ぶ(ほかのコアは bfmem を使っていない)。",
-      "notes": "* 手順を変えるときは `set_step()`(release)で書く。\n* コマンドを出している間は畳む手順へ移らない。その手順の関数を呼んでコマンドの完了を受け取ってから(成功なら次の手順へ進めてから)移る。\n* 張り直し(`c->reconnect`)は `K_UP` / `K_DOWN` のときだけ受け付ける(`bfm_reconnect()` もそのときだけ立てる)。畳み終えたら結果は `BFM_OK` のまま確立をやり直す。\n* `K_REP` で REP を送れなかったときは、`BFM_CS_UP` になっているので `K_BYE` を通る。\n* `K_RTS` の失敗のうち、atomic_mode を付けていたものは失敗にせず、付けずにもう一度出す。そのときは「atomic_mode は断られた」と表示する。\n* `K_DESTROY` は `mlx5_qp_destroy()` が `BFM_INPROGRESS` を返す間、呼ばれるたびに `bfm_ops_detach()` を呼び直す。\n* `K_UP` の間、相手の BYE(`handle_msg()`)で `BFM_CS_CLOSED` に、EQ の QP のエラー(`bfm_conn_mark_error()`)で `BFM_CS_ERROR` になる。次の呼び出しで `K_DOWN` へ移る。",
+      "notes": "* 手順を変えるときは `set_step()`(release)で書く。\n* コマンドを出している間は畳む手順へ移らない。その手順の関数を呼んでコマンドの完了を受け取ってから(成功なら次の手順へ進めてから)移る。\n* 張り直し(`c->reconnect`)は `K_UP` / `K_DOWN` のときだけ受け付ける(`bfm_reconnect()` もそのときだけ立てる)。畳み終えたら結果は `BFM_OK` のまま確立をやり直す。\n* `K_REP` で REP を送れなかったときは、`BFM_CS_UP` になっているので `K_BYE` を通る。\n* `K_RTS` の失敗のうち、atomic_mode を付けていたものは失敗にせず、付けずにもう一度出す。そのときは「atomic_mode は断られた」と表示する。\n* `K_DESTROY` は `mlx5_qp_destroy()` が `BFM_INPROGRESS` を返す間、呼ばれるたびに `bfm_ops_detach()` を呼び直す。\n* `K_UP` の間、相手の BYE(`handle_msg()`)で `BFM_CS_CLOSED` に、EQ の QP のエラー(`bfm_conn_mark_error()`)で `BFM_CS_ERROR` になる。次の呼び出しで `K_DOWN` へ移る。その前に張り直し・停止が来ると、`BFM_CS_CLOSED` なら BYE を送らずに `K_UP` から `K_DESTROY` へ移る(`BFM_CS_ERROR` なら `K_BYE`)。",
       "flow": [
         {"do": "d = c->dev"},
         {"switch": "c->step", "cases": [
@@ -501,7 +518,7 @@
           {"id": "K_REP", "text": "受け側: REP を送る", "wait": "GSI の送信の空き",
            "next": [{"to": "K_UP", "label": "送った"}, {"to": "K_BYE", "label": "送信の失敗・畳む(BFM_CS_UP)"}]},
           {"id": "K_UP", "text": "使える(呼ぶと BFM_OK を返す)",
-           "next": [{"to": "K_DOWN", "label": "相手の BYE(CLOSED)・QP のエラー(ERROR)"}, {"to": "K_BYE", "label": "bfm_reconnect()・停止"}, {"to": "END", "label": "BFM_OK"}]},
+           "next": [{"to": "K_DOWN", "label": "相手の BYE(CLOSED)・QP のエラー(ERROR)"}, {"to": "K_BYE", "label": "bfm_reconnect()・停止(UP・ERROR)"}, {"to": "K_DESTROY", "label": "bfm_reconnect()・停止(CLOSED。K_DOWN の前)"}, {"to": "END", "label": "BFM_OK"}]},
           {"id": "K_DOWN", "text": "エラー・相手が切った(呼ぶと BFM_E_STATE を返す)", "wait": "bfm_reconnect()",
            "next": [{"to": "K_BYE", "label": "bfm_reconnect()・停止(ERROR)"}, {"to": "K_DESTROY", "label": "bfm_reconnect()・停止(CLOSED)"}]},
           {"id": "K_BYE", "text": "相手へ BYE を送る(返事は待たない)", "wait": "GSI の送信の空き(上限 TX_DRAIN_MS。過ぎたらあきらめる)"},
@@ -510,7 +527,7 @@
           {"id": "K_FAILED", "text": "失敗した(呼ぶと c->result を返す。bfm_shutdown() まで留まる)", "next": []}
         ],
         "end": "使える(BFM_OK を返す)",
-        "note": "1 回の呼び出しで 1 つの手順だけ進める。待つ状態では BFM_INPROGRESS を返して留まる。\n畳む(c->abort): 確立の失敗(conn_fail())・bfm_reconnect()(K_UP / K_DOWN のときだけ)・停止(bfm_cm_fini_step())で立つ。コマンドを出していなければ(出していればその完了を受け取ってから)、次の呼び出しの頭で BFM_CS_UP / BFM_CS_ERROR なら K_BYE、それ以外は K_DESTROY へ移る。図の K_DESTROY への線は代表だけで、K_QP・K_INIT・K_RTR からも同じように移る。"
+        "note": "1 回の呼び出しで 1 つの手順だけ進める。待つ状態では BFM_INPROGRESS を返して留まる。\n畳む(c->abort): 確立の失敗(conn_fail())・bfm_reconnect()(K_UP / K_DOWN のときだけ)・停止(bfm_cm_fini_step())で立つ。コマンドを出していなければ(出していればその完了を受け取ってから)、次の呼び出しの頭で BFM_CS_UP / BFM_CS_ERROR なら K_BYE、それ以外は K_DESTROY へ移る。図の K_DESTROY への線は代表だけで、K_QP・K_INIT・K_RTR からも同じように移る。\nK_UP → K_DESTROY: 相手の BYE は gsi_pump() が受けた時点で BFM_CS_CLOSED にするだけで、手順が K_DOWN へ移るのは次にその行を進めたとき。その間に bfm_reconnect()・停止が来ると、K_UP のまま畳む印が立ち、CLOSED なので BYE を送らずに K_DESTROY へ移る(実機の状態遷移の記録で確かめた)。"
       }
     },
     {
@@ -535,18 +552,20 @@
     },
     {
       "func": "bfm_cm_table_init",
-      "summary": "接続の表 `g_bfm_conn` を 0 で埋め、ポートごとに装置の `conn` をそのポートの行の先頭(`p * BFM_MAX_PORT_CONN`)に向け、各行に表の番号 `index`・ポートの中の番号 `pidx`・装置 `dev` を入れる。使うポートの `nconn` 本の内側の行を使う行(`used = 1`、手順 `K_PORT`)に、それ以外を `K_IDLE` にする。",
+      "summary": "接続の表 `g_bfm_conn` を 0 で埋め、ポートごとに装置の `conn` をそのポートの行の先頭(`p * BFM_MAX_PORT_CONN`)に向け、各行に表の番号 `index`・ポートの中の番号 `pidx`・装置 `dev` を入れる。使うポートの `nconn` 本の内側の行を使う行(`used = 1`、手順 `K_PORT`)に、それ以外を `K_IDLE` にする。状態遷移の記録の時刻の起点 `s_slog_t0` を今の時刻にし、使う行には最初の遷移 `K_IDLE` → `K_PORT` を記録する(`set_step()`)。",
       "args": {},
       "ret": "なし",
-      "pre": "装置 `g_bfm_dev[]` の `port`・`used`・`nconn` を先に入れてあること。ほかのコアが表を触っていないこと(`run_start()` が `g_bfm_ctl_lock` の中で呼ぶ)。",
-      "notes": "行の鍵 `c->lock` も 0(空き)になる。",
+      "pre": "装置 `g_bfm_dev[]` の `port`・`used`・`nconn` を先に入れてあること。ポート層を開いてあること(`bfm_port_time_ns()` を使う)。ほかのコアが表を触っていないこと(`run_start()` が `g_bfm_ctl_lock` の中で呼ぶ)。",
+      "notes": "* 行の鍵 `c->lock` も 0(空き)になる。\n* 前の状態遷移の記録はここで消える(`bfm_shutdown()` の後も、次の `bfm_run()` がここを呼ぶまでは残る)。",
       "flow": [
         {"do": "g_bfm_conn を 0 で埋める"},
+        {"do": "s_slog_t0 = bfm_port_time_ns()"},
         {"while": "p < BFM_MAX_PORT ?(p は 0 から)", "body": [
           {"do": "d = &g_bfm_dev[p]、d->conn = &g_bfm_conn[p * BFM_MAX_PORT_CONN]"},
           {"while": "i < BFM_MAX_PORT_CONN ?(i は 0 から)", "body": [
             {"do": "c = &d->conn[i]、c->index = p * BFM_MAX_PORT_CONN + i、c->pidx = i、c->dev = d"},
-            {"do": "c->used = (d->used かつ i < d->nconn)、c->step = used なら K_PORT、そうでなければ K_IDLE"}
+            {"do": "c->used = (d->used かつ i < d->nconn)、c->step = K_IDLE"},
+            {"if": "c->used ?", "then": [{"call": "set_step(c, K_PORT) を呼ぶ"}]}
           ]}
         ]}
       ]
@@ -783,6 +802,44 @@
         {"if": "ok ?", "then": [{"do": "c->reconnect = 1"}]},
         {"call": "bfm_unlock(&c->lock) を呼ぶ"},
         {"if": "ok ?", "then": [{"return": "BFM_OK"}], "else": [{"return": "BFM_E_STATE"}]}
+      ]
+    },
+    {
+      "func": "step_name",
+      "summary": "手順 `s`(`K_*`)の名前(`K_` を除いたもの。例: `WAIT_REP`)を返す。",
+      "args": {"s": "手順(`K_*`)"},
+      "ret": "名前の文字列。知らない値なら `\"?\"`。",
+      "pre": "特になし。",
+      "notes": "名前の表は enum の値を添字にした指示つきの初期化で書いてあるので、enum の並びを変えても名前はずれない(手順を足したら表にも足すこと)。",
+      "flow": [
+        {"if": "s が表の範囲内で、名前がある ?", "then": [{"return": "name[s]"}], "else": [{"return": "\"?\""}]}
+      ]
+    },
+    {
+      "func": "bfm_conn_steplog",
+      "summary": "ポート `port` の接続 `i` の状態遷移の記録を表示する。行の鍵 `c->lock` と `g_bfm_ctl_lock` を(回って)取り、記録 `c->slog[]`・遷移の数・今の手順・今の時刻を手元に写して鍵を離し、見出し(今の手順・全部の遷移の数。上書きされていればその旨)と、最後の `BFM_STEPLOG_N` 回までを古い順に 1 行ずつ表示する。1 行は、通し番号・移った時刻(接続の表を作った時 `s_slog_t0` から、ms)・移る前と後の手順の名前・移った先にとどまった時間(ms)。最後の行は今もとどまっているので、今までの時間を表示する。",
+      "args": {"port": "ConnectX のポートの番号", "i": "ポートの中の接続の番号"},
+      "ret": "`BFM_OK`: 表示した。`BFM_E_PARAM`: 範囲外か、使わない行。",
+      "pre": "どのコアから呼んでもよい。",
+      "notes": "* 書き手は `c->lock`(`bfm_run()`)か `g_bfm_ctl_lock`(`bfm_shutdown()`)を持って手順を変えるので、両方を取ってから写す。鍵を持つのは写す間だけで、表示は鍵を離してから行う(表示は遅いので、その行の `bfm_run()` を止めないため)。\n* 鍵を取る順は `c->lock` → `g_bfm_ctl_lock`(`bfm_run()` と同じ)。`bfm_run()` はどちらも trylock なので待ち合いにならない。\n* 記録は `bfm_shutdown()` の後も残る(次の `bfm_run()` が表を作り直すまで)。\n* ほかのコアの表示と混ざらないよう、1 行を 1 回の `BFM_LOG` で出す。\n* 手元の写しは `BFM_STEPLOG_N` × 24 バイト(既定 1.5KiB)をスタックに取る。",
+      "flow": [
+        {"if": "port >= BFM_MAX_PORT または i >= BFM_MAX_PORT_CONN ?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"do": "c = &g_bfm_conn[port * BFM_MAX_PORT_CONN + i]"},
+        {"if": "!c->used ?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"call": "bfm_lock(&c->lock) を呼ぶ"},
+        {"call": "bfm_lock(&g_bfm_ctl_lock) を呼ぶ"},
+        {"do": "cnt = c->slog_cnt、now_step = c->step、now = bfm_port_time_ns()、log に c->slog を写す"},
+        {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
+        {"call": "bfm_unlock(&c->lock) を呼ぶ"},
+        {"do": "n = cnt と BFM_STEPLOG_N の小さいほう"},
+        {"do": "BFM_LOG で見出し(ポート・接続・今の手順の名前・cnt。cnt > n なら最後の n 回だけである旨)を表示"},
+        {"do": "BFM_LOG で列の名前を表示"},
+        {"while": "k < cnt ?(k は cnt - n から)", "body": [
+          {"do": "e = &log[k % BFM_STEPLOG_N]、t = e->t - s_slog_t0"},
+          {"do": "stay = 最後の行(k + 1 == cnt)なら now - e->t、そうでなければ e->stay"},
+          {"do": "BFM_LOG で k・t・step_name(e->from)・step_name(e->to)・stay を表示(最後の行は「今もとどまっている」を付ける)"}
+        ]},
+        {"return": "BFM_OK"}
       ]
     }
   ]

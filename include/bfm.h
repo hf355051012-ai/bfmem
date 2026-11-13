@@ -93,6 +93,13 @@ int  bfm_conn_state(unsigned port, unsigned i);
  * 戻り値: BFM_OK = 頼んだ。BFM_E_STATE = 確立の途中・失敗した接続。BFM_E_PARAM = 使わない接続。 */
 int  bfm_reconnect(unsigned port, unsigned i);
 
+/* ポート port の接続 i の状態遷移の記録(接続の表を作ってからの遷移を、最後の BFM_STEPLOG_N 回まで)を
+ * 表示する。1 行に 1 回の遷移で、移った時刻(接続の表を作った時から)・移る前と後の手順・移った先に
+ * とどまった時間(最後の行は今までの時間)。記録は bfm_shutdown() の後も残り、次の bfm_run() が
+ * 表を作り直すときに消える。どのコアから呼んでもよい(鍵を短い間だけ回って取る)。
+ * 戻り値: BFM_OK = 表示した。BFM_E_PARAM = 範囲外か、使わない接続。 */
+int  bfm_conn_steplog(unsigned port, unsigned i);
+
 /* 全部の接続を畳み(相手へ BYE を送る)、FW を止め(TEARDOWN_HCA)、Bus Master を落とす。待つところで
  * BFM_INPROGRESS を返すので、BFM_OK が返るまで呼び続ける。立ち上げの途中でも呼べる(そこで止める)。
  * 止めた後に bfm_run() を呼ぶと、最初から立ち上げ直す。 */

@@ -619,3 +619,16 @@ sudo build/bfmem_test -d 0000:b3:00.0 -i 192.168.101.21 -n 10000 bench 192.168.1
   多重度つきの操作を再送で救いたい場合は、`g_bfm_async_timeout_ms` を約 1 秒以上にする必要がある(README「再送」)。
 - 既定 12 で、2 ポート × 16 本・双方向・`-z -x` を流し、[10] A〜D と [7] を含めて全部 OK(D の判定は「設定以上」に直した後)。
 - フレームを狙って 1 つだけ落とす試験はしていない(直結では落とせない)。
+
+記録(2026-11-14、接続ごとの状態遷移の記録(`bfm_conn_steplog()`・`-L`)を足した後): **合格。**
+- 1 ポート × 16 本、OptiPlex(`-L -x`、掛け側)↔ Precision(`-L`、受け側)で run。両方とも「結果 OK」(一通りの検査・mt とも NG 0)、
+  hash は両側で `e92cdeb4e6b0c81d`。
+- 止めた後に、両方とも 16 本全部の記録が出た。どの行も「移った時刻 + とどまった時間 = 次の行の時刻」。
+  - 掛け側の接続 0(全 11 回): IDLE→PORT(ポートの立ち上げ 362ms)→CQ→QP→INIT→WAIT_REP(12.6ms)→RTR→RTS→UP(9.1 秒)→BYE→DESTROY→PORT。
+    確立は PORT を出てから約 28ms。
+  - 受け側の接続 0(全 12 回): PORT(329ms)→WAIT_REQ(2,854ms。掛け側の REQ を待つ)→CQ→QP→INIT→RTR→RTS→REP→UP→BYE→DESTROY→PORT。
+  - `-x` の接続 15 は、3 回の張り直しがそれぞれ BYE→DESTROY→確立のやり直しとして記録された(掛け側 38 回、受け側 41 回)。
+    張り直しの確立は 7〜11ms。
+  - 受け側の接続 15 に **UP→DESTROY**(BYE を通らない)が 1 回あった。相手の BYE で CLOSED になり、K_DOWN へ移る前に
+    `bfm_reconnect()` が来たため(CLOSED なので BYE は送らない)。設計どおり。関数仕様書の状態遷移図に無かったので、UP→DESTROY の線を足した。
+- 終わった後、両方とも mlx5_core に戻した(どちらの ConnectX にも IP は付いていなかったので、付け直していない)。

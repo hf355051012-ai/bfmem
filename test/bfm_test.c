@@ -44,6 +44,7 @@ static volatile sig_atomic_t g_dump; /* hash を出す合図(serve で SIGQUIT)*
 static int g_serve;                  /* serve のときだけ SIGQUIT で hash を出す */
 static int g_quiet;                  /* -q: こちらからは転送せず、相手からの転送を受けるだけ(片方向の速さを測るため)*/
 static int g_perf;                   /* -P: run で一通りの検査を飛ばし、mt(全部の接続での転送と速さ)だけを行う */
+static int g_steplog;                /* -L: 最後(止めた後)に全部の接続の状態遷移の記録を表示する */
 static int g_silent;                 /* -z: [10] 無応答の試験(両方のノードに付ける。IP の小さいほうが試し、大きいほうが黙る)*/
 static uint8_t g_model[DATA_BYTES];  /* 相手のデータ領域にあるはずの中身(模型)*/
 
@@ -87,7 +88,7 @@ static void usage(void)
 {
     printf("使い方: bfmem_test [-d BDF] [-i 自分のIP] [-D ポート1のBDF] [-I ポート1の自分のIP] [-c 接続数/ポート]\n"
            "                   [-t スレッド数] [-p 接続の番号] [-m 経路MTU 1-5] [-M ポートのMTU] [-n 回数]\n"
-           "                   [-Q 多重度 1-64] [-a ack timeout] [-B] [-S] [-C] [-x] [-q] [-P] [-z] [-v]\n"
+           "                   [-Q 多重度 1-64] [-a ack timeout] [-B] [-S] [-C] [-x] [-q] [-P] [-z] [-L] [-v]\n"
            "                   run <相手のIP> [ポート1の相手のIP] | serve <相手のIP> [ポート1の相手のIP] |\n"
            "                   bench <相手のIP> | info <相手のIP>\n"
            "  両方のノードで同じものを動かす。IP の小さいほうが掛け側になる(自動)。相手の MAC も自動で取る\n"
@@ -108,7 +109,8 @@ static void usage(void)
            "  -z  run で無応答の試験([10]。両方のノードに付ける)。IP の大きいほうが最後の 4 本の QP を BYE なしで消し、\n"
            "      小さいほうが ACK・応答の返らない状態で、資源の空き待ち・bfm_check()・bfm_wait() の時間切れと、\n"
            "      NIC の再送の間隔(bfm_write() が BFM_E_RETRY になるまでの時間)を確かめて張り直す\n"
-           "  -a N  RC の ack timeout(g_bfm_ack_timeout。4.096us x 2^N。既定 12)\n");
+           "  -a N  RC の ack timeout(g_bfm_ack_timeout。4.096us x 2^N。既定 12)\n"
+           "  -L  最後(止めた後)に、全部の接続の状態遷移の記録(移った時刻・とどまった時間)を表示する\n");
 }
 
 /* ---------------------------------------------------------------------
@@ -1626,7 +1628,7 @@ int main(int argc, char **argv)
     uint32_t iters = 0, threads = 4, nconn = 0;
     int oob = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "d:i:D:I:c:p:m:M:n:t:Q:a:BSCxqPzvh")) != -1) {
+    while ((opt = getopt(argc, argv, "d:i:D:I:c:p:m:M:n:t:Q:a:BSCxqPzLvh")) != -1) {
         switch (opt) {
         case 'd': g_bfm_linux_pci_bdf[0] = optarg; break;
         case 'i': if (parse_ip(optarg, &g_bfm_local_ip[0]) != 0) { usage(); return 2; } break;
@@ -1645,6 +1647,7 @@ int main(int argc, char **argv)
         case 'q': g_quiet = 1; break;
         case 'P': g_perf = 1; break;
         case 'z': g_silent = 1; break;
+        case 'L': g_steplog = 1; break;
         case 'a': g_bfm_ack_timeout = (uint8_t)atoi(optarg); break;
         case 'Q': g_bfm_qdepth = (uint32_t)atoi(optarg); break;
         case 'v': g_bfm_verbose = 1; break;
@@ -1702,5 +1705,9 @@ int main(int argc, char **argv)
     else if (strcmp(mode, "info") == 0) ret = run_info();
     else ret = run_all(threads, iters, oob);
     do_shutdown();
+    if (g_steplog) {
+        for (unsigned p = 0; p < BFM_MAX_PORT; p++)
+            for (unsigned i = 0; i < g_bfm_port_conn[p]; i++) (void)bfm_conn_steplog(p, i);
+    }
     return ret;
 }

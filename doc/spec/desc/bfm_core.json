@@ -41,11 +41,11 @@
     },
     {
       "func": "run_start",
-      "summary": "最初の `bfm_run()` で 1 回だけ行う準備。設定を検査し(`check_config()`)、装置 `g_bfm_dev[]` を 0 で埋めてポートごとに番号・使うか(`g_bfm_port_conn[p]` が 0 でない)・接続の数・掛け側か(自分の IPv4 < 相手の IPv4)を入れて `D_IDLE` にし、接続の表を作る(`bfm_cm_table_init()`)。続けてポート層を開き(`bfm_port_init()`。DMA 領域と公開メモリを使えるようにする)、DMA 領域の切り出しを最初に戻し(`bfm_mem_reset()`)、使うポートごとに接続の数・役割・IPv4 を表示する。",
+      "summary": "最初の `bfm_run()` で 1 回だけ行う準備。設定を検査し(`check_config()`)、装置 `g_bfm_dev[]` を 0 で埋めてポートごとに番号・使うか(`g_bfm_port_conn[p]` が 0 でない)・接続の数・掛け側か(自分の IPv4 < 相手の IPv4)を入れて `D_IDLE` にする。続けてポート層を開き(`bfm_port_init()`。DMA 領域と公開メモリを使えるようにする)、接続の表を作り(`bfm_cm_table_init()`)、DMA 領域の切り出しを最初に戻し(`bfm_mem_reset()`)、使うポートごとに接続の数・役割・IPv4 を表示する。",
       "args": {},
       "ret": "`BFM_OK`: 準備できた。`BFM_E_PARAM`: 設定が不正(`check_config()`)。`BFM_E_HW`: ポート層の初期化に失敗。",
       "pre": "`g_bfm_ctl_lock` を持っていること。全体の状態が `R_IDLE` であること(`bfm_run()` が確かめてから呼ぶ)。",
-      "notes": "* 失敗しても後始末はしない(全体の状態は `R_IDLE` のままで、次の `bfm_run()` が最初からやり直す)。\n* 接続の表は `bfm_port_init()` より前に作る(装置の `port`・`used`・`nconn` を先に入れておく)。",
+      "notes": "* 失敗しても後始末はしない(全体の状態は `R_IDLE` のままで、次の `bfm_run()` が最初からやり直す)。\n* 接続の表は `bfm_port_init()` の後に作る(状態遷移の記録に `bfm_port_time_ns()` で時刻を書くので、TSC の周波数が決まった後にする)。装置の `port`・`used`・`nconn` は表より先に入れておく。",
       "flow": [
         {"call": "rc = check_config() を呼ぶ"},
         {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]},
@@ -54,12 +54,12 @@
           {"do": "d = &g_bfm_dev[p]。d->port = p、d->used = (g_bfm_port_conn[p] != 0)、d->nconn = used ならその数、そうでなければ 0"},
           {"do": "d->initiator = (g_bfm_local_ip[p] < g_bfm_peer_ip[p])、d->phase = D_IDLE"}
         ]},
-        {"call": "bfm_cm_table_init() を呼ぶ"},
         {"call": "bfm_port_init() を呼ぶ"},
         {"if": "bfm_port_init() != 0 ?", "then": [
           {"do": "BFM_LOG で「ポート層の初期化に失敗」を表示"},
           {"return": "BFM_E_HW"}
         ]},
+        {"call": "bfm_cm_table_init() を呼ぶ"},
         {"call": "bfm_mem_reset() を呼ぶ"},
         {"while": "p < BFM_MAX_PORT ?(p は 0 から)", "body": [
           {"if": "!g_bfm_dev[p].used ?", "then": [{"continue": true}]},
