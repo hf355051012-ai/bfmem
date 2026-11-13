@@ -330,6 +330,7 @@ struct bfm_steplog {
     uint64_t t;                      /* 移った時刻(bfm_port_time_ns())*/
     uint64_t stay;                   /* 移った先にとどまった時間(ns。次に移ったときに書く。最新の 1 件は未定)*/
     uint8_t  from, to;               /* 移る前と後の手順(bfm_cm.c の K_*)*/
+    uint16_t cpu;                    /* 移したコア(bfm_port_cpu_id() の下位 16bit)*/
 };
 
 /* 接続 1 本 = 接続の表(g_bfm_conn)の 1 行。行ごとに状態機械(step)を持ち、bfm_run() は鍵(lock)を

@@ -48,6 +48,12 @@ void bfm_port_delay_us(uint32_t us)
     bfm_x86_delay_us(us);
 }
 
+/* VxWorks の関数(vxCpuIndexGet など)は使わず、CPU から APIC ID を読む。 */
+unsigned bfm_port_cpu_id(void)
+{
+    return bfm_x86_apic_id();
+}
+
 /* リング 0 なので rdmsr 命令で直接読む(読んでよい MSR かは bfm_x86.c が CPUID で確かめる)。 */
 static int vx_rdmsr(uint32_t msr, uint64_t *val)
 {

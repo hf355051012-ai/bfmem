@@ -39,6 +39,18 @@
       ]
     },
     {
+      "func": "bfm_port_cpu_id",
+      "summary": "今動いているコアの番号として、CPU から読んだ APIC ID を返す(`bfm_x86_apic_id()`)。",
+      "args": {},
+      "ret": "APIC ID。",
+      "pre": "特になし。",
+      "notes": "* VxWorks の関数(`vxCpuIndexGet()` など)は使わない(移植層の決まり)。そのため VxWorks の CPU の番号ではなく APIC ID になる。\n* 状態遷移の記録で、どのコアが手順を変えたかを残すのに使う。\n* VxWorks の実機で未検証。",
+      "flow": [
+        {"call": "bfm_x86_apic_id() を呼ぶ"},
+        {"return": "その値"}
+      ]
+    },
+    {
       "func": "vx_rdmsr",
       "summary": "`rdmsr` 命令(`bfm_x86_rdmsr()`)で MSR を読む。`bfm_x86_init()` に渡す、MSR を読む関数。",
       "args": {"msr": "MSR の番号", "val": "読んだ値を入れる先"},

@@ -43,17 +43,18 @@
     },
     {
       "func": "steplog_add",
-      "summary": "接続 `c` の状態遷移の記録(`c->slog[]`。`BFM_STEPLOG_N` 件の輪)に `from` → `to` を今の時刻で足す。記録が 1 件以上あれば、直前の 1 件に、そこにとどまった時間(今 − その時刻)を書く。",
+      "summary": "接続 `c` の状態遷移の記録(`c->slog[]`。`BFM_STEPLOG_N` 件の輪)に `from` → `to` を、今の時刻と、移したコア(`bfm_port_cpu_id()` の下位 16bit)と一緒に足す。記録が 1 件以上あれば、直前の 1 件に、そこにとどまった時間(今 − その時刻)を書く。",
       "args": {"c": "接続", "from": "移る前の手順(`K_*`)", "to": "移った後の手順(`K_*`)"},
       "ret": "なし",
       "pre": "`set_step()` から呼ぶ(その行を進めていること)。",
-      "notes": "* 書く場所は `c->slog_cnt % BFM_STEPLOG_N`。埋まったら古いものから上書きする。\n* 足した 1 件の `stay` は 0(次に移ったときに書く)。",
+      "notes": "* 書く場所は `c->slog_cnt % BFM_STEPLOG_N`。埋まったら古いものから上書きする。\n* 足した 1 件の `stay` は 0(次に移ったときに書く)。\n* コアは Linux では CPU の番号、VxWorks では APIC ID(`bfm_port_cpu_id()`)。1 件は 24 バイトのまま(`_Static_assert` で確かめる)。",
       "flow": [
         {"do": "now = bfm_port_time_ns()"},
         {"if": "c->slog_cnt != 0 ?", "then": [
           {"do": "p = &c->slog[(c->slog_cnt - 1) % BFM_STEPLOG_N]、p->stay = now - p->t"}
         ]},
         {"do": "e = &c->slog[c->slog_cnt % BFM_STEPLOG_N]、e->t = now、e->stay = 0、e->from = from、e->to = to"},
+        {"call": "e->cpu = bfm_port_cpu_id() を呼ぶ"},
         {"do": "c->slog_cnt を 1 増やす"}
       ]
     },
@@ -817,7 +818,7 @@
     },
     {
       "func": "bfm_conn_steplog",
-      "summary": "ポート `port` の接続 `i` の状態遷移の記録を表示する。行の鍵 `c->lock` と `g_bfm_ctl_lock` を(回って)取り、記録 `c->slog[]`・遷移の数・今の手順・今の時刻を手元に写して鍵を離し、見出し(今の手順・全部の遷移の数。上書きされていればその旨)と、最後の `BFM_STEPLOG_N` 回までを古い順に 1 行ずつ表示する。1 行は、通し番号・移った時刻(接続の表を作った時 `s_slog_t0` から、ms)・移る前と後の手順の名前・移った先にとどまった時間(ms)。最後の行は今もとどまっているので、今までの時間を表示する。",
+      "summary": "ポート `port` の接続 `i` の状態遷移の記録を表示する。行の鍵 `c->lock` と `g_bfm_ctl_lock` を(回って)取り、記録 `c->slog[]`・遷移の数・今の手順・今の時刻を手元に写して鍵を離し、見出し(今の手順・全部の遷移の数。上書きされていればその旨)と、最後の `BFM_STEPLOG_N` 回までを古い順に 1 行ずつ表示する。1 行は、通し番号・移った時刻(接続の表を作った時 `s_slog_t0` から、ms)・移したコア(Linux は CPU の番号、VxWorks は APIC ID)・移る前と後の手順の名前・移った先にとどまった時間(ms)。最後の行は今もとどまっているので、今までの時間を表示する。",
       "args": {"port": "ConnectX のポートの番号", "i": "ポートの中の接続の番号"},
       "ret": "`BFM_OK`: 表示した。`BFM_E_PARAM`: 範囲外か、使わない行。",
       "pre": "どのコアから呼んでもよい。",
@@ -837,7 +838,7 @@
         {"while": "k < cnt ?(k は cnt - n から)", "body": [
           {"do": "e = &log[k % BFM_STEPLOG_N]、t = e->t - s_slog_t0"},
           {"do": "stay = 最後の行(k + 1 == cnt)なら now - e->t、そうでなければ e->stay"},
-          {"do": "BFM_LOG で k・t・step_name(e->from)・step_name(e->to)・stay を表示(最後の行は「今もとどまっている」を付ける)"}
+          {"do": "BFM_LOG で k・t・e->cpu・step_name(e->from)・step_name(e->to)・stay を表示(最後の行は「今もとどまっている」を付ける)"}
         ]},
         {"return": "BFM_OK"}
       ]

@@ -90,7 +90,7 @@ static void usage(void)
            "                   [-t スレッド数] [-p 接続の番号] [-m 経路MTU 1-5] [-M ポートのMTU] [-n 回数]\n"
            "                   [-Q 多重度 1-64] [-a ack timeout] [-B] [-S] [-C] [-x] [-q] [-P] [-z] [-L] [-v]\n"
            "                   run <相手のIP> [ポート1の相手のIP] | serve <相手のIP> [ポート1の相手のIP] |\n"
-           "                   bench <相手のIP> | info <相手のIP>\n"
+           "                   race <相手のIP> [ポート1の相手のIP] | bench <相手のIP> | info <相手のIP>\n"
            "  両方のノードで同じものを動かす。IP の小さいほうが掛け側になる(自動)。相手の MAC も自動で取る\n"
            "  run: -t 本(既定 4)のスレッドが bfm_run() を同時に呼んで全部の接続(-c 本 x ポート。既定 16)を張り、\n"
            "       両方向に一通りの操作を確かめ、全部の接続で同時に write / read / atomic / T10-DIF を確かめ、\n"
@@ -98,6 +98,9 @@ static void usage(void)
            "       同時に打って合計の速さを出す(区間ごとに相手と足並みをそろえるので、相手も同時に打つ = 両方向)。\n"
            "       続けて多重度つき(bfm_*_async。-Q 個まで出しておく)の 8 バイトの write(ACK なし / あり)・read を\n"
            "       -n 回ずつ、4KiB の write / read を -n/10 回ずつ、FAA・CAS を -n 回ずつ打つ\n"
+           "  race: 競合の試験(両方のノードで動かす)。-t 本が bfm_run() を休まず呼ぶ間、各ポートの前半の接続で転送を\n"
+           "        確かめ続け、後半の接続で張り直しを繰り返す(-n 秒。既定 30)。続けて bfm_run() を回したまま\n"
+           "        bfm_shutdown() し、回しているスレッドに立ち上げ直させる\n"
            "  bench: write / read を 4B〜256KiB、多重度 1・4・8・16 で -n 回(既定 100000)ずつ流し、\n"
            "         IOPS・MB/s・平均遅延を出す(接続 1 本。相手は serve -c 1)\n"
            "  -B  BlueFlame を使わない(8 バイトのドアベルだけ。比べるため)\n"
@@ -1597,6 +1600,323 @@ static int run_all(uint32_t nthreads, uint32_t iters, int oob)
     return ret;
 }
 
+/* ---------------------------------------------------------------------
+ * race: 複数のコアから同時に動かして、競合を確かめる(両方のノードで race を動かす)
+ *
+ *   段 1 張る:       -t 本のスレッドが bfm_run() を同時に呼んで全部の接続を張る(run と同じ)
+ *   段 2 揺さぶる:   -n 秒(既定 30)、次を同時に動かす
+ *     - bfm_run() を休まず呼ぶスレッド -t 本(張り直しの途中の接続を進める)
+ *     - データの接続(各ポートの前半)に 1 本ずつ: 4KiB の write / read と、多重度つきの 8 バイトの write
+ *       16 個 + read で読み戻して確かめ続ける。一度も失敗しないこと(隣の接続の張り直しに巻き込まれない)
+ *     - 張り直しの接続(各ポートの後半)に 1 本ずつ: 使えれば 8 バイトの write / read で確かめてから
+ *       bfm_reconnect()、切れていれば bfm_reconnect() を繰り返す(相手も同時に同じことをする)。
+ *       write と read が両方通ったのに読み戻した値が違うことが無いこと
+ *     - 見張り 1 本: 全部の接続の bfm_conn_state() を読み続け、2 秒ごとに張り直しの接続 1 本の bfm_conn_steplog()
+ *     bfm_run() が、失敗した接続(BFM_E_STATE 以外の負)を一度も返さないこと
+ *   段 3 そろえる:   張り直しをやめ、全部の接続が使えるようになること
+ *   段 4 止めて立ち上げ直す: bfm_run() と reconnect_down() を回すスレッドを動かしたまま bfm_shutdown() を呼び、
+ *     止まること。止まると、回しているスレッドが R_IDLE から立ち上げ直しを取り合う(1 回だけ行われる)。
+ *     全部の接続が使えるようになり、全部の接続で 8 バイトの write / read が通ること
+ * ------------------------------------------------------------------- */
+
+#define RACE_RUNNERS_MAX 64u
+
+struct race_runner {
+    pthread_t th;
+    uint64_t calls, ok, inprog, estate, fail;   /* bfm_run() の回数と戻り値ごとの数 */
+    int first_fail;                              /* 最初に見た失敗の値 */
+};
+
+struct race_conn {
+    pthread_t th;
+    unsigned port, i, idx;               /* ポート・ポートの中の番号・全体の通し番号(区画の位置)*/
+    int churn;                           /* 1 = 張り直しの接続、0 = データの接続 */
+    uint64_t ops, errs, cycles;          /* 確かめた回数・失敗した操作の数・張り直しを頼んだ回数 */
+    int ng;                              /* 1 = 本当の誤り(データの接続の失敗・読み戻しの食い違い・FAILED)*/
+    char why[160];                       /* 最初の本当の誤り */
+};
+
+static volatile int g_race_stop_runner;  /* 1 = bfm_run() を回すスレッドを止める */
+static volatile int g_race_stop_work;    /* 1 = データ・張り直し・見張りのスレッドを止める */
+static volatile int g_race_reconnect;    /* 1 = 回すスレッドが、切れた接続の張り直しも頼む(段 4)*/
+static uint64_t g_race_watch_reads;      /* 見張りが読んだ状態の数 */
+
+static void race_ng(struct race_conn *a, const char *what, int rc)
+{
+    if (a->ng++ == 0) snprintf(a->why, sizeof(a->why), "%s(rc=%d %s)", what, rc, bfm_strerror(rc));
+}
+
+static void *race_runner_fn(void *p)
+{
+    struct race_runner *a = (struct race_runner *)p;
+    while (!g_race_stop_runner && !g_stop) {
+        const int rc = bfm_run();
+        a->calls++;
+        if (rc == BFM_OK) a->ok++;
+        else if (rc == BFM_INPROGRESS) a->inprog++;
+        else if (rc == BFM_E_STATE) {
+            a->estate++;
+            if (g_race_reconnect) reconnect_down();
+        } else if (a->fail++ == 0) a->first_fail = rc;
+    }
+    return NULL;
+}
+
+/* データの接続: 一度も失敗しないこと。 */
+static void race_data(struct race_conn *a)
+{
+    static __thread uint8_t wbuf[4096], rbuf[4096];
+    const uint64_t base = MT_OFF + (uint64_t)a->idx * MT_SPAN;
+    uint32_t k = 0;
+    while (!g_race_stop_work && !g_stop && !a->ng) {
+        bfm_conn_t *c = bfm_conn(a->port, a->i);
+        if (c == NULL) { race_ng(a, "データの接続が使えなくなった", bfm_conn_state(a->port, a->i)); break; }
+        int rc;
+        for (uint32_t j = 0; j < sizeof(wbuf); j++) wbuf[j] = (uint8_t)(a->idx * 29u + k * 11u + j);
+        if ((rc = bfm_write(c, base, wbuf, sizeof(wbuf))) != BFM_OK) { race_ng(a, "write 4KiB", rc); break; }
+        memset(rbuf, 0, sizeof(rbuf));
+        if ((rc = bfm_read(c, base, rbuf, sizeof(rbuf))) != BFM_OK) { race_ng(a, "read 4KiB", rc); break; }
+        if (memcmp(wbuf, rbuf, sizeof(wbuf)) != 0) { race_ng(a, "4KiB を読み戻すと違う", 0); break; }
+        /* 多重度つき: 8 バイトの write を 16 個出して最後を待ち、128 バイトを読み戻す */
+        uint64_t v[16], r[16];
+        bfm_tag_t tag = 0;
+        for (uint32_t j = 0; j < 16u && rc == BFM_OK; j++) {
+            v[j] = ((uint64_t)a->idx << 48) | ((uint64_t)k << 8) | j;
+            rc = bfm_write_async(c, base + 4096u + j * 8u, &v[j], 8, BFM_ACK, &tag);
+        }
+        if (rc == BFM_OK) rc = bfm_wait(c, tag);
+        if (rc != BFM_OK) { race_ng(a, "多重度つきの write", rc); break; }
+        if ((rc = bfm_read(c, base + 4096u, r, sizeof(r))) != BFM_OK) { race_ng(a, "read 128B", rc); break; }
+        if (memcmp(v, r, sizeof(v)) != 0) { race_ng(a, "多重度つきの write を読み戻すと違う", 0); break; }
+        a->ops++;
+        k++;
+    }
+}
+
+/* 張り直しの接続。張り直しを回すのは IP の小さいほう(掛け側)だけ: 使えるようになったら 8 バイトの write / read で
+ * 確かめてから bfm_reconnect()。相手(受け側)は、BYE を受けて切れたら bfm_reconnect() を頼むだけで転送しない
+ * (両側で転送すると、相手が消した QP 宛ての write が NIC の再送の尽きるまで約 4 秒戻らず、張り直しが止まる)。
+ * cycles は「使えるようになった」回数(張り直しが 1 周した数)。 */
+static void race_churn(struct race_conn *a)
+{
+    const uint64_t off = MT_OFF + (uint64_t)a->idx * MT_SPAN;
+    const int leader = g_bfm_local_ip[a->port] < g_bfm_peer_ip[a->port];
+    uint32_t seed = 0x9e3779b9u * (a->idx + 1u) ^ (uint32_t)now_ns();
+    uint64_t k = 0;
+    int was_up = 1;                                     /* 段 1 で張ってあるので、最初の UP は数えない */
+    while (!g_race_stop_work && !g_stop && !a->ng) {
+        const int st = bfm_conn_state(a->port, a->i);
+        seed = seed * 1103515245u + 12345u;
+        if (st == BFM_ST_FAILED) { race_ng(a, "張り直しの接続が失敗した(FAILED)", 0); break; }
+        if (st == BFM_ST_UP && !was_up) a->cycles++;
+        was_up = (st == BFM_ST_UP);
+        if (st == BFM_ST_UP && leader) {
+            usleep((seed >> 16) % 1000u);              /* 使える間を少し保つ(長さはばらつかせる)*/
+            bfm_conn_t *c = bfm_conn(a->port, a->i);
+            if (c != NULL) {
+                const uint64_t v = ((uint64_t)a->idx << 48) | ++k;
+                uint64_t r = 0;
+                int rc = bfm_write(c, off, &v, 8);
+                if (rc == BFM_OK) rc = bfm_read(c, off, &r, 8);
+                if (rc != BFM_OK) a->errs++;
+                else if (r != v) { race_ng(a, "write / read が通ったのに読み戻すと違う", 0); break; }
+                else a->ops++;
+            }
+            (void)bfm_reconnect(a->port, a->i);
+        } else if (st == BFM_ST_DOWN) {
+            (void)bfm_reconnect(a->port, a->i);
+            usleep(50);
+        } else {
+            usleep(50);                                 /* 確立の途中、または受け側で使える */
+        }
+    }
+}
+
+static void *race_conn_fn(void *p)
+{
+    struct race_conn *a = (struct race_conn *)p;
+    if (a->churn) race_churn(a);
+    else race_data(a);
+    return NULL;
+}
+
+/* 見張り: 状態を読み続け、ときどき状態遷移の記録を出す(鍵を取る側の関数も同時に動かす)。 */
+static void *race_watch_fn(void *p)
+{
+    const struct race_conn *churn0 = (const struct race_conn *)p;
+    uint64_t next = now_ns() + 2000000000ull;
+    while (!g_race_stop_work && !g_stop) {
+        for (unsigned q = 0; q < BFM_MAX_PORT; q++)
+            for (unsigned i = 0; i < g_bfm_port_conn[q]; i++) {
+                (void)bfm_conn_state(q, i);
+                g_race_watch_reads++;
+            }
+        if (churn0 != NULL && now_ns() >= next) {
+            (void)bfm_conn_steplog(churn0->port, churn0->i);
+            next = now_ns() + 2000000000ull;
+        }
+    }
+    return NULL;
+}
+
+static void race_start_runners(struct race_runner *r, uint32_t n)
+{
+    g_race_stop_runner = 0;
+    for (uint32_t t = 0; t < n; t++) {
+        memset(&r[t], 0, sizeof(r[t]));
+        pthread_create(&r[t].th, NULL, race_runner_fn, &r[t]);
+    }
+}
+
+/* 回すスレッドを止め、戻り値の数を足して表示する。戻り値: 失敗を返した回数。 */
+static uint64_t race_stop_runners(struct race_runner *r, uint32_t n, const char *what)
+{
+    g_race_stop_runner = 1;
+    uint64_t calls = 0, ok = 0, inprog = 0, estate = 0, fail = 0;
+    int first = 0;
+    for (uint32_t t = 0; t < n; t++) {
+        pthread_join(r[t].th, NULL);
+        calls += r[t].calls; ok += r[t].ok; inprog += r[t].inprog; estate += r[t].estate;
+        if (r[t].fail && !fail) first = r[t].first_fail;
+        fail += r[t].fail;
+    }
+    printf("race: [%s] bfm_run() %u 本で %llu 回: OK %llu / INPROGRESS %llu / E_STATE %llu / 失敗 %llu%s%s\n", what, n,
+           (unsigned long long)calls, (unsigned long long)ok, (unsigned long long)inprog, (unsigned long long)estate,
+           (unsigned long long)fail, fail ? " 最初の失敗 " : "", fail ? bfm_strerror(first) : "");
+    return fail;
+}
+
+/* 全部の接続が使えるようになるまで待つ(回すスレッドは別に動いている)。戻り値: 1 = そろった。 */
+static int race_wait_all_up(uint64_t limit_ns)
+{
+    const uint64_t t0 = now_ns();
+    while (now_ns() - t0 < limit_ns && !g_stop) {
+        unsigned up = 0, total = 0;
+        for (unsigned p = 0; p < BFM_MAX_PORT; p++)
+            for (unsigned i = 0; i < g_bfm_port_conn[p]; i++) {
+                total++;
+                if (bfm_conn_state(p, i) == BFM_ST_UP) up++;
+            }
+        if (up == total) return 1;
+        reconnect_down();
+        usleep(1000);
+    }
+    return 0;
+}
+
+/* 全部の接続で 8 バイトの write / read を確かめる。戻り値: 通らなかった接続の数。 */
+static unsigned race_verify_all(uint64_t salt)
+{
+    unsigned bad = 0;
+    for (unsigned p = 0; p < BFM_MAX_PORT; p++)
+        for (unsigned i = 0; i < g_bfm_port_conn[p]; i++) {
+            bfm_conn_t *c = bfm_conn(p, i);
+            const uint64_t v = salt ^ ((uint64_t)(p * BFM_MAX_PORT_CONN + i) << 40);
+            uint64_t r = 0;
+            if (c == NULL || bfm_write(c, MT_OFF + (uint64_t)(p * BFM_MAX_PORT_CONN + i) * MT_SPAN + 8192u, &v, 8) != BFM_OK ||
+                bfm_read(c, MT_OFF + (uint64_t)(p * BFM_MAX_PORT_CONN + i) * MT_SPAN + 8192u, &r, 8) != BFM_OK || r != v) {
+                printf("race: ポート %u の接続 %u で write / read が通らない\n", p, i);
+                bad++;
+            }
+        }
+    return bad;
+}
+
+static int run_race(uint32_t nthreads, uint32_t secs)
+{
+    static struct race_runner runners[RACE_RUNNERS_MAX];
+    static struct race_conn conns[BFM_MAX_CONN];
+    if (nthreads == 0) nthreads = 1;
+    if (nthreads > RACE_RUNNERS_MAX) nthreads = RACE_RUNNERS_MAX;
+    if (secs == 0) secs = 30;
+    g_ng = 0;
+
+    /* 段 1 */
+    if (run_up(nthreads) != BFM_OK) return 1;
+    if (sync_at(400, "race の始め") != BFM_OK) return 1;
+
+    /* 段 2 */
+    unsigned nconn = 0, ndata = 0, nchurn = 0;
+    const struct race_conn *churn0 = NULL;
+    for (unsigned p = 0; p < BFM_MAX_PORT; p++)
+        for (unsigned i = 0; i < g_bfm_port_conn[p]; i++) {
+            struct race_conn *a = &conns[nconn++];
+            memset(a, 0, sizeof(*a));
+            a->port = p;
+            a->i = i;
+            a->idx = p * BFM_MAX_PORT_CONN + i;
+            a->churn = (i >= g_bfm_port_conn[p] / 2u);
+            if (a->churn) { nchurn++; if (churn0 == NULL) churn0 = a; }
+            else ndata++;
+        }
+    printf("race: 段 2: %u 秒。bfm_run() を休まず呼ぶスレッド %u 本、データの接続 %u 本、張り直しの接続 %u 本、見張り 1 本"
+           "(CPU %ld 個)\n", secs, nthreads, ndata, nchurn, sysconf(_SC_NPROCESSORS_ONLN));
+    g_race_stop_work = 0;
+    g_race_reconnect = 0;
+    g_race_watch_reads = 0;
+    race_start_runners(runners, nthreads);
+    for (unsigned t = 0; t < nconn; t++) pthread_create(&conns[t].th, NULL, race_conn_fn, &conns[t]);
+    pthread_t watch;
+    pthread_create(&watch, NULL, race_watch_fn, (void *)churn0);
+    const uint64_t t_end = now_ns() + (uint64_t)secs * 1000000000ull;
+    while (now_ns() < t_end && !g_stop) usleep(100000);
+    g_race_stop_work = 1;
+    for (unsigned t = 0; t < nconn; t++) pthread_join(conns[t].th, NULL);
+    pthread_join(watch, NULL);
+
+    uint64_t data_ops = 0, churn_ops = 0, churn_errs = 0, cycles = 0, cyc_min = ~0ull;
+    unsigned ng_threads = 0;
+    for (unsigned t = 0; t < nconn; t++) {
+        const struct race_conn *a = &conns[t];
+        if (a->churn) {
+            churn_ops += a->ops; churn_errs += a->errs; cycles += a->cycles;
+            if (a->cycles < cyc_min) cyc_min = a->cycles;
+        } else data_ops += a->ops;
+        if (a->ng) {
+            ng_threads++;
+            printf("race: ポート %u の接続 %u(%s): NG %s\n", a->port, a->i, a->churn ? "張り直し" : "データ", a->why);
+        }
+    }
+    printf("race: データの接続: 確かめた回数 %llu(1 回 = 4KiB の write / read + 多重度つきの write 16 個 + read)\n",
+           (unsigned long long)data_ops);
+    printf("race: 張り直しの接続: 張り直して使えるようになった %llu 回(1 本あたり最少 %llu 回)、確かめて通った %llu 回、"
+           "失敗した操作 %llu 回(張り直しを回すのは IP の小さいほう)\n", (unsigned long long)cycles,
+           (unsigned long long)cyc_min, (unsigned long long)churn_ops, (unsigned long long)churn_errs);
+    printf("race: 見張り: 状態を %llu 回読んだ\n", (unsigned long long)g_race_watch_reads);
+    check("race: [2] データの接続の転送が一度も失敗しない・読み戻しが一度も違わない", ng_threads == 0);
+    check("race: [2] 張り直しの接続が、どれも 1 回以上張り直された", nchurn == 0 || cyc_min > 0);
+
+    /* 段 3 */
+    const int all_up = race_wait_all_up(60ull * 1000000000ull);
+    check("race: [3] 張り直しをやめると、全部の接続が使えるようになる", all_up);
+    const uint64_t fail2 = race_stop_runners(runners, nthreads, "段 2・3");
+    check("race: [2][3] bfm_run() が失敗した接続を一度も返さない", fail2 == 0);
+    check("race: [3] 全部の接続で 8 バイトの write / read が通る", all_up && race_verify_all(0x1111000000000000ull) == 0);
+    if (sync_at(401, "race の止める前") != BFM_OK) return 1;
+
+    /* 段 4: 回すスレッドを動かしたまま止め、立ち上げ直させる */
+    g_race_reconnect = 1;
+    race_start_runners(runners, nthreads);
+    usleep(20000);
+    const uint64_t t0 = now_ns();
+    do_shutdown();
+    const uint64_t t_stop = now_ns() - t0;
+    printf("race: 段 4: bfm_run() を %u 本で回したまま bfm_shutdown() が %.1f ms で済んだ\n", nthreads, (double)t_stop / 1e6);
+    check("race: [4] bfm_run() を回したまま bfm_shutdown() が済む", 1);
+    const int up4 = race_wait_all_up(120ull * 1000000000ull);
+    printf("race: 段 4: 止めてから %.2f 秒で、立ち上げ直して全部の接続が使える%s\n", (double)(now_ns() - t0) / 1e9,
+           up4 ? "" : "(そろわない)");
+    check("race: [4] 回しているスレッドが立ち上げ直し、全部の接続が使えるようになる", up4);
+    const uint64_t fail4 = race_stop_runners(runners, nthreads, "段 4");
+    check("race: [4] bfm_run() が失敗を一度も返さない(立ち上げ直しの取り合いを含む)", fail4 == 0);
+    /* 立ち上げ直しで公開メモリは張り直され 0 になっている。埋め直さない(相手が先に書いた足並みの語を消さないため)*/
+    if (sync_at(402, "race の立ち上げ直し") != BFM_OK) return 1;
+    check("race: [4] 全部の接続で 8 バイトの write / read が通る", up4 && race_verify_all(0x4444000000000000ull) == 0);
+    if (sync_at(403, "race の終わり") != BFM_OK) return 1;
+    printf("race: 結果 %s(NG %d 件)\n", g_ng ? "NG" : "OK", g_ng);
+    return g_ng ? 1 : 0;
+}
+
 /* info: ポートを立ち上げて能力を表示する(接続は待たない)。 */
 static int run_info(void)
 {
@@ -1678,7 +1998,8 @@ int main(int argc, char **argv)
         g_bfm_port_conn[0] = 1;                             /* 中継バッファが大きいので接続は 1 本だけ */
         g_bfm_port_conn[1] = 0;
     }
-    if (strcmp(mode, "run") != 0 && !g_serve && !bench && strcmp(mode, "info") != 0) {
+    const int race = (strcmp(mode, "race") == 0);
+    if (strcmp(mode, "run") != 0 && !g_serve && !bench && !race && strcmp(mode, "info") != 0) {
         usage();
         return 2;
     }
@@ -1703,6 +2024,7 @@ int main(int argc, char **argv)
     if (g_serve) ret = run_serve(threads);
     else if (bench) ret = run_bench(threads, iters ? iters : 100000u);
     else if (strcmp(mode, "info") == 0) ret = run_info();
+    else if (race) ret = run_race(threads, iters);
     else ret = run_all(threads, iters, oob);
     do_shutdown();
     if (g_steplog) {

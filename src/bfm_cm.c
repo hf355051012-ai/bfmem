@@ -133,8 +133,9 @@ static int mac_is_zero(const uint8_t mac[6])
 }
 
 static uint64_t s_slog_t0;                      /* 状態遷移の記録の時刻の起点(接続の表を作った時刻)*/
+_Static_assert(sizeof(struct bfm_steplog) == 24, "状態遷移の記録は 1 件 24 バイト(bfm_config.h・README の説明)");
 
-/* 接続 c の状態遷移の記録に from -> to を足す。直前の 1 件に、そこにとどまった時間を書く。 */
+/* 接続 c の状態遷移の記録に from -> to を足す(移したコアも)。直前の 1 件に、そこにとどまった時間を書く。 */
 static void steplog_add(struct bfm_conn *c, uint8_t from, uint8_t to)
 {
     const uint64_t now = bfm_port_time_ns();
@@ -147,6 +148,7 @@ static void steplog_add(struct bfm_conn *c, uint8_t from, uint8_t to)
     e->stay = 0;
     e->from = from;
     e->to = to;
+    e->cpu = (uint16_t)bfm_port_cpu_id();
     c->slog_cnt++;
 }
 
@@ -928,14 +930,14 @@ int bfm_conn_steplog(unsigned port, unsigned i)
     else
         BFM_LOG("bfm: ポート %u の接続 %u の状態遷移(今 %s、全 %u 回。時刻は接続の表を作った時から、単位は ms)\n",
                 port, i, step_name(now_step), cnt);
-    BFM_LOG("bfm:   番号               時刻  遷移                     とどまった時間\n");
+    BFM_LOG("bfm:   番号               時刻  コア  遷移                     とどまった時間\n");
     for (uint32_t k = cnt - n; k < cnt; k++) {
         const struct bfm_steplog *e = &log[k % BFM_STEPLOG_N];
         const uint64_t t = e->t - s_slog_t0;
         const int last = (k + 1u == cnt);
         const uint64_t stay = last ? now - e->t : e->stay;
-        BFM_LOG("bfm:   %-6u %9llu.%06llu  %-8s -> %-10s %9llu.%06llu%s\n", k,
-                (unsigned long long)(t / 1000000u), (unsigned long long)(t % 1000000u),
+        BFM_LOG("bfm:   %-6u %9llu.%06llu  %4u  %-8s -> %-10s %9llu.%06llu%s\n", k,
+                (unsigned long long)(t / 1000000u), (unsigned long long)(t % 1000000u), e->cpu,
                 step_name(e->from), step_name(e->to),
                 (unsigned long long)(stay / 1000000u), (unsigned long long)(stay % 1000000u),
                 last ? "(今もとどまっている)" : "");

@@ -42,5 +42,8 @@ uint64_t bfm_x86_time_ns(void);
 void     bfm_x86_delay_us(uint32_t us);
 /* CPU の名前・TSC・周波数(基準・最大・今の実効)・パッケージ C-state の設定を表示する。 */
 void     bfm_x86_report(void);
+/* 今動いているコアの APIC ID(CPUID 0Bh の x2APIC ID。0Bh が無い CPU では CPUID 1 の ebx[31:24] の
+ * 8bit の APIC ID)。コアを見分けるのに使う(OS の CPU の番号とは限らない)。bfm_x86_init() の前でも使える。 */
+uint32_t bfm_x86_apic_id(void);
 
 #endif /* BFM_X86_H */

@@ -89,6 +89,13 @@ void bfm_port_delay_us(uint32_t us)
     }
 }
 
+/* OS の CPU の番号(taskset や /proc/cpuinfo の番号と同じ)。取れなければ APIC ID。 */
+unsigned bfm_port_cpu_id(void)
+{
+    const int c = sched_getcpu();
+    return (c >= 0) ? (unsigned)c : bfm_x86_apic_id();
+}
+
 /* ---------------------------------------------------------------------
  * CPU(port/x86/bfm_x86.c)
  *

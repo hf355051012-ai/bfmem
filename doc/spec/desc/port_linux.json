@@ -43,6 +43,21 @@
       ]
     },
     {
+      "func": "bfm_port_cpu_id",
+      "summary": "今動いているコアの番号として、OS の CPU の番号(`sched_getcpu()`。`taskset` や `/proc/cpuinfo` と同じ番号)を返す。取れなければ APIC ID(`bfm_x86_apic_id()`)を返す。",
+      "args": {},
+      "ret": "CPU の番号(取れなければ APIC ID)。",
+      "pre": "特になし。",
+      "notes": "状態遷移の記録で、どのコアが手順を変えたかを残すのに使う。",
+      "flow": [
+        {"do": "c = sched_getcpu()"},
+        {"if": "c >= 0 ?", "then": [{"return": "c"}], "else": [
+          {"call": "bfm_x86_apic_id() を呼ぶ"},
+          {"return": "その値"}
+        ]}
+      ]
+    },
+    {
       "func": "linux_rdmsr",
       "summary": "`/dev/cpu/N/msr`(`cpu_init()` が開いた `s_msr_fd`)を、MSR の番号の位置から 8 バイト読む。`bfm_x86_init()` に渡す、MSR を読む関数。",
       "args": {"msr": "MSR の番号", "val": "読んだ値を入れる先"},

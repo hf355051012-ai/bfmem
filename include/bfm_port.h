@@ -56,6 +56,9 @@ void              bfm_port_bar0_wc_release(unsigned port, uint64_t off, uint64_t
 uint64_t bfm_port_time_ns(void);
 /* 待つ(マイクロ秒)。 */
 void     bfm_port_delay_us(uint32_t us);
+/* 今動いているコアの番号(コアを見分けるため。状態遷移の記録に使う)。Linux は OS の CPU の番号、
+ * VxWorks は APIC ID(OS の機能を使わずに CPUID で読む)。 */
+unsigned bfm_port_cpu_id(void);
 /* 表示(printf と同じ書式)。 */
 void     bfm_port_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 

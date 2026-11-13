@@ -139,6 +139,27 @@
       ]
     },
     {
+      "func": "bfm_x86_apic_id",
+      "summary": "今動いているコアの APIC ID を返す。CPUID の基本の葉が 0Bh まであり、0Bh の ebx が 0 でなければ(0Bh がある)、0Bh の edx(x2APIC ID。32bit)を返す。そうでなければ CPUID 1 の ebx[31:24](8bit の APIC ID)を返す。",
+      "args": {},
+      "ret": "APIC ID。",
+      "pre": "特になし(`bfm_x86_init()` の前でも使える。前なら CPUID 0 で基本の葉の最大番号を読む)。",
+      "notes": "* コアを見分けるためのもの。OS の CPU の番号とは限らない(並びも飛び飛びになりうる)。\n* CPUID は命令の流れを止めるので遅い(数十〜数百サイクル。仮想マシンではもっと)。データ経路では使わない(状態遷移の記録だけ)。\n* 呼ぶ間に別のコアへ移されると、呼んだ時のどちらかのコアの値になる。",
+      "flow": [
+        {"do": "max = s_max_leaf"},
+        {"if": "max == 0 ?(bfm_x86_init() の前)", "then": [
+          {"call": "bfm_x86_cpuid(0, 0, r) を呼ぶ"},
+          {"do": "max = r[0]"}
+        ]},
+        {"if": "max >= 0x0b ?", "then": [
+          {"call": "bfm_x86_cpuid(0x0b, 0, r) を呼ぶ"},
+          {"if": "r[1](ebx)!= 0 ?", "then": [{"return": "r[3](edx = x2APIC ID)"}]}
+        ]},
+        {"call": "bfm_x86_cpuid(1, 0, r) を呼ぶ"},
+        {"return": "r[1] >> 24"}
+      ]
+    },
+    {
       "func": "bfm_x86_report",
       "summary": "CPU の名前・family・model と、TSC の周波数(どこから求めたか・invariant か)を表示する。MSR を読めるなら、基準と最小の周波数(`MSR_PLATFORM_INFO`)、ターボの最大(`MSR_TURBO_RATIO_LIMIT`、1 コア)、今の倍率(`IA32_PERF_STATUS`)、実効の周波数(10ms 空回りする間の `IA32_APERF` / `IA32_MPERF` の増え方の比 × TSC の周波数)、パッケージ C-state の上限と固定されているか(`MSR_PKG_CST_CONFIG_CONTROL`)も表示する。",
       "args": {},

@@ -136,6 +136,22 @@ uint64_t bfm_x86_time_ns(void)
     return (uint64_t)(((unsigned __int128)bfm_x86_rdtsc() * s_ns_mult) >> 32);
 }
 
+uint32_t bfm_x86_apic_id(void)
+{
+    uint32_t r[4];
+    uint32_t max = s_max_leaf;
+    if (max == 0u) {                       /* bfm_x86_init() の前 */
+        bfm_x86_cpuid(0, 0, r);
+        max = r[0];
+    }
+    if (max >= 0x0bu) {
+        bfm_x86_cpuid(0x0b, 0, r);
+        if (r[1] != 0u) return r[3];       /* ebx != 0 なら 0Bh がある。edx = x2APIC ID */
+    }
+    bfm_x86_cpuid(1, 0, r);
+    return r[1] >> 24;
+}
+
 void bfm_x86_delay_us(uint32_t us)
 {
     const uint64_t t0 = bfm_x86_rdtsc();
