@@ -1166,16 +1166,19 @@ image::call_src_bfm_core-bfm_dev_step.drawio.svg[bfm_dev_step() の関係図]
 |===
 |関数名 |`bfm_run`(`src/bfm_core.c` 239 行目)
 |宣言 |`int bfm_run(void)`
-|処理内容 a|代表 API。呼ぶたびに待たずに少しずつ進め、接続の表の全体の様子を返す。全体の状態 `s_run` ごとに分けて処理する。
+|処理内容 a|代表 API。呼ぶたびに待たずに少しずつ進め、接続の表の全体の様子を返す。全体の状態 `s_run`(acquire で読む)の switch で、状態ごとに分けて処理する。
 
-. `R_STOP`(`bfm_shutdown()` の途中)なら `BFM_E_STATE` を返す。
-. `R_IDLE` なら、`g_bfm_ctl_lock` を取れたコアだけが(取ってからもう一度 `R_IDLE` を確かめて)`run_start()` で準備し、できたら `R_RUN` にする。鍵を取れなければ `BFM_INPROGRESS` を返す。準備できたら(ほかのコアが準備したときも)状態を読み直し、`R_RUN` なら同じ呼び出しのまま次へ進む。
-. `R_RUN` なら次の 3 つを行う。そうでなければ(表を作った直後に `bfm_shutdown()` が始まった)`BFM_E_STATE` を返す。
+* `R_IDLE`(最初の 1 回): `g_bfm_ctl_lock` を取れたコアだけが(取ってからもう一度 `R_IDLE` を確かめて)`run_start()` で準備し、できたら `R_RUN` にする。準備の失敗ならその理由を、それ以外(準備できた・ほかのコアが準備している)は `BFM_INPROGRESS` を返す。接続の表を進めるのは次の呼び出しから。
+* `R_RUN`(動いている): 次の 3 つを行う。
+* `R_STOP`(`default`。`bfm_shutdown()` の途中): `BFM_E_STATE` を返す。
+
+`R_RUN` で行うこと:
+
 . 接続の表を、コアごとにずらした行から 1 周回り、使う行の鍵 `c->lock` と `g_bfm_ctl_lock` の両方を取れた行について、`R_RUN` なら `bfm_cm_conn_step()` で状態を 1 つ進める。取れなければ待たずに次の行へ行く。
 . 使うポートで `D_READY` のものについて、`g_bfm_ctl_lock` を取れたら EQ(`mlx5_eq_poll()`)と GSI(`bfm_cm_poll()`)を処理する。
 . 使う行の状態(`bfm_cm_conn_state()`)をまとめて返す。
 |引数 |なし
-|戻り値 a|`BFM_OK`: 使う接続が全部使える(`BFM_ST_UP`)。`BFM_INPROGRESS`: 途中(立ち上げ・確立の途中の接続がある、または最初の準備をほかのコアがしている)。`BFM_E_STATE`: `bfm_shutdown()` の途中か、エラー・切断のままの接続(`BFM_ST_DOWN`)がある。そのほかの負: 失敗した接続(`BFM_ST_FAILED`)がある(最初に見つけた行の `c->result`。負でなければ `BFM_E_HW`)、または `run_start()` の失敗(`BFM_E_PARAM` / `BFM_E_HW`)。
+|戻り値 a|`BFM_OK`: 使う接続が全部使える(`BFM_ST_UP`)。`BFM_INPROGRESS`: 途中(立ち上げ・確立の途中の接続がある、最初の準備をした、または最初の準備をほかのコアがしている)。`BFM_E_STATE`: `bfm_shutdown()` の途中か、エラー・切断のままの接続(`BFM_ST_DOWN`)がある。そのほかの負: 失敗した接続(`BFM_ST_FAILED`)がある(最初に見つけた行の `c->result`。負でなければ `BFM_E_HW`)、または `run_start()` の失敗(`BFM_E_PARAM` / `BFM_E_HW`)。
 |前提条件 a|`include/bfm_config.h` の変数を設定し終えていること。どのコアから何本同時に呼んでもよい(データ経路の関数と同時でもよい)。
 |注意事項 a|* 優先は 失敗 > エラー・切断のまま > 途中 > 全部使える。
 * どの値が返っても呼び続けてよい(ほかの接続は進む)。使える後も、相手からの BYE や FW のページ要求に答えるため、ときどき呼ぶこと。
@@ -1205,7 +1208,7 @@ image::call_src_bfm_core-bfm_run.drawio.svg[bfm_run() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_shutdown()
 |===
-|関数名 |`bfm_shutdown`(`src/bfm_core.c` 305 行目)
+|関数名 |`bfm_shutdown`(`src/bfm_core.c` 302 行目)
 |宣言 |`int bfm_shutdown(void)`
 |処理内容 a|ライブラリを止める(待つところでは `BFM_INPROGRESS` を返す)。全体の状態を `R_STOP` にして `bfm_run()` が表を進めないようにし、`g_bfm_ctl_lock` を(回って)取って、使うポートのうち `D_IDLE`・`D_FAILED` でないものについて、`D_STOP` でなければ `dev_stop_begin(d, BFM_OK)` で止める手順を始め、`dev_stop_step()` で進める(全部の接続を畳み、出したままのコマンドを捨て、FW を止め、Bus Master を落とし、BAR0 を外す)。止め終えたポートは `D_IDLE` にする。全部のポートが止まったら、ポート層を閉じ(`bfm_port_fini()`)、`R_IDLE` に戻す。
 |引数 |なし

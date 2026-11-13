@@ -324,7 +324,8 @@ VGAP, HGAP = 26, 36
 BOX_W, DIA_W = 220, 250
 
 KINDS = {"do", "call", "if", "while", "loop", "dowhile", "switch", "return", "break", "continue",
-         "goto", "label", "end"}
+         "goto", "label", "end", "group"}
+GRP_PAD, GRP_HEAD = 14, 26   # group の枠の内側の余白と、見出しの帯の高さ
 
 
 class FlowError(Exception):
@@ -340,7 +341,7 @@ def step_kind(st):
     allowed = {"do": set(), "call": set(), "return": set(), "break": set(), "continue": set(),
                "goto": set(), "label": set(), "end": set(),
                "if": {"then", "else", "yes", "no"}, "while": {"body"}, "loop": {"body"},
-               "dowhile": {"body"}, "switch": {"cases"}}[ks[0]]
+               "dowhile": {"body"}, "switch": {"cases", "layout"}, "group": {"body"}}[ks[0]]
     extra = set(st) - {ks[0]} - allowed
     if extra:
         raise FlowError("%s に使えない項目 %s" % (ks[0], sorted(extra)))
@@ -378,9 +379,29 @@ def split_elseif(st):
         return (rows, els) if len(rows) >= 2 else None
 
 
+def columns_of(st):
+    """列に並べて描く switch("layout": "columns")なら [(case のラベル, 本体), ...] を返す(default は最後の列)。"""
+    if st.get("layout") is None:
+        return None
+    if st["layout"] != "columns":
+        raise FlowError("switch の layout は columns だけ: %r" % (st["layout"],))
+    cols = []
+    for c in st["cases"]:
+        if set(c) - {"case", "body", "default"}:
+            raise FlowError("switch の case に使えない項目: %r" % (c,))
+        lab = c.get("case", "")
+        if c.get("default"):
+            lab = "default(%s)" % lab if lab else "default"
+        cols.append((lab, c.get("body", [])))
+    cols.sort(key=lambda t: t[0].startswith("default"))
+    return cols
+
+
 def ladder_of(st, k):
     """梯子の形に描く手順なら (比べる文と本体の組の並び, 最後の本体) を返す。"""
     if k == "switch":
+        if st.get("layout") is not None:
+            return None
         return split_switch(st)
     if k == "if":
         return split_elseif(st)
@@ -466,7 +487,28 @@ class Layout:
         """case 1 つぶんの高さ(本体はひし形の中央より VGAP 下から始める)。"""
         return max(dh, dh / 2 + VGAP + Hb) if body else dh
 
+    COL_BUS, COL_TOP = 18, 26   # 列に並べる switch: ひし形の下から横の線まで / 横の線から列の先頭まで
+
+    def columns_geom(self, st):
+        """列に並べる switch の寸法。戻り値: (列, 列ごとの (L, R, H), 列の中心の cx からの距離, ひし形の高さ,
+        全体の (L, R, H))"""
+        cols = columns_of(st)
+        dw, dh, _ = node_size("if", st["switch"])
+        ms = []
+        for lab, body in cols:
+            Lb, Rb, Hb = self.measure(body) if body else (0, 0, 0)
+            ms.append((max(Lb, 40), max(Rb, tw(lab) + 14), Hb))
+        offs = [0]
+        for i in range(1, len(cols)):
+            offs.append(offs[-1] + ms[i - 1][1] + HGAP + ms[i][0])
+        H = dh + self.COL_BUS + self.COL_TOP + max(m[2] for m in ms) + VGAP / 2
+        L = max(dw / 2, ms[0][0])
+        R = max(dw / 2, offs[-1] + ms[-1][1])
+        return cols, ms, offs, dh, (L, R, H)
+
     def measure1(self, st, k):
+        if k == "switch" and columns_of(st):
+            return self.columns_geom(st)[4]
         lad = ladder_of(st, k)
         if lad:
             rows, default, bx_off, lane_off, (Ld, Rd, Hd) = self.ladder_geom(*lad)
@@ -476,6 +518,11 @@ class Layout:
         if k in ("do", "call", "return", "label", "end"):
             w, h, _ = node_size(k, st[k] if isinstance(st[k], str) else "")
             return w / 2, w / 2, h
+        if k == "group":
+            # 枠の左上の見出しが、中央を下りる線にかからないだけの幅を左に取る
+            Lb, Rb, Hb = self.measure(st.get("body", []))
+            L = max(Lb + GRP_PAD, tw(st["group"]) * 1.15 + 8 + 16)   # 見出しは太字なので 1 割余計に見る
+            return L, Rb + GRP_PAD, GRP_HEAD + Hb + GRP_PAD
         if k == "if":
             dw, dh, _ = node_size("if", st["if"])
             L1, R1, H1 = self.measure(st.get("then", []))
@@ -570,7 +617,35 @@ class Layout:
         res += [(src, pts + [(lane, bottom)], lab) for src, pts, lab in joined]
         return res, bottom
 
+    def place_columns(self, st, cx, y, outs):
+        """switch を列に並べて置く。ひし形の下の横の線から、case ごとの列(左から case の順、default は右端)へ
+        分かれる。列の先頭の上に case の値を書く。"""
+        cols, ms, offs, dh, (L, R, H) = self.columns_geom(st)
+        d = self.new_node("if", st["switch"], cx, y)
+        self.connect(outs, d)
+        bus = y + dh + self.COL_BUS
+        top = bus + self.COL_TOP
+        bottom = y + H
+        res = []
+        for (lab, body), off in zip(cols, offs):
+            x = cx + off
+            pts = [(cx, y + dh), (cx, bus)] + ([(x, bus)] if off else [])
+            n0 = len(self.edges)
+            if body:
+                ob, _ = self.place(body, x, top, [(d["id"], pts, lab)])
+            else:
+                ob = [(d["id"], pts + [(x, top)], lab)]
+            # 列へ入る線のラベルは、横の線の下・列の先頭の上に置く(ひし形の下で重ならないように)
+            for e in self.edges[n0:]:
+                if e["src"] == d["id"] and e.get("label") == lab:
+                    e["lpos"] = (x + 5, bus + 15)
+            res += [(src, p + [(p[-1][0], bottom)], l) for src, p, l in ob]
+        self.max_x = max(self.max_x, cx + R)
+        return res, bottom
+
     def place1(self, st, k, cx, y, outs):
+        if k == "switch" and columns_of(st):
+            return self.place_columns(st, cx, y, outs)
         lad = ladder_of(st, k)
         if lad:
             return self.place_ladder(lad, cx, y, outs)
@@ -580,6 +655,26 @@ class Layout:
             if k == "label":
                 self.labels[st["label"]] = nd
             return [(nd["id"], [(cx, y + nd["h"])], "")], y + nd["h"]
+        if k == "group":
+            # 枠(線より先に描く)を置き、その中に本体を置く。制御の流れは本体のまま(枠は見た目だけ)
+            L, R, H = self.measure1(st, k)
+            self.n += 1
+            frame = {"id": "n%d" % self.n, "kind": "grp", "text": st["group"], "lines": [st["group"]],
+                     "x": cx - L, "y": y, "w": L + R, "h": H, "dashed": True}
+            self.nodes.append(frame)
+            self.max_x = max(self.max_x, cx + R)
+            # 入ってくる線は、枠の外で中央に寄せてから上辺の中央へ入れる(枠の中で横へ曲がらないように)
+            into = []
+            for src, pts, lab in outs:
+                lx, ly = pts[-1]
+                route = list(pts)
+                if abs(lx - cx) > 0.5:
+                    midy = max(y - VGAP / 2, ly + 6)
+                    route += [(lx, midy), (cx, midy)]
+                into.append((src, route + [(cx, y)], lab))
+            ob, bb = self.place(st.get("body", []), cx, y + GRP_HEAD, into)
+            bottom = y + H
+            return [(src, pts + [(pts[-1][0], bottom)], lab) for src, pts, lab in ob], bottom
         if k in ("return", "end"):
             text = st[k] if k == "end" else "戻る: %s" % st[k] if st[k] not in ("", True) else "戻る"
             nd = self.new_node("return", text, cx, y)

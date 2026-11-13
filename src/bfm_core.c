@@ -238,14 +238,10 @@ int bfm_dev_step(bfm_dev_t *d)
 
 int bfm_run(void)
 {
-    int st = __atomic_load_n(&s_run, __ATOMIC_ACQUIRE);
-
-    /* R_STOP: bfm_shutdown() の途中。表を進めない */
-    if (st == R_STOP) return BFM_E_STATE;
-
-    /* R_IDLE: 最初の 1 回。鍵を取れたコアが表を作って R_RUN にする(取れなければ、ほかのコアが作っている)。
-     * 作れたら、同じ呼び出しのまま下の R_RUN の処理へ進む。 */
-    if (st == R_IDLE) {
+    switch (__atomic_load_n(&s_run, __ATOMIC_ACQUIRE)) {
+    case R_IDLE: {
+        /* 最初の 1 回。鍵を取れたコアが表を作って R_RUN にする(取れなければ、ほかのコアが作っている)。
+         * 接続の表を進めるのは次の呼び出しから(R_RUN)。 */
         if (!bfm_trylock(&g_bfm_ctl_lock)) return BFM_INPROGRESS;
         int rc = BFM_OK;
         if (__atomic_load_n(&s_run, __ATOMIC_ACQUIRE) == R_IDLE) {
@@ -253,12 +249,12 @@ int bfm_run(void)
             if (rc == BFM_OK) __atomic_store_n(&s_run, R_RUN, __ATOMIC_RELEASE);
         }
         bfm_unlock(&g_bfm_ctl_lock);
-        if (rc != BFM_OK) return rc;
-        st = __atomic_load_n(&s_run, __ATOMIC_ACQUIRE);   /* ほかのコアが作ったときも R_RUN になっている */
+        return (rc != BFM_OK) ? rc : BFM_INPROGRESS;
     }
 
-    /* R_RUN: 動いている。接続の表を進め、ポートの EQ と GSI を読み、全体の様子を返す */
-    if (st == R_RUN) {
+    case R_RUN: {
+        /* 動いている。接続の表を進め、ポートの EQ と GSI を読み、全体の様子を返す */
+
         /* 接続の表を回り、鍵を取れた行の状態を 1 つ進める */
         const unsigned start = __atomic_fetch_add(&s_rr, 1u, __ATOMIC_RELAXED) % BFM_MAX_CONN;
         for (unsigned k = 0; k < BFM_MAX_CONN; k++) {
@@ -298,8 +294,9 @@ int bfm_run(void)
         return all_up ? BFM_OK : BFM_INPROGRESS;
     }
 
-    /* 表を作った直後に bfm_shutdown() が始まった(R_STOP)*/
-    return BFM_E_STATE;
+    default:   /* R_STOP: bfm_shutdown() の途中。表を進めない */
+        return BFM_E_STATE;
+    }
 }
 
 int bfm_shutdown(void)
