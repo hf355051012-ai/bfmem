@@ -1246,7 +1246,7 @@ def write_drawio_svg(lay, path, name):
 # 記述の読み込みと検査
 # ---------------------------------------------------------------------------
 
-REQUIRED = ["func", "summary", "args", "ret", "pre", "notes", "flow"]
+REQUIRED = ["func", "purpose", "summary", "args", "ret", "pre", "notes", "flow"]
 
 
 def load_desc():
@@ -1317,7 +1317,7 @@ def check(allf, descs, partial=False):
                 errs.append("%s:%s: args は {名前: 意味} で書く" % (rel, nm))
             elif list(e["args"]) != pn:
                 errs.append("%s:%s: 引数の名前が違う。ソース %s / 記述 %s" % (rel, nm, pn, list(e["args"])))
-            for k in ("summary", "ret", "pre", "notes"):
+            for k in ("purpose", "summary", "ret", "pre", "notes"):
                 if not isinstance(e[k], str) or not e[k].strip():
                     errs.append("%s:%s: %s が空" % (rel, nm, k))
             try:
@@ -1404,15 +1404,11 @@ def api_section(allf, descs):
     summ = {}
     for rel, d in descs.items():
         for e in d.get("functions", []):
-            summ[(rel, e["func"])] = e["summary"]
-
-    def first_sentence(text):
-        t = re.split(r"(?<=。)", text.strip().split("\n")[0])[0]
-        return t
+            summ[(rel, e["func"])] = e.get("purpose", "")
 
     out = ["\n== API 一覧\n",
            "\nbfmem の関数のうち、外から使うもの。関数名を押すと、その関数の仕様の節へ飛ぶ。\n"
-           "説明はヘッダ(`include/bfm.h` / `include/bfm_port.h`)のコメントから取っている。\n"]
+           "説明は各関数の節の「目的」と同じ(何のための関数か)。\n"]
     # アプリケーション向け
     out.append("\n=== アプリケーションが使う関数(`include/bfm.h`)\n\n"
                "使い方の順: `bfm_run()` が `BFM_OK` を返すまで呼ぶ → `bfm_conn()` で接続を取り `bfm_write()` など → "
@@ -1425,8 +1421,8 @@ def api_section(allf, descs):
             # 関数名に引数の名前を添える
             sig = "%s(%s)" % (name, ", ".join(p[1] for p in defs[0]["params"])) if defs else name + "()"
             link = "<<%s,`%s`>>" % (fslug(defs[0]), sig) if defs else "`%s`" % sig
-            if not text and defs:
-                text = first_sentence(summ.get((defs[0]["file"], name), ""))
+            if defs and summ.get((defs[0]["file"], name)):
+                text = summ[(defs[0]["file"], name)]     # 説明は記述の「目的」
             out.append("|%s |%s\n" % (link, api_text(text)))
     out.append("|===\n")
     # 移植層
@@ -1440,8 +1436,8 @@ def api_section(allf, descs):
             for rel in ("port/linux_vfio/port_linux.c", "port/vxworks/port_vxworks.c"):
                 fs = [f for f in by.get(name, []) if f["file"] == rel]
                 impls.append("<<%s,節へ>>" % fslug(fs[0]) if fs else "-")
-            if not text:
-                text = first_sentence(summ.get(("port/linux_vfio/port_linux.c", name), ""))
+            if summ.get(("port/linux_vfio/port_linux.c", name)):
+                text = summ[("port/linux_vfio/port_linux.c", name)]     # 説明は記述の「目的」
             fs = [f for f in by.get(name, []) if f["file"] == "port/linux_vfio/port_linux.c"]
             sig = "%s(%s)" % (name, ", ".join(p[1] for p in fs[0]["params"])) if fs else name + "()"
             out.append("|`%s` |%s |%s |%s\n" % (sig, impls[0], impls[1], api_text(text)))
@@ -1564,6 +1560,7 @@ bfmem(ConnectX の BlueFlame でノード間のメモリへ write / read / atomi
             out.append('[cols="1,5",options="autowidth"]\n.%s()\n|===\n' % f["name"])
             out.append("|関数名 |`%s`(`%s` %d 行目)\n" % (f["name"], rel, f["line"]))
             out.append("|宣言 |`%s`\n" % a_esc(f["decl"]))
+            out.append("|目的 a|%s\n" % e["purpose"].strip())
             out.append("|処理内容 a|%s\n" % e["summary"].strip())
             if f["params"]:
                 rows = "".join("!`%s` !`%s` !%s\n" % (a_esc(t).replace("!", "\\!"), n, e["args"][n].replace("!", "\\!"))

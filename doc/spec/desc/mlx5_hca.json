@@ -4,6 +4,7 @@
   "functions": [
     {
       "func": "ms_since",
+      "purpose": "ある時刻からどれだけ経ったかをミリ秒で知るための下請けの関数。HCA の立ち上げ(`mlx5_hca_init_step()`)が、FW の初期化・リンク・ページ要求などを待つところで、待ち時間の経過や時間切れを判断するのに使う。",
       "summary": "時刻 `t0` から今までの経過時間をミリ秒で返す。",
       "args": {"t0": "起点の時刻(`bfm_port_time_ns()` の値、ns)"},
       "ret": "経過時間(ms。切り捨て)。",
@@ -16,6 +17,7 @@
     },
     {
       "func": "fw_initializing",
+      "purpose": "FW がまだ初期化中かを調べるための下請けの関数。HCA の立ち上げで、FW が初期化を終えてコマンドを受け付けられるようになるのを待つときに使う。",
       "summary": "FW が初期化中か(Initialization Segment の `MLX5_ISEG_INITIALIZING` の最上位ビット)を返す。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)"},
       "ret": "1: 初期化中。0: 初期化が終わった。",
@@ -28,6 +30,7 @@
     },
     {
       "func": "simple_cmd",
+      "purpose": "引数の要らない短い FW のコマンドを、待たずに実行するための下請けの関数。HCA の立ち上げで、装置を使い始めることを FW に知らせる `ENABLE_HCA` に使う。",
       "summary": "入力が 16 バイトで opcode と op_mod だけを入れるコマンドを、待たずに進める(`ENABLE_HCA` に使う)。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順(出したかを覚える)", "opcode": "コマンドの opcode", "op_mod": "コマンドの op_mod", "what": "表示用のコマンドの名前"},
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS`: まだ完了していない。`BFM_OK`: 成功。負: 失敗)。",
@@ -41,6 +44,7 @@
     },
     {
       "func": "query_pages",
+      "purpose": "FW が動くためにあと何ページのメモリを求めているかを FW に問い合わせるための下請けの関数。HCA の立ち上げで、boot と init の段階でそれぞれ渡すページの数を知るのに使い、得た数で `mlx5_pages_start()` を始める。",
       "summary": "`QUERY_PAGES` を待たずに進め、完了したら FW が求めるページの数と、その関数の番号を返す。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順", "op_mod": "1 = boot のページ、2 = init のページ", "func": "[出力] 関数の番号(出力の byte 10〜11)", "n": "[出力] 求めるページの数(出力の byte 12〜15。符号つき)"},
       "ret": "`BFM_OK`: 読めた。`BFM_INPROGRESS`: まだ完了していない。負: `mlx5_cmd_run()` の失敗。",
@@ -56,6 +60,7 @@
     },
     {
       "func": "access_reg",
+      "purpose": "装置のレジスタ(ポートの設定や状態)を FW のコマンドで読み書きするための下請けの関数。HCA の立ち上げで、ホストのバイト順の確認、ポートの MTU の設定と表示、ポートを上げることとリンクの状態を見ることに使う。",
       "summary": "`ACCESS_REG` で装置のレジスタ(16 バイト)を読む、または書くコマンドを、待たずに進める。完了したら(読んだときも書いたときも)出力のレジスタの内容を `data` に写す。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順", "reg": "レジスタの番号(`MLX5_REG_PMTU` など)", "read": "0 以外なら読む(op_mod 1)、0 なら書く(op_mod 0)", "data": "[入出力] レジスタの内容 16 バイト。書くときは書く値、成功したら出力の内容に置き換わる", "what": "表示用のコマンドの名前"},
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS`: まだ完了していない。`BFM_OK`: 成功。負: 失敗)。",
@@ -70,6 +75,7 @@
     },
     {
       "func": "query_cap",
+      "purpose": "HCA が持つ能力(使える機能や上限)を FW から読むための下請けの関数。HCA の立ち上げで、general・atomic・roce の能力を読むのに使い、読んだ結果は `parse_general_caps()` などで取り出すか、書き換えて `set_cap()` で書き戻す。",
       "summary": "`QUERY_HCA_CAP` で、指定した種類の能力の今の値(current)を読むコマンドを待たずに進める。完了したら出力をまるごと `s_cap_out[d->port]` に置く。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順", "type": "能力の種類(`MLX5_CAP_GENERAL` / `MLX5_CAP_ATOMIC` / `MLX5_CAP_ROCE`)", "what": "表示用のコマンドの名前"},
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS`: まだ完了していない。`BFM_OK`: 成功。負: 失敗)。",
@@ -83,6 +89,7 @@
     },
     {
       "func": "set_cap",
+      "purpose": "`query_cap()` で読んで書き換えた HCA の能力の設定を、FW に書き戻すための下請けの関数。HCA の立ち上げで、general の能力と、atomic の値をホストのバイト順で扱う設定を FW に入れるのに使う。",
       "summary": "`s_cap_out[d->port]` にある能力(読んで書き換えたもの)を、そのまま `SET_HCA_CAP` で書くコマンドを待たずに進める。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順", "type": "能力の種類", "what": "表示用のコマンドの名前"},
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS`: まだ完了していない。`BFM_OK`: 成功。負: 失敗)。",
@@ -99,6 +106,7 @@
     },
     {
       "func": "parse_general_caps",
+      "purpose": "`query_cap()` で読んだ general の能力から、bfmem が使う値(BlueFlame の窓の大きさ、read / atomic を同時に出せる数、RoCE が使えるかなど)を装置の情報に取り出すための下請けの関数。HCA の立ち上げで使い、RoCE が使えない装置はここで断る。",
       "summary": "`s_cap_out[d->port]` にある general の能力から、要るもの(`page_request_disable`・`log_max_ra_req_qp`・`log_max_ra_res_qp`・`port_type`・`roce`・`bf`・`log_bf_reg_size`・`num_vhca_ports`・署名オフロードの `sho`・`umr_fence`)を取り出して `d` に入れる。BlueFlame の 1 面の大きさ `bf_buf_size` を `2^log_bf_reg_size / 2`(上限 `BFM_WQE_MAX`)にする。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)"},
       "ret": "`BFM_OK`: 取り出せた。`BFM_E_HW`: ポートが Ethernet でない。",
@@ -124,6 +132,7 @@
     },
     {
       "func": "parse_atomic_caps",
+      "purpose": "`query_cap()` で読んだ atomic の能力から、使える演算と大きさを取り出し、atomic をホストのバイト順で扱えるかを確かめるための下請けの関数。HCA の立ち上げで使う。設定の書き戻しが要るときはそれを返し、ホストのバイト順に対応していない装置は断る(bfmem の atomic は常にホスト順の前提のため)。",
       "summary": "`s_cap_out[d->port]` にある atomic の能力を読み、対応する演算(`atomic_ops`、byte 18〜19)と大きさ(`atomic_size_qp`、byte 22〜23)を `d` に入れる。8 バイトの atomic をホストのバイト順で扱う設定(byte 8 の上位 2 ビット `atomic_req_8B_endianness_mode` = 1)になっていなければ、`s_cap_out[d->port]` のその欄を 1 に書き換えて、書き戻しが要ることを返す(Linux の `handle_hca_cap_atomic()` と同じ)。その設定に対応していない装置は断る。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)"},
       "ret": "0: 書き戻し不要(もうホスト順)。1: `s_cap_out[d->port]` を書き換えた(呼び出し側が `SET_HCA_CAP` で書く)。`BFM_E_HW`: 装置が atomic をホストのバイト順にできない。",
@@ -142,6 +151,7 @@
     },
     {
       "func": "decide_atomic_mode",
+      "purpose": "QP を接続するときに FW に指定する atomic の動き方(どの大きさまでの atomic を受けるか)を、装置の能力から決めておくための下請けの関数。HCA の立ち上げで atomic の能力を読んだ後に使い、決めた値は RC の QP を RTS へ移すとき(`mlx5_qp_rtr2rts_rc()`)に使われる。",
       "summary": "QP の `atomic_mode` を決めて `d->atomic_mode` に入れる(Linux の `get_atomic_mode()` と同じ規則)。拡張 atomic(拡張 CS / 拡張 FA)があれば、`atomic_size_qp` で対応する最大の大きさの log2(3 未満なら 3 = 8 バイト)。なければ、標準の CS / FA の両方に対応していれば 1(IB_COMP)。どちらでもなければ 0。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)"},
       "ret": "なし",
@@ -167,6 +177,7 @@
     },
     {
       "func": "mlx5_alloc_uar",
+      "purpose": "UAR(CPU から NIC のドアベルを鳴らすための窓)を FW から 1 つ割り当ててもらうための関数。HCA の立ち上げで EQ 用に、接続の準備で GSI の QP 用と各接続の QP 用に呼ぶ。得た番号は CQ・QP・EQ を作るときに指定する。",
       "summary": "`ALLOC_UAR` で UAR を 1 つ取るコマンドを待たずに進め、完了したらその番号を返す。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順", "uarn": "[出力] UAR の番号(出力の byte 9〜11)"},
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS`: まだ完了していない。`BFM_OK`: 取れた。負: 失敗)。",
@@ -181,6 +192,7 @@
     },
     {
       "func": "alloc_pd",
+      "purpose": "PD(QP と MKey を結びつけて、使えるメモリの範囲をまとめる単位)を FW から 1 つ割り当ててもらうための下請けの関数。HCA の立ち上げで 1 度使い、得た番号はその後に作る MKey と QP で使う。",
       "summary": "`ALLOC_PD` で PD を 1 つ取るコマンドを待たずに進め、完了したらその番号を返す。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順", "pdn": "[出力] PD の番号(出力の byte 9〜11)"},
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS`: まだ完了していない。`BFM_OK`: 取れた。負: 失敗)。",
@@ -195,6 +207,7 @@
     },
     {
       "func": "create_mkey_pa",
+      "purpose": "NIC がメモリを読み書きするときの鍵になる MKey を、CPU のアドレスをそのまま使う形で作るための下請けの関数。HCA の立ち上げで、自分のメモリ全体を NIC に読み書きさせるための鍵と、相手に公開するメモリの範囲を相手から読み書きさせるための鍵の 2 つを作るのに使う。",
       "summary": "`CREATE_MKEY` で PA(物理アドレスをそのまま使う)モードの MKey を作るコマンドを待たずに進める。特定の QP に結びつけず、PD は `d->pdn`。`len` が 0 なら全アドレス(`length64`)にする。完了したら、出力の MKey の番号を 8 ビット左へずらし、下位 8 ビットを `key8` にしたものを鍵として返す。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順", "access": "mkc の byte 2(`umr_en a rw rr lw lr` と `access_mode_1_0`)。`access_mode_1_0` は 0(PA)", "start": "先頭のアドレス", "len": "長さ(バイト)。0 なら全アドレス", "key8": "鍵の下位 8 ビット(`mkey_7_0`)", "mkey": "[出力] 作った鍵", "what": "表示用のコマンドの名前"},
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS`: まだ完了していない。`BFM_OK`: 作れた。負: 失敗)。",
@@ -212,6 +225,7 @@
     },
     {
       "func": "mlx5_create_psv2",
+      "purpose": "T10-DIF をハードウェアで扱う(`BFM_DIF_HW`)ときに要る、保護情報の計算の途中の状態を持つ PSV を、メモリ側とワイヤ側の 2 つ作るための関数。T10-DIF の準備(`bfm_dif.c`)が、接続ごとの署名の資源を作るときに呼ぶ。",
       "summary": "PSV(署名の途中の状態を持つもの)を 2 つ作るコマンド(`CREATE_PSV`、Linux の `mlx5_core_create_psv()`)を待たずに進める。`psv[0]` をメモリ側、`psv[1]` をワイヤ側に使う。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順", "psv": "[出力] 作った PSV の番号を入れる先(2 個)"},
       "ret": "`BFM_OK`: 作れた。`BFM_INPROGRESS`: まだ完了していない。負: `mlx5_cmd_run()` の失敗。",
@@ -227,6 +241,7 @@
     },
     {
       "func": "mlx5_create_sig_mkey",
+      "purpose": "T10-DIF をハードウェアで扱う(`BFM_DIF_HW`)ときに、保護情報を付け外しする転送に使う署名つきの MKey を作るための関数。T10-DIF の準備(`bfm_dif.c`)が、接続ごとの署名の資源を作るときに `mlx5_create_psv2()` の後に呼ぶ。",
       "summary": "署名つきの MKey を作るコマンドを待たずに進める(Linux の `mlx5_alloc_integrity_descs()` の MKey と同じ形)。中身は使うたびに UMR で入れるので、空き(free)・umr_en・KLM の形で、BSF 4 octword と変換 4 octword の枠を持たせる。ローカルの読み書きだけを許す。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順", "key8": "鍵の下位 8 ビット", "mkey": "[出力] 作った MKey を入れる先"},
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS`: まだ完了していない。`BFM_OK`: 作れた。負: 失敗)。",
@@ -241,6 +256,7 @@
     },
     {
       "func": "mlx5_cq_create",
+      "purpose": "FW に CQ(送受信の完了を NIC が書き込む待ち行列)を作らせるための関数。接続の準備で、GSI の QP 用と各接続の QP 用に、QP を作る前に呼ぶ。作った CQ は `mlx5_qp_create()` で QP の送受信に共有させ、完了はこの CQ を見て知る。",
       "summary": "`CREATE_CQ` で CQ を作るコマンドを待たずに進める。CQE は 64 バイトで `2^log_n` 個。まだ出していなければ、CQE を全部「まだ書かれていない」(opcode = `MLX5_CQE_INVALID`、owner = 0)にし、ドアベルのレコードを 0 にする。CQ の文脈(大きさ・UAR・EQ・ドアベルのレコードのアドレス)と各ページの物理アドレスを渡す。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順", "uarn": "CQ に結びつける UAR の番号", "buf": "CQE の緩衝(DMA 領域。4KiB のページの並び)", "log_n": "CQE の数の log2", "dbr": "ドアベルのレコード(DMA 領域。8 バイト)", "cqn": "[出力] CQ の番号"},
       "ret": "`BFM_OK`: 作れた。`BFM_INPROGRESS`: まだ完了していない。`BFM_E_PARAM`: `log_n` が 10 を超える(緩衝が 16 ページを超える)。そのほか負: `mlx5_cmd_run()` の失敗。",
@@ -271,6 +287,7 @@
     },
     {
       "func": "frame_to_ip_mtu",
+      "purpose": "装置のレジスタが示すポートの MTU(フレームの長さ)を、IP の MTU に直して表示するための下請けの関数。HCA の立ち上げで、ポートの MTU を表示するときに使う。",
       "summary": "PMTU のフレーム長を IP の MTU に直す(`PORT_MTU_OVERHEAD` = 22 を引く)。",
       "args": {"frame": "フレーム長(PMTU の `admin_mtu` / `oper_mtu` / `max_mtu`)"},
       "ret": "IP の MTU。`frame` が 22 以下なら 0。",
@@ -286,6 +303,7 @@
     },
     {
       "func": "vport_enable_roce",
+      "purpose": "装置で RoCE を使えるようにするための下請けの関数。HCA の立ち上げで、リンクが上がった後に 1 度使い、これにより RoCE のパケットを送受信できるようになる。",
       "summary": "`MODIFY_NIC_VPORT_CONTEXT` で vport の `roce_en` を立てる(`field_select.roce_en` と `nic_vport_context.roce_en`)コマンドを待たずに進める。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順"},
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS`: まだ完了していない。`BFM_OK`: 成功。負: 失敗)。",
@@ -299,6 +317,7 @@
     },
     {
       "func": "vport_query_mac",
+      "purpose": "装置の MAC アドレスを FW から読むための下請けの関数。HCA の立ち上げで使い、読んだ MAC は RoCE のアドレスの登録(`set_roce_address()`)と、相手に送る接続のメッセージに使われる。",
       "summary": "`QUERY_NIC_VPORT_CONTEXT` で vport の `permanent_address`(`nic_vport_context` のビット 0x7b0 から 6 バイト)を読むコマンドを待たずに進め、完了したら MAC アドレスとして返す。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順", "mac": "[出力] MAC アドレス 6 バイト"},
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS`: まだ完了していない。`BFM_OK`: 読めた。負: 失敗)。",
@@ -313,6 +332,7 @@
     },
     {
       "func": "set_roce_address",
+      "purpose": "自分の IP アドレスから作った GID と MAC アドレスを、装置の GID の表に登録するための下請けの関数。HCA の立ち上げの終わり近くで使い、これにより自分の IP 宛ての RoCE v2 のパケットを受け、自分の IP から送れるようになる。",
       "summary": "`SET_ROCE_ADDRESS` で GID の表の 0 番に、`d->gid`(自分の IPv4 から作った RoCE v2 の GID)と `d->mac` を入れる(L3 の種類は IPv4、RoCE の版は v2)コマンドを待たずに進める。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "j": "このコマンドの手順"},
       "ret": "`mlx5_cmd_run()` の戻り値(`BFM_INPROGRESS`: まだ完了していない。`BFM_OK`: 成功。負: 失敗)。",
@@ -328,6 +348,7 @@
     },
     {
       "func": "mlx5_gid_from_ipv4",
+      "purpose": "IPv4 アドレスから、RoCE v2 で使う GID(IPv6 の形のアドレス)を作るための関数。HCA の立ち上げで自分の GID を作るときと、接続で相手の GID を作るときに使う。",
       "summary": "IPv4 アドレスから、IPv4 を写した IPv6 の形(`::ffff:a.b.c.d`)の GID を作る。",
       "args": {"ip": "IPv4 アドレス(ホストのバイト順)", "gid": "[出力] GID 16 バイト"},
       "ret": "なし",
@@ -341,6 +362,7 @@
     },
     {
       "func": "mlx5_hca_init_reset",
+      "purpose": "ポートの HCA の立ち上げと停止を、最初からやり直せる状態に戻すための関数。ポートの立ち上げ(`bfm_dev_step()`)が、`mlx5_hca_init_step()` を呼び始める前に呼ぶ。",
       "summary": "ポート `d` の立ち上げの状態(`s_hi[d->port]`)を最初(`H_START`)に戻し、停止の状態(`s_td[d->port]`。graceful から始める)も空にし、EQ のページ要求に答える手順を空にする(`mlx5_eq_reset()`)。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)"},
       "ret": "なし",
@@ -354,6 +376,7 @@
     },
     {
       "func": "mlx5_hca_init_step",
+      "purpose": "ポートの HCA を立ち上げ、RoCE で転送できる状態にするための関数(状態機械)。ポートの立ち上げ(`bfm_dev_step()`)が `BFM_OK` か失敗になるまで呼び続ける。終わると、EQ・PD・MKey ができ、リンクが上がり、自分の IP の GID が登録されていて、接続の準備に進める。",
       "summary": "HCA の立ち上げを、待つところまで進める(状態機械。状態は `s_hi[d->port].step`)。FW の版とコマンドの版を確かめ、FW の初期化待ち → コマンドキューの登録 → 10ms 待ち → FW の初期化待ち → `ENABLE_HCA` → ISSI → boot のページ(FW 用のページの区画もここで確保)→ `HOST_ENDIANNESS` → general / atomic / roce の能力 → init のページ → `INIT_HCA` の順に進める。その後、EQ(UAR と `CREATE_EQ`)・PD・MKey(自分用の全アドレス、公開メモリ用)を作り、ポートの MTU の設定・ポートを上げてリンクを待つ・MTU の表示・vport の `roce_en`・MAC と IP と GID の用意・`SET_ROCE_ADDRESS` を行う。最後に、FW が追加で求めるページに、要求が 100ms 来なくなるまで(上限 2 秒)EQ を見て答える。待つところ(FW の初期化・コマンドの完了・リンク・ページ要求)では `BFM_INPROGRESS` を返す。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)"},
       "ret": "`BFM_INPROGRESS`: 途中(また呼ぶ)。`BFM_OK`: 立ち上がった(済んだ後に呼んでも `BFM_OK`)。`BFM_E_HW`: 装置が見えない、コマンドの版が違う、ポートが Ethernet でない、コマンドの失敗など。`BFM_E_TIMEOUT`: FW の初期化やコマンドが時間切れ。`BFM_E_NOMEM`: FW 用のページの区画が取れない、または FW の求めるページが多すぎる。そのほか途中で呼ぶ関数の戻り値。",
@@ -660,6 +683,7 @@
     },
     {
       "func": "mlx5_hca_teardown",
+      "purpose": "ポートを止めるとき、FW に HCA を止めさせるための関数。停止の手順(`bfm_core.c` の `dev_stop_step()`)が、コマンドを片付けた(`mlx5_cmd_drain()`)後に、終わるまで呼び続ける。これを終えた後は FW にコマンドを出さない。",
       "summary": "`TEARDOWN_HCA` で FW を止めるコマンドを待たずに進める。まず graceful(profile 0)で出し、断られたら force(profile 1)で出す。済んだら `d->hca_enabled = 0` にする。状態(今の profile と出しているコマンド)は静的な `s_td[d->port]` に持つ。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)"},
       "ret": "`BFM_INPROGRESS`: まだ(また呼ぶ)。`BFM_OK`: 済んだ(`hca_enabled` が 0 のときと、graceful / force とも通らなかったときも)。",

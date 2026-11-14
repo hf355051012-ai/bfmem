@@ -4,6 +4,7 @@
   "functions": [
     {
       "func": "crc_table_init",
+      "purpose": "CRC16 を表を引いて求める方法(どの CPU でも使える)のための表を用意する関数。`crc_ready()` が最初に一度だけ呼び、作った表は `crc16_tab_upd()` などが引く。",
       "summary": "CRC16(T10-DIF、多項式 0x8BB7)の表 `s_crc_tab[8][256]` を作る。`s_crc_tab[0]` は 1 バイトずつの表、`s_crc_tab[k][n]` はバイト n の後に 0 が k バイト続くときの CRC(8 バイトずつ引くため)。",
       "args": {},
       "ret": "なし",
@@ -31,6 +32,7 @@
     },
     {
       "func": "xpow_mod",
+      "purpose": "PCLMULQDQ 命令で CRC16 を求めるときに、途中の値をデータの先の位置へ移すために掛ける定数を作る関数。`crc_ready()` が最初に一度だけ呼ぶ。",
       "summary": "x^n mod P(P = x^16 + 0x8BB7)を求める。1(x^0)から始めて n 回、1 ビット左へずらし、x^16 の項が立てば P を引く(0x18BB7 と XOR)。",
       "args": {"n": "指数"},
       "ret": "x^n mod P(16 ビット未満の多項式。ビット i が x^i の係数)。",
@@ -47,6 +49,7 @@
     },
     {
       "func": "cpu_has_clmul",
+      "purpose": "CRC16 を PCLMULQDQ 命令で速く求められるかを決めるために、CPU がその命令(と組で使う SSSE3)を持つかを調べる関数。`crc_ready()` が一度だけ呼び、持たない CPU では表の方法を使う。",
       "summary": "CPU が PCLMULQDQ(CPUID 1 の ecx[1])と SSSE3(ecx[9])の両方を持つかを、コンパイラの `<cpuid.h>` の `__get_cpuid()` で確かめる。",
       "args": {},
       "ret": "1: 両方ある。0: どちらかが無いか、CPUID 1 が読めない。",
@@ -59,6 +62,7 @@
     },
     {
       "func": "crc_ready",
+      "purpose": "CRC16 を求める前に、表・定数と、どちらの方法を使うかを用意しておくための関数。CRC16 を求める関数(`crc16()` など)が毎回はじめに呼び、ポートの立ち上げ(`bfm_dif_init_step()`)でも先に呼んでおく。複数のコアから同時に呼ばれても、用意するのは一度だけ。",
       "summary": "CRC の表(`s_crc_tab`)と畳み込みの定数(`s_crc_k[i]` = x^(64·i) mod P、i = 1〜9)を一度だけ作り、PCLMULQDQ の方法を使うか(`s_crc_use_clmul` = `g_bfm_dif_clmul` が 0 でなく、CPU が持つ)を決める。作り終えた旗(`s_crc_ready`)を acquire で読み、立っていなければ鍵 `s_crc_lock` を取って、もう一度確かめてから作り、旗を release で立てる。",
       "args": {},
       "ret": "なし",
@@ -80,6 +84,7 @@
     },
     {
       "func": "crc16_tab_upd",
+      "purpose": "表を引く方法で、CRC16 を途中の値から続けて求めるための関数。`crc16()` が短いデータや PCLMULQDQ 命令の無い CPU で使い、`crc16_clmul()` が最後の端数の処理に使う。",
       "summary": "表の方法で、CRC の途中の値 `crc` から続けて `p` の `len` バイトを進める。8 バイトずつ表を引き(slice-by-8)、残りを 1 バイトずつ処理する。",
       "args": {"crc": "途中の CRC の値(最初は 0)", "p": "データ", "len": "バイト数"},
       "ret": "進めた後の CRC の値。",
@@ -99,6 +104,7 @@
     },
     {
       "func": "crc_fold",
+      "purpose": "`crc16_clmul()` の下請けで、128 ビットにまとめた途中の値を、データの先の位置へ移して次のデータと足し合わせられる形にするための関数。",
       "summary": "128 ビットの多項式 `x` を D ビット先へ畳み込む: x·x^D ≡ xh·kh ⊕ xl·kl(mod P)。`kh` = `k` の上の 64 ビット(x^(D+64) mod P)、`kl` = 下の 64 ビット(x^D mod P)、`xh` / `xl` = `x` の上 / 下の 64 ビット。キャリーなし乗算(`_mm_clmulepi64_si128`)2 回と XOR。",
       "args": {"x": "畳み込む値(128 ビット。ビット i が x^i の係数)", "k": "定数の組(上 = x^(D+64) mod P、下 = x^D mod P)"},
       "ret": "畳み込んだ値(80 ビット未満なので 128 ビットに収まる)。",
@@ -110,6 +116,7 @@
     },
     {
       "func": "crc16_clmul",
+      "purpose": "64 バイト以上のデータの CRC16 を、PCLMULQDQ 命令で表の方法より速く求めるための関数。`crc16()` が、CPU がその命令を持つときに使う。",
       "summary": "PCLMULQDQ の方法で `p` の `len` バイト(64 以上)の CRC16 を求める。16 バイトずつバイト順を逆にして読み(先頭のバイトの最上位ビットが x^127)、最初の 64 バイトを 4 本の並び a0〜a3 にする。残りを 64 バイトずつ、4 本をそれぞれ 512 ビット先へ畳み込んで(`crc_fold()`、定数 x^576・x^512)次の 64 バイトを XOR する。a0·x^384 ⊕ a1·x^256 ⊕ a2·x^128 ⊕ a3 で 1 本にまとめ、残りの 16 バイトずつを 128 ビット先へ畳み込んで足す。最後に x^64 mod P との乗算 2 回で 64 ビットの Z まで縮め、Z の 8 バイト(上から)を表で進めて CRC(= Z·x^16 mod P)にし、16 で割った余りのバイトを表で続ける。",
       "args": {"p": "データ(境界は揃っていなくてよい)", "len": "バイト数(64 以上)"},
       "ret": "CRC16 の値(表の方法と同じ)。",
@@ -135,6 +142,7 @@
     },
     {
       "func": "crc16",
+      "purpose": "T10-DIF の guard(データ 512 バイトの CRC16)を求めるための、このファイルの共通の入口。PI を作る `bfm_dif_make_pi()` と、CPU で検査・PI の付加をする `sw_block()` が使い、CPU に合った速い方法が自動で選ばれる。",
       "summary": "`p` の `len` バイトの CRC16(T10-DIF: 多項式 0x8BB7、初期値 0、反転なし)を求める。PCLMULQDQ の方法を使う(`s_crc_use_clmul`)ときで、`len` が 64 以上なら `crc16_clmul()`、そうでなければ表の方法(`crc16_tab_upd()`)。",
       "args": {"p": "データ", "len": "バイト数"},
       "ret": "CRC16 の値(どちらの方法でも同じ)。",
@@ -152,6 +160,7 @@
     },
     {
       "func": "bfm_dif_crc16",
+      "purpose": "試験のプログラム(`bfmem_test crc`)が、ライブラリが実際に使う方法の CRC16 を、正しさの確かめと速さの測定に使うための関数。",
       "summary": "試験用(`bfmem_test crc`): 使う方法(`crc16()`)で `p` の `len` バイトの CRC16 を返す。",
       "args": {"p": "データ", "len": "バイト数"},
       "ret": "CRC16 の値。",
@@ -164,6 +173,7 @@
     },
     {
       "func": "bfm_dif_crc16_table",
+      "purpose": "試験のプログラム(`bfmem_test crc`)が、PCLMULQDQ 命令の方法の結果と比べる基準として、表の方法だけで CRC16 を求めるための関数。",
       "summary": "試験用(`bfmem_test crc`): 表の方法だけで `p` の `len` バイトの CRC16 を返す(PCLMULQDQ の方法と比べるため)。",
       "args": {"p": "データ", "len": "バイト数"},
       "ret": "CRC16 の値。",
@@ -177,6 +187,7 @@
     },
     {
       "func": "bfm_dif_crc_clmul",
+      "purpose": "試験のプログラム(`bfmem_test crc`)が、この CPU で CRC16 に PCLMULQDQ 命令を使っているかを知り、表示するための関数。",
       "summary": "試験用(`bfmem_test crc`): CRC16 に PCLMULQDQ の方法を使っているか(`s_crc_use_clmul`)を返す。",
       "args": {},
       "ret": "1: 使っている。0: 表の方法だけ。",
@@ -189,6 +200,7 @@
     },
     {
       "func": "bfm_dif_make_pi",
+      "purpose": "アプリケーションが、PI つきのデータ(検査する操作で送るブロック)を自分で用意するための関数。データ 512 バイトと tag の値を渡すと、そのデータの後ろに置く 8 バイトの PI が得られる。立ち上げの前でも使える。",
       "summary": "データ 512 バイトの PI(8 バイト)を作る。`pi[0..1]` = データの CRC16、`pi[2..3]` = `app_tag`、`pi[4..7]` = `ref_tag`(どれもビッグエンディアン)。",
       "args": {"data": "データ 512 バイト", "app_tag": "app tag", "ref_tag": "ref tag", "pi": "作った PI を入れる先(8 バイト)"},
       "ret": "なし",
@@ -201,6 +213,7 @@
     },
     {
       "func": "make_plan",
+      "purpose": "転送の起動の前に、アプリケーションが指定した DIF の操作(検査・付け替え・付加・削除)を、両側のブロックの形・tag・検査するものに直すための関数。`prepare()` が使い、その後の処理(`sw_block()`・`build_umr()` など)は直した形を見て進める。",
       "summary": "操作 `d` を「入る側・出る側」の形(`struct plan`)に直す。両側の PI の有無とブロックの大きさ(520 か 512)、入る側の tag と出る側の tag、検査するもの(INSERT では 0)を決める。CHECK_SWAP では出る側の tag を `new_app_tag` / `new_ref_tag` にする。",
       "args": {"d": "操作", "p": "結果を入れる先"},
       "ret": "`BFM_OK`。`BFM_E_PARAM`: `d->op` が知らない値。",
@@ -221,6 +234,7 @@
     },
     {
       "func": "set_err",
+      "purpose": "検査で誤りを見つけたときに、アプリケーションに返す誤りの情報(どのブロックの何が、どう違ったか)を記録するための関数。`sw_block()` と `finish()` が使う。",
       "summary": "誤りの情報(ブロックの番号・種類・あるべき値・実際の値)を `e` に入れる。",
       "args": {"e": "入れる先(NULL なら何もしない)", "block": "ブロックの番号", "what": "`BFM_DIF_CHK_GUARD` / `APP` / `REF`", "expected": "あるべき値", "actual": "実際の値"},
       "ret": "なし",
@@ -233,6 +247,7 @@
     },
     {
       "func": "sw_block",
+      "purpose": "CPU で形を変える方法(`BFM_DIF_SW`)で、1 ブロックごとに PI を検査し、送り先の形(PI の付け外し・tag の置き換え)に変えるための関数。write では送る前に `issue()` が、read では受けた後に `finish()` が使う。",
       "summary": "SW: 1 ブロックを入る側の形 `in` から出る側の形 `out` に変える。入る側に PI があれば、`check` の指定どおりに guard(CRC)・ref tag(`in_ref + i`)・app tag の順に検査する。出る側の PI は NIC の署名オフロードと同じ決め方で作る: guard は入る側にあれば写し、無ければ計算する。app tag・ref tag は、入る側に PI があり値が同じなら入る側のバイトを写し、違えば新しい値(ref tag は `out_ref + i`)を書く。",
       "args": {"p": "入る側・出る側の形", "in": "入る側のブロック", "out": "出る側のブロックを書く先(`in` と同じでもよい)", "i": "先頭からのブロックの番号", "e": "誤りの情報を入れる先(NULL でもよい)"},
       "ret": "`BFM_OK`。`BFM_E_DIF`: 検査で誤りを見つけた(`e` に入れる)。",
@@ -274,6 +289,7 @@
     },
     {
       "func": "bsf_inl",
+      "purpose": "`build_umr()` の下請けで、NIC の署名オフロードに、片側(メモリ側かワイヤ側)の PI の作り方と検査のしかた(CRC の種類・tag の値・ブロックごとの増やし方)を伝える部分を書くための関数。",
       "summary": "BSF の inline の部分(16 バイト。Linux の `mlx5_fill_inl_bsf()`)を書く: 有効と REFRESH、app tag、最初の ref tag、guard = CRC、ブロックの繰り返し、ref tag をブロックごとに 1 増やす、app tag は全ビットを比べる。",
       "args": {"p": "書く先(16 バイト)", "app": "app tag", "ref": "最初のブロックの ref tag"},
       "ret": "なし",
@@ -286,6 +302,7 @@
     },
     {
       "func": "build_umr",
+      "purpose": "NIC の署名オフロード(`BFM_DIF_HW`)で転送するときに、中継バッファの面と相手のメモリの間でブロックの形を NIC に変えさせるための、署名つき MKey を張る要求(UMR)を組む関数。`hw_post()` が分ごとに使う。",
       "summary": "署名つき MKey を張る UMR の WQE(4 WQEBB = 256 バイト)を組む。メモリ側 = 中継バッファの面(write では入る側、read では出る側)、ワイヤ側 = 相手のメモリ。\n\n* [0..15] 制御(UMR、fence = `c->dev->umr_fence`、imm = MKey)\n* [16..63] UMR の制御: flags = inline | 空きを確かめる、変換 4 octword、BSF 4 octword、mkey_mask(Linux の `sig_mkey_mask()`)\n* [64..127] MKey: KLM・LR / LW / UMR_EN、REMOTE_INVAL・sigerr の印・BSF あり・PD、長さ = メモリ側のバイト数\n* [128..191] 変換: メモリ側に PI が無ければ KLM 1 個、あれば 520 バイトおきの strided block(データ 512 と PI 8 の 2 項目)\n* [192..255] BSF: basic(検査するバイト、同じ形なら写すバイト、ブロックの大きさ 512、データのバイト数、PSV)・ext(0)・ワイヤ側とメモリ側の inline",
       "args": {"c": "接続", "s": "その接続の署名の資源", "w": "WQE を組む作業域(256 バイト)", "p": "入る側・出る側の形", "is_read": "1 = read、0 = write", "k": "ブロック数", "first": "全体の中での最初のブロックの番号(ref tag に足す)", "va": "中継バッファの面の先頭(DMA のアドレス)"},
       "ret": "なし",
@@ -320,6 +337,7 @@
     },
     {
       "func": "build_linv",
+      "purpose": "署名オフロードで前の分に使った署名つき MKey を、次の分で張り直せるように空きに戻す要求を組むための関数。`hw_post()` が、その面で前に MKey を張っていたときに使う。",
       "summary": "署名つき MKey を空きに戻す UMR の WQE(2 WQEBB。Linux の LOCAL_INV)を組む: UMR の制御は inline と mkey_mask = FREE だけ、MKey の status = 空き。",
       "args": {"c": "接続", "s": "その接続の署名の資源", "w": "WQE を組む作業域(128 バイト)"},
       "ret": "なし",
@@ -333,6 +351,7 @@
     },
     {
       "func": "build_psv",
+      "purpose": "署名オフロードで、その分の最初のブロックの tag の値を NIC に知らせる要求(SET_PSV)を組むための関数。`hw_post()` が、メモリ側とワイヤ側の 2 つについて使う。",
       "summary": "SET_PSV の WQE(1 WQEBB)を組む。PSV に最初のブロックの app tag と ref tag を入れる(PI の無い側は 0)。通知は求めず、fence = INITIATOR_SMALL、solicited を付ける(Linux の `handle_psv()` と同じ)。",
       "args": {"c": "接続", "w": "WQE を組む作業域(64 バイト)", "psv": "PSV の番号", "pi": "その側に PI があるか", "app": "app tag", "ref": "最初のブロックの ref tag"},
       "ret": "なし",
@@ -347,6 +366,7 @@
     },
     {
       "func": "hw_post",
+      "purpose": "署名オフロード(`BFM_DIF_HW`)で、転送の 1 つの分を NIC に運ばせるための関数。`issue()` が使う。待たずに戻るので、NIC が運ぶ間に CPU はもう一方の面を扱える。",
       "summary": "HW: 中継バッファの面 `si` の `k` ブロック(メモリ側の形、先頭 `va`)と、相手の公開メモリ + `off`(ワイヤ側の形)の間で、署名オフロードを通して運ぶ WQE を出す(待たない)。(前に張っていれば MKey を空きに戻す UMR)→ 張る UMR → SET_PSV(メモリ側・ワイヤ側)→ RDMA(手元 = 署名つき MKey のアドレス 0、fence = INITIATOR_SMALL、完了通知あり)。",
       "args": {"c": "接続", "si": "面の番号(0 か 1)。その面の署名つき MKey と PSV を使う", "p": "入る側・出る側の形", "is_read": "1 = read、0 = write", "off": "相手の公開メモリの先頭からのオフセット", "k": "ブロック数", "first": "全体の中での最初のブロックの番号", "va": "中継バッファの面の先頭(DMA のアドレス)"},
       "ret": "`BFM_OK`: 出した。そのほか `bfm_ops_post()` の戻り値。",
@@ -378,6 +398,7 @@
     },
     {
       "func": "sw_post",
+      "purpose": "CPU で形を変える方法(`BFM_DIF_SW`)で、中継バッファの面と相手のメモリの間で 1 つの分を普通の RDMA で運ばせるための関数(形を変えるのは前後で CPU が行う)。`issue()` が使い、待たずに戻る。",
       "summary": "SW: 中継バッファの面(先頭 `va`)と相手の公開メモリ + `off` の間で `len` バイトを運ぶ RDMA を出す(待たない。完了通知あり)。",
       "args": {"c": "接続", "is_read": "1 = read、0 = write", "off": "相手の公開メモリの先頭からのオフセット", "va": "中継バッファの面の先頭(DMA のアドレス)", "len": "バイト数"},
       "ret": "`bfm_ops_post()` の戻り値。",
@@ -391,6 +412,7 @@
     },
     {
       "func": "slot_buf",
+      "purpose": "接続の DIF 用の中継バッファのうち、指定した面(2 つに分けたうちの 1 つ)の先頭を得るための関数。`issue()` と `finish()` が使う。",
       "summary": "接続 `c` の DIF 用の中継バッファの面 `si` の先頭(CPU のポインタ)を返す。",
       "args": {"c": "接続", "si": "面の番号(0 か 1)"},
       "ret": "`c->dif_buf + si × c->dif_slot_size`。",
@@ -402,6 +424,7 @@
     },
     {
       "func": "issue",
+      "purpose": "DIF の転送を中継バッファの面の大きさずつの分に切って運ぶとき、次の分を用意して NIC に出すための関数。`progress()` が、空いている面があるときに使う。",
       "summary": "転送の次の分を用意して出す。面 = 出した分の数 % 2。分の大きさは残りと 1 面のブロック数の小さいほう。write は `src` から面へ用意する(SW は `sw_block()` で検査・PI の付け外し、HW は写すだけ)。そのあと HW は `hw_post()`、SW は `sw_post()` で RDMA を出し、その分の最後の WQE の次の位置(`end_pc`)を覚える。",
       "args": {"c": "接続", "j": "その接続の転送"},
       "ret": "`BFM_OK`: 出した。`BFM_E_DIF`: SW の write で検査の誤り(この分は送らない。`j->err` に中身)。そのほか `hw_post()` / `sw_post()` の戻り値。",
@@ -431,6 +454,7 @@
     },
     {
       "func": "finish",
+      "purpose": "NIC が運び終えた分を仕上げるための関数。read では受けたブロックをアプリケーションのバッファへ(CPU の方法では検査して形を変えながら)写し、署名オフロードでは NIC が見つけた誤りを誤りの情報にする。`progress()` が、済んだ分を出した順に使う。",
       "summary": "済んだ分(仕上げた分の数 % 2 の面)を仕上げる。HW は、その面に SIG_ERR が来ていれば、MKey の `sigerr_count` を進め、誤りの位置(520 で割ったブロック)と種類を `j->err` に入れる。read は面から `dst` へ(SW は `sw_block()` で検査・PI の付け外し、HW は誤りの前のブロックまで写す)。前に失敗していれば、署名の誤りの後始末だけをする。",
       "args": {"c": "接続", "j": "その接続の転送"},
       "ret": "`BFM_OK`。`BFM_E_DIF`: この分で検査の誤り(`j->err` に中身。前に失敗していなければ)。",
@@ -470,6 +494,7 @@
     },
     {
       "func": "progress",
+      "purpose": "DIF の転送を、待たずに進められるところまで進めるための関数。`start()` と `bfm_dif_poll()` が呼び、転送が進むのはこの中だけ。",
       "summary": "転送を進める(待たない)。来ている CQE を `bfm_ops_reap()` で全部拾い、RDMA が済んだ分を出した順に `finish()` で仕上げ、失敗が無ければ空いた面で次の分を `issue()` で出す。出した分が全部済み、全部出し終わったか失敗していれば、転送を終わり(`JOB_DONE`)にする。",
       "args": {"c": "接続", "j": "その接続の転送"},
       "ret": "なし(結果は `j->state` と `j->rc`)",
@@ -495,6 +520,7 @@
     },
     {
       "func": "bfm_dif_init_reset",
+      "purpose": "ポートの立ち上げを始めるときに、そのポートの T10-DIF の準備を最初から進められるようにするための関数。`bfm_dev_step()` が、立ち上げの最初に呼ぶ。",
       "summary": "ポート `d` の T10-DIF の準備の状態(`s_di[d->port]`。状態・作っている接続の枠と面・MKey の鍵の起点・出しているコマンド)を 0 で埋め、最初(`D_START`)に戻す。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)"},
       "ret": "なし",
@@ -506,6 +532,7 @@
     },
     {
       "func": "bfm_dif_init_step",
+      "purpose": "ポートの立ち上げの途中で、そのポートの接続が T10-DIF の転送を使えるように準備するための関数。`bfm_dev_step()` が、済むまで呼び続ける。装置に署名オフロードがあって資源を作れれば、そのポートで `BFM_DIF_HW` が使えるようになる(無ければ `BFM_DIF_SW` だけ)。",
       "summary": "ポート `d` の T10-DIF の準備を、待つところまで進める(状態は `s_di[d->port].step`)。そのポートの接続(`d->conn[0〜d->nconn-1]`)の転送の状態と署名の資源の表を空にし、CRC の表を作る(`crc_ready()`)。装置に署名オフロード(`d->sho`)があれば、そのポートの接続の枠(`d->nconn` 個)・面ごとに PSV 2 個(`mlx5_create_psv2()`)と署名つき MKey 1 個(`mlx5_create_sig_mkey()`)を作り、全部作れたらそのポートで `BFM_DIF_HW` を使えるようにする(`s_hw[d->port] = 1`)。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`。`sho`・`nconn`・`conn` を使う)"},
       "ret": "`BFM_INPROGRESS`: 途中(FW のコマンドの完了を待っている。もう一度呼ぶと先へ進む)。`BFM_OK`: 済んだ(資源を作れなくても `BFM_DIF_SW` だけで続ける)。",
@@ -586,6 +613,7 @@
     },
     {
       "func": "bfm_dif_attach",
+      "purpose": "接続ができたときに、その接続で DIF の転送を始められるようにするための関数。`bfm_ops_attach()` が呼ぶ。前の転送の残りを消し、署名オフロードの誤りの完了がどちらの面のものかを見分けられるようにする。",
       "summary": "接続ができたときに、その接続の DIF の転送の状態と面ごとの署名の誤りの記録を空にし、面ごとの署名つき MKey を `c->sig_mkey[]` に入れる(`poll_one()` が SIG_ERR の CQE の MKey で面を見分けるため)。",
       "args": {"c": "接続ができた接続"},
       "ret": "なし",
@@ -602,6 +630,7 @@
     },
     {
       "func": "bfm_dif_hw_supported",
+      "purpose": "アプリケーションが、NIC の署名オフロード(`BFM_DIF_HW`)を指定できるかを確かめるための関数。使えないときは CPU で形を変える `BFM_DIF_SW` を使う。ポートの立ち上げが済む前は、使えないと答える。",
       "summary": "`BFM_DIF_HW` を使えるかを返す。使う(`g_bfm_dev[p].used` が 0 でない)全部のポートで署名の資源を用意できた(`s_hw[p]` が 0 でない)ときだけ 1。",
       "args": {},
       "ret": "1: 使う全部のポートで使える。0: 使えないポートがある(装置に署名オフロードが無い、または資源を作れなかった)、または使うポートが無い(`bfm_run()` で立ち上げる前など)。",
@@ -622,6 +651,7 @@
     },
     {
       "func": "prepare",
+      "purpose": "`start()` の下請けで、DIF の転送を起動してよいか(引数・接続・相手のメモリの範囲・オフロードを使えるか)を確かめ、転送に使うブロックの形を決めるための関数。",
       "summary": "起動の引数を確かめ、操作を `make_plan()` で入る側・出る側の形に直す。相手の公開メモリに、相手側の形で `n` ブロックが収まるかも確かめる。",
       "args": {"c": "接続", "off": "相手の公開メモリの先頭からのオフセット", "buf": "src か dst", "n": "ブロック数", "d": "操作", "is_read": "1 = read、0 = write", "p": "結果を入れる先"},
       "ret": "`BFM_OK`。`BFM_E_PARAM`: 引数が不正(NULL・0 ブロック・知らない op / mode・範囲外・DIF 用の中継バッファの 1 面が 520 バイトより小さい)。`BFM_E_NOTSUP`: `BFM_DIF_HW` だが接続のポートでオフロードを使えない。`BFM_E_STATE`: 接続が使えない。",
@@ -642,6 +672,7 @@
     },
     {
       "func": "start",
+      "purpose": "`bfm_dif_write_start()` と `bfm_dif_read_start()` が共通に使う、DIF の転送を起動するための関数。起動すると最初の分が NIC に出され、その後は `bfm_dif_poll()` / `bfm_dif_wait()` で進める。",
       "summary": "転送を起動する。`prepare()` で引数を確かめ、その接続で前の転送が終わって結果も受け取られていれば、転送の状態(`s_job[c->index]`)を作って `JOB_RUN` にし、`progress()` で最初の分(2 面まで)を出す。",
       "args": {"c": "接続", "off": "相手の公開メモリの先頭からのオフセット", "buf": "write なら src、read なら dst", "n": "ブロック数", "d": "操作(中身を写すので、戻った後に変えてよい)", "is_read": "1 = read、0 = write"},
       "ret": "`BFM_OK`: 起動した。`BFM_E_BUSY`: 前の転送が終わっていない(または結果を受け取っていない)。そのほか `prepare()` の戻り値。",
@@ -659,6 +690,7 @@
     },
     {
       "func": "bfm_dif_write_start",
+      "purpose": "アプリケーションが、T10-DIF の形を変える write を、終わるのを待たずに始めるための関数。待つ間にほかの処理をしたいときに使い、`bfm_dif_poll()` か `bfm_dif_wait()` で進めて結果を受け取る。",
       "summary": "`bfm_dif_write()` を起動だけして戻る(`start(c, off, src, nblocks, dif, 0)`)。結果は `bfm_dif_poll()` / `bfm_dif_wait()` で受け取る。",
       "args": {"c": "接続", "off": "相手の公開メモリの先頭からのオフセット", "src": "入る側の形のブロックの並び(CHECK・SWAP・DELETE は 520 バイトおき、INSERT は 512 バイトおき)", "nblocks": "ブロック数", "dif": "操作"},
       "ret": "`start()` の戻り値(起動できたかどうかだけ)。",
@@ -671,6 +703,7 @@
     },
     {
       "func": "bfm_dif_read_start",
+      "purpose": "アプリケーションが、T10-DIF の形を変える read を、終わるのを待たずに始めるための関数。待つ間にほかの処理をしたいときに使い、`bfm_dif_poll()` か `bfm_dif_wait()` で進めて結果を受け取る。",
       "summary": "`bfm_dif_read()` を起動だけして戻る(`start(c, off, dst, nblocks, dif, 1)`)。結果は `bfm_dif_poll()` / `bfm_dif_wait()` で受け取る。",
       "args": {"c": "接続", "off": "相手の公開メモリの先頭からのオフセット", "dst": "出る側の形で置く先(CHECK・SWAP・INSERT は 520 バイトおき、DELETE は 512 バイトおき)", "nblocks": "ブロック数", "dif": "操作"},
       "ret": "`start()` の戻り値(起動できたかどうかだけ)。",
@@ -683,6 +716,7 @@
     },
     {
       "func": "bfm_dif_poll",
+      "purpose": "アプリケーションが、`bfm_dif_write_start()` / `bfm_dif_read_start()` で始めた転送を待たずに進め、終わったかどうかと結果を知るための関数。終わるまで繰り返し呼ぶ。",
       "summary": "起動した転送を、待たずに進める(`progress()`)。まだ途中なら `BFM_DIF_INPROGRESS`。終わっていれば結果を 1 回だけ返し、次の転送を起動できる状態に戻す。",
       "args": {"c": "接続", "err": "`BFM_E_DIF` のときに誤りの情報を入れる先(NULL でもよい)"},
       "ret": "`BFM_DIF_INPROGRESS`(= 1): まだ途中。`BFM_OK`: 全部済んだ(動いている転送が無いときも)。`BFM_E_PARAM`: c が NULL。負: 失敗(`BFM_E_DIF` なら `*err` に場所と中身。ほかにエラー完了の値・`BFM_E_STATE` など)。",
@@ -701,6 +735,7 @@
     },
     {
       "func": "bfm_dif_wait",
+      "purpose": "アプリケーションが、始めた DIF の転送が終わるまで待って結果を受け取るための関数。進まなくなったときは、決めた時間で時間切れにして戻る。",
       "summary": "起動した転送が終わるまで `bfm_dif_poll()` を呼び続け、結果を返す。4096 回ごとに時刻を見て、`g_bfm_op_timeout_ms` の間まったく進まなければ(`sq_done` が変わらなければ)時間切れにする。",
       "args": {"c": "接続", "err": "`BFM_E_DIF` のときに誤りの情報を入れる先(NULL でもよい)"},
       "ret": "`bfm_dif_poll()` の戻り値のうち `BFM_DIF_INPROGRESS` 以外。`BFM_E_TIMEOUT`: 進まない(接続をエラーにし、転送を捨てる)。`BFM_E_PARAM`: c が NULL。",
@@ -726,6 +761,7 @@
     },
     {
       "func": "bfm_dif_write",
+      "purpose": "アプリケーションが、T10-DIF の保護情報(PI)を検査・付け替え・付加・削除しながら、相手の公開メモリへブロックを書くための関数。終わるまで待ってから結果を返す(待たずに始めるには `bfm_dif_write_start()`)。",
       "summary": "`src` の `nblocks` ブロック(入る側の形)を、T10-DIF の操作 `dif` で形を変えて、相手の公開メモリ + `off` へ書き、終わるまで待つ。`bfm_dif_write_start()` で起動し、`bfm_dif_wait()` で待つ。",
       "args": {"c": "接続", "off": "相手の公開メモリの先頭からのオフセット", "src": "入る側の形のブロックの並び(CHECK・SWAP・DELETE は 520 バイトおき、INSERT は 512 バイトおき)", "nblocks": "ブロック数", "dif": "操作", "err": "誤りの情報を入れる先(NULL でもよい)"},
       "ret": "`BFM_OK`。`BFM_E_DIF`: 検査の誤り。そのほか `bfm_dif_write_start()`・`bfm_dif_wait()` の戻り値(前の転送が終わっていなければ `BFM_E_BUSY`)。",
@@ -740,6 +776,7 @@
     },
     {
       "func": "bfm_dif_read",
+      "purpose": "アプリケーションが、相手の公開メモリからブロックを読み、T10-DIF の保護情報(PI)を検査・付け替え・付加・削除して自分のバッファに置くための関数。終わるまで待ってから結果を返す(待たずに始めるには `bfm_dif_read_start()`)。",
       "summary": "相手の公開メモリ + `off` から `nblocks` ブロック(入る側の形)を読み、T10-DIF の操作 `dif` で形を変えて `dst` に置き、終わるまで待つ。`bfm_dif_read_start()` で起動し、`bfm_dif_wait()` で待つ。",
       "args": {"c": "接続", "off": "相手の公開メモリの先頭からのオフセット", "dst": "出る側の形のブロックを置く先(CHECK・SWAP・INSERT は 520 バイトおき、DELETE は 512 バイトおき)", "nblocks": "ブロック数", "dif": "操作", "err": "誤りの情報を入れる先(NULL でもよい)"},
       "ret": "`BFM_OK`。`BFM_E_DIF`: 検査の誤り(誤りの前のブロックまで dst に書いてある)。そのほか `bfm_dif_read_start()`・`bfm_dif_wait()` の戻り値。",

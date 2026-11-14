@@ -4,6 +4,7 @@
   "functions": [
     {
       "func": "conn_usable",
+      "purpose": "データ経路の関数が、操作を出す前やアプリケーションに答える前に、その接続で転送してよいかを見分けるための下請け関数。`check_range()`・`bfm_flush()`・`bfm_is_up()` が使う。",
       "summary": "接続がデータ経路で使えるかを調べる。`c` が NULL でなく、状態が `BFM_CS_UP` であること。",
       "args": {"c": "調べる接続(NULL 可)"},
       "ret": "1: 使える。0: 使えない(NULL、または `BFM_CS_UP` でない)。",
@@ -15,6 +16,7 @@
     },
     {
       "func": "map_syndrome",
+      "purpose": "エラー完了の理由の番号(NIC が CQE に書く syndrome)を、アプリケーションに返す戻り値(相手が拒否した・相手に届かない・そのほか)に分けるための下請け関数。`poll_one()` がエラー完了を返すときに使う。",
       "summary": "エラー完了の CQE の syndrome を、ライブラリの戻り値に直す。",
       "args": {"synd": "CQE の syndrome(byte 55)"},
       "ret": "`BFM_E_REMOTE`: 0x12・0x13・0x14(相手が拒否)。`BFM_E_RETRY`: 0x15・0x16(再送が尽きた)。`BFM_E_CQE`: そのほか。",
@@ -30,6 +32,7 @@
     },
     {
       "func": "syndrome_str",
+      "purpose": "エラー完了を表示するときに、理由の番号(syndrome)を人が読める名前にするための下請け関数。`poll_one()` が使う。",
       "summary": "エラー完了の CQE の syndrome を、表示用の名前(と短い説明)に直す。",
       "args": {"synd": "CQE の syndrome(byte 55)"},
       "ret": "syndrome の名前の文字列(静的な文字列)。知らない値は `\"?\"`。",
@@ -54,6 +57,7 @@
     },
     {
       "func": "poll_one",
+      "purpose": "送った操作の完了を NIC の完了キュー(CQ)から 1 つ受け取るための、データ経路の中心の下請け関数。完了を待つ関数・送る場所の空きを待つ関数・多重度つきの操作の刈り取りが、すべてこれを通して完了を知る。拾った完了は、どこまで済んだかの記録・エラーの記録・多重度つきの操作の枠への結果の受け渡しに反映される。",
       "summary": "CQ から CQE を 1 個読む。CQ の消費位置(`cq_cc`)の CQE の owner ビットと opcode を見て、新しい CQE が無ければ 0 を返す。あれば消費位置を進めて CQ の doorbell record に書く。署名の誤り(SIG_ERR)なら、CQE の MKey でどちらの面の誤りかを見分け、面ごとに数えて中身を覚え、2 を返す(WQE の完了ではない)。CQE の WQE カウンタから、完了した WQE の位置 `pc` を求める。エラー完了なら syndrome を記録し、接続を `BFM_CS_ERROR` にし、その WQE が多重度つきの操作なら `bfm_async_done()` にエラーを渡す。正常な完了なら、`pc` の WQE までを済んだ扱いにし(`sq_done` を進める)、応答データを CQE に抱えていればその CQE を `last_scat` に覚え、その WQE が多重度つきの操作なら `bfm_async_done()` に完了を渡す。",
       "args": {"c": "完了を拾う接続"},
       "ret": "1: 正常な完了を 1 個拾った。2: 署名の誤り(SIG_ERR)の CQE を拾った(WQE の完了ではない)。0: まだ CQE が無い。負: エラー完了(`map_syndrome()` の値。`BFM_E_REMOTE` / `BFM_E_RETRY` / `BFM_E_CQE`)。",
@@ -94,6 +98,7 @@
     },
     {
       "func": "wait_done",
+      "purpose": "同期の転送(`bfm_write()`・`bfm_read()`・atomic・`bfm_flush()`)が、出した操作が済むまで待つための下請け関数。時間切れの上限つきで待ち、済んだか・失敗したか・時間切れかを返す。",
       "summary": "SQ の位置 `target`(WQEBB の位置)まで済む(`sq_done` が `target` に達する)まで、`poll_one()` で完了を拾い続ける。`g_bfm_op_timeout_ms` を過ぎたら接続をエラーにして時間切れを返す。",
       "args": {"c": "待つ接続", "target": "済むのを待つ SQ の位置(WQEBB 単位。普通は `c->qp.sq_pc`)"},
       "ret": "`BFM_OK`: `target` まで済んだ。`BFM_E_TIMEOUT`: 時間切れ。そのほか負: エラー完了(`poll_one()` の値)。",
@@ -116,6 +121,7 @@
     },
     {
       "func": "post",
+      "purpose": "組み終えた WQE(NIC への 1 つの操作の指示)を NIC に渡して実行させるための下請け関数。データ経路で操作を出す関数はすべてこれを通す。BlueFlame が使えれば、指示を 1 回の書き込みで NIC へ届けて遅延を縮める。",
       "summary": "組み終えた WQE(`w`、`bbs` 個の WQEBB)を SQ のリングへ写し、doorbell record を進めて、ドアベルを鳴らす。SQ に空きが無ければ、完了を拾って空くのを待つ。WQE が BlueFlame の窓に収まれば WQE 本体を窓へ書き、収まらない(または BlueFlame が無い)ときは先頭 8 バイトだけを UC のドアベルへ書く。最後に窓の面を切り替える。",
       "args": {"c": "出す接続", "w": "組み終えた WQE(8 バイト単位の作業域)", "bbs": "WQE の大きさ(WQEBB = 64 バイトの数)"},
       "ret": "`BFM_OK`: 出した。そのほか負: 空きを待つ間の `poll_one()` のエラー完了の値、または `wait_done()` の失敗の値(エラー完了なら `poll_one()` の値、時間切れなら `BFM_E_TIMEOUT`)。",
@@ -150,6 +156,7 @@
     },
     {
       "func": "put32",
+      "purpose": "WQE を組む関数が、NIC が求めるビッグエンディアンで 32 ビットの値を書き込むための下請け関数。",
       "summary": "WQE の作業域の `byte_off` バイト目へ、32 ビットの値をビッグエンディアンで書く。",
       "args": {"w": "WQE の作業域", "byte_off": "書く位置(バイト)", "v": "書く値(ホスト順)"},
       "ret": "なし",
@@ -162,6 +169,7 @@
     },
     {
       "func": "put64",
+      "purpose": "WQE を組む関数が、NIC が求めるビッグエンディアンで 64 ビットの値を書き込むための下請け関数。",
       "summary": "WQE の作業域の `byte_off` バイト目へ、64 ビットの値をビッグエンディアンで書く。",
       "args": {"w": "WQE の作業域", "byte_off": "書く位置(バイト)", "v": "書く値(ホスト順)"},
       "ret": "なし",
@@ -174,6 +182,7 @@
     },
     {
       "func": "build_ctrl",
+      "purpose": "write・read・atomic・NOP の WQE を組む関数が、どの WQE にも要る先頭の制御の部分(操作の種類・大きさ・完了の通知を求めるか)を書くための下請け関数。",
       "summary": "WQE の制御セグメント(先頭 16 バイト)を組む。WQE の位置(今の `sq_pc` の下位 16 ビット)と opcode、QP の番号と DS の数、完了通知を求めるか(`MLX5_WQE_CTRL_CQ_UPDATE`)を書く。",
       "args": {"c": "出す接続", "w": "WQE の作業域", "opcode": "WQE の opcode(`MLX5_OPCODE_*`)", "ds": "WQE の大きさ(16 バイト単位)", "signaled": "0 以外なら完了通知(CQE)を求める"},
       "ret": "なし",
@@ -188,6 +197,7 @@
     },
     {
       "func": "build_raddr",
+      "purpose": "write・read・atomic の WQE を組む関数が、操作する相手のメモリの場所(アドレスと鍵)を書くための下請け関数。",
       "summary": "WQE の remote address セグメント(byte 16〜31)を組む。相手の公開メモリの先頭 + `off` と、相手の rkey を書く。",
       "args": {"c": "出す接続(相手の `raddr` / `rkey` を持つ)", "w": "WQE の作業域", "off": "相手の公開メモリの先頭からのオフセット"},
       "ret": "なし",
@@ -199,6 +209,7 @@
     },
     {
       "func": "build_dseg",
+      "purpose": "WQE を組む関数が、手元のどのバッファから送るか(またはどのバッファへ受けるか)を NIC に伝える部分を書くための下請け関数。",
       "summary": "WQE のデータセグメント(16 バイト)を `at` バイト目に組む。長さ、手元の lkey(接続のポートの `c->dev->lkey`)、手元のバッファの DMA アドレスを書く。",
       "args": {"c": "接続(ポートの装置 `c->dev` の lkey を使う)", "w": "WQE の作業域", "at": "データセグメントを置く位置(バイト)", "len": "データの長さ(バイト)", "addr": "手元のバッファの DMA アドレス"},
       "ret": "なし",
@@ -210,6 +221,7 @@
     },
     {
       "func": "build_write_inline",
+      "purpose": "短い write を、データを WQE の中に入れて 1 つの指示で送れるように組むための下請け関数。手元のバッファを NIC に読ませずに済むので、短い write の遅延が縮む。`bfm_write()`・`bfm_write_post()`・`bfm_ops_post_rw()`・`bfm_ops_build_write_inline()` が使う。",
       "summary": "データを WQE に埋め込んだ RDMA write の WQE を組む。WQE を 0 で埋め、制御セグメント(`MLX5_OPCODE_RDMA_WRITE`)と remote address セグメントを組み、byte 32 に inline セグメントの頭(`MLX5_INLINE_SEG` OR 長さ)、byte 36 からデータを置く。",
       "args": {"c": "出す接続", "w": "WQE の作業域", "off": "相手の公開メモリの先頭からのオフセット", "src": "書くデータ", "len": "データの長さ(バイト)", "signaled": "0 以外なら完了通知を求める"},
       "ret": "WQE の大きさ(WQEBB の数)。",
@@ -227,6 +239,7 @@
     },
     {
       "func": "check_range",
+      "purpose": "操作を出す前に、接続が使えるかと、相手の公開メモリの範囲に収まるかを確かめるための下請け関数。データ経路の関数が最初に呼び、だめなら操作を出さずにエラーを返す。",
       "summary": "操作の前に、接続が使えることと、相手の公開メモリの範囲 [off, off + len) が収まることを確かめる。",
       "args": {"c": "操作する接続(NULL 可)", "off": "相手の公開メモリの先頭からのオフセット", "len": "長さ(バイト)"},
       "ret": "`BFM_OK`: 使える。`BFM_E_STATE`: 接続が使えない。`BFM_E_PARAM`: 長さが 0、相手の公開メモリが 0、または範囲外。",
@@ -241,6 +254,7 @@
     },
     {
       "func": "bfm_ops_attach",
+      "purpose": "接続ができたとき(張り直しを含む)に、その接続でデータ経路を使い始められるように、転送の記録を新しい接続に合わせて初めに戻すための関数。`bfm_cm_conn_step()` が、接続を使える状態にする前に呼ぶ。",
       "summary": "接続ができた後に、データ経路の状態を初期化する。QP の番号を 8 ビットずらした値(`qpn8`)を求め、済んだ位置を今の SQ の位置に合わせ、通知なしの数・窓の面・記録した syndrome・`last_scat` を 0 にし、`bfm_dif_attach()` で T10-DIF の転送の状態を、`bfm_async_attach()` で多重度の枠を空にする。",
       "args": {"c": "接続ができた接続"},
       "ret": "`BFM_OK`(常に)。",
@@ -256,6 +270,7 @@
     },
     {
       "func": "bfm_ops_detach",
+      "purpose": "接続を片付けるときに、データ経路が持っていた完了キューの中への参照を捨てるための関数。`bfm_cm_conn_step()` が、QP を壊す前に呼ぶ。",
       "summary": "接続を返すときに、データ経路の状態を片付ける(`last_scat` を NULL にする)。",
       "args": {"c": "返す接続"},
       "ret": "なし",
@@ -267,6 +282,7 @@
     },
     {
       "func": "bfm_conn_mark_error",
+      "purpose": "NIC から QP のエラーの知らせ(EQ のイベント)が来たときに、その QP を使っている接続を使えない状態にするための関数。`mlx5_eq_poll()` が呼ぶ。これで、データ経路やアプリケーションが、その接続をもう使えないと分かる(張り直しは `bfm_reconnect()`)。",
       "summary": "ポート `d` の EQ のイベントで QP のエラーを知ったときに、そのポートの接続の中からその QP を使っている接続を探し(QP の番号はポートごとに別に振られる)、使えている(`BFM_CS_UP`)ものを表示して `BFM_CS_ERROR` にする。",
       "args": {"d": "イベントを受けたポートの装置(`g_bfm_dev[port]`)", "qpn": "エラーになった QP の番号", "why": "表示する理由"},
       "ret": "なし",
@@ -286,6 +302,7 @@
     },
     {
       "func": "bfm_ops_post_rw",
+      "purpose": "性能の試験(試験プログラムの bench)が、完了を待たずに write や read を続けて出して、NIC の速さを測るための関数。完了は `bfm_ops_poll1()` で 1 つずつ拾う。",
       "summary": "性能の試験用(試験プログラムの bench が使う)。write か read を、完了を待たずに 1 個出す。完了通知は必ず求めるので、完了は `bfm_ops_poll1()` で 1 個ずつ、出した順に拾える。write で `len` が `INLINE_MAX` 以下ならデータを WQE に埋め込み、そうでなければ中継バッファの `stage_off` から送る。read は中継バッファの `stage_off` へ読む。",
       "args": {"c": "出す接続", "is_read": "0: write。0 以外: read", "off": "相手の公開メモリの先頭からのオフセット", "stage_off": "中継バッファの中の位置(バイト)", "src": "inline の write で埋め込むデータ", "len": "長さ(バイト)"},
       "ret": "`BFM_OK`: 出した。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗、または(inline でない write と read で)`stage_off + len` が中継バッファを超える。そのほか `post()` の戻り値。",
@@ -310,6 +327,7 @@
     },
     {
       "func": "bfm_ops_poll1",
+      "purpose": "性能の試験(試験プログラムの bench)が、`bfm_ops_post_rw()` で出した操作の完了を 1 つずつ拾うための関数。",
       "summary": "性能の試験用(試験プログラムの bench が使う)。完了を 1 個拾う(`poll_one()` を呼び、署名の誤りの CQE は 0 として返す)。",
       "args": {"c": "完了を拾う接続"},
       "ret": "1: 拾った。0: まだ無い(署名の誤りの CQE を拾ったときも)。負: エラー完了(`poll_one()` の値)。",
@@ -322,6 +340,7 @@
     },
     {
       "func": "bfm_ops_check_range",
+      "purpose": "T10-DIF の転送(`bfm_dif.c`)が、操作を出す前に接続と相手のメモリの範囲を確かめるための関数。DIF の転送は長さが 32 ビットを超えうるので、64 ビットの長さで確かめられるようにしてある。",
       "summary": "`check_range()` を 64 ビットの長さで使えるようにしたもの(`bfm_dif.c` から使う)。",
       "args": {"c": "接続", "off": "相手の公開メモリの先頭からのオフセット", "len": "バイト数(64 ビット)"},
       "ret": "`BFM_E_PARAM`: `len` が 32 ビットを超える。そのほか `check_range()` の戻り値。",
@@ -335,6 +354,7 @@
     },
     {
       "func": "bfm_ops_post",
+      "purpose": "このファイルの外(T10-DIF の転送の `bfm_dif.c` と多重度つきの操作の `bfm_async.c`)が、自分で組んだ WQE を NIC に渡すための関数。",
       "summary": "組んだ WQE を `post()` で出す(`bfm_dif.c` から使う)。",
       "args": {"c": "接続", "w": "組んだ WQE", "bbs": "WQEBB の数"},
       "ret": "`post()` の戻り値。",
@@ -347,6 +367,7 @@
     },
     {
       "func": "bfm_ops_reap",
+      "purpose": "T10-DIF の転送(`bfm_dif.c`)が、待たずに来ている完了を全部受け取り、どこまで済んだかを進めるための関数。エラー完了を見たらそこで止めて返す。",
       "summary": "来ている CQE を全部拾う(待たない。`bfm_dif.c` から使う)。`poll_one()` が 0(まだ無い)か負(エラー完了)を返すまで呼び続ける。署名の誤りの CQE(2)も拾い続ける。",
       "args": {"c": "接続"},
       "ret": "`BFM_OK`: 拾い終わった。負: エラー完了(`poll_one()` の値)。",
@@ -359,6 +380,7 @@
     },
     {
       "func": "bfm_ops_reap_all",
+      "purpose": "多重度つきの操作(`bfm_async.c`)が、待たずに来ている完了を全部受け取り、済んだ操作の枠を空けるための関数。エラーの後に来る取り消しの完了まで拾い切るので、失敗した後も枠が残らない。",
       "summary": "来ている CQE を全部拾う(待たない。`bfm_async.c` から使う)。`bfm_ops_reap()` と違い、エラー完了の後も `poll_one()` が 0(まだ無い)を返すまで拾い切る(後ろの WQE の WR_FLUSH のエラー完了も拾って、多重度の枠を空ける)。",
       "args": {"c": "接続"},
       "ret": "`BFM_OK`: 拾い終わった(エラー完了が無かった)。負: 最初に見たエラー完了の値(`poll_one()` の値)。",
@@ -374,6 +396,7 @@
     },
     {
       "func": "bfm_ops_build_write_inline",
+      "purpose": "多重度つきの操作(`bfm_async.c`)が、短い write をデータを WQE に入れた形で組むための関数。",
       "summary": "データを WQE に埋め込んだ RDMA write の WQE を、完了通知ありで組む(`build_write_inline()` を `signaled` = 1 で呼ぶ。`bfm_async.c` から使う)。",
       "args": {"c": "接続", "w": "WQE の作業域", "off": "相手の公開メモリの先頭からのオフセット", "src": "書くデータ", "len": "データの長さ(バイト)"},
       "ret": "WQE の大きさ(WQEBB の数)。",
@@ -386,6 +409,7 @@
     },
     {
       "func": "bfm_ops_ctrl",
+      "purpose": "T10-DIF の転送(`bfm_dif.c`)が、UMR・SET_PSV などの WQE の先頭の制御の部分を組むための関数。`build_ctrl()` では書けない fence や MKey などの値も指定できる。",
       "summary": "制御セグメント(16 バイト)を組む。`build_ctrl()` と違い、fm_ce_se(fence・通知・solicited)と imm(UMR なら MKey)を指定できる(`bfm_dif.c` から使う)。",
       "args": {"c": "接続", "w": "WQE の作業域", "opcode": "WQE の opcode", "ds": "WQE の大きさ(16 バイト単位)", "fm_ce_se": "byte 11 に入れる値", "imm": "byte 12〜15 に入れる値"},
       "ret": "なし",
@@ -400,6 +424,7 @@
     },
     {
       "func": "bfm_ops_build_rdma",
+      "purpose": "T10-DIF の転送(`bfm_dif.c`)と多重度つきの操作(`bfm_async.c`)が、手元のバッファを指定して RDMA の read / write の WQE を 1 つ組むための関数。",
       "summary": "RDMA の read / write の WQE を 1 個(1 WQEBB、完了通知あり)組む。手元は `lkey` + `addr` の `len` バイト(T10-DIF のオフロードでは署名つき MKey のアドレス 0)。",
       "args": {"c": "接続", "w": "WQE の作業域(64 バイト)", "is_read": "1 = read、0 = write", "off": "相手の公開メモリの先頭からのオフセット", "lkey": "手元の MKey", "addr": "手元のアドレス", "len": "バイト数", "fence": "fm_ce_se に足す fence"},
       "ret": "なし",
@@ -414,6 +439,7 @@
     },
     {
       "func": "bfm_write",
+      "purpose": "アプリケーションが、相手のノードの公開メモリへデータを書き、相手の NIC が受け取ったことを確かめてから先へ進むための関数。どんな長さでも 1 回の呼び出しで書ける。",
       "summary": "相手の公開メモリ + `off` へ `len` バイト書き、相手の NIC が受け取った(完了が返った)ところで戻る。`INLINE_MAX` バイトまではデータを WQE に埋め込んで 1 個の WQE で出す。それより長いものは、中継バッファの大きさずつ中継バッファへ写して RDMA write で送り、1 回ごとに完了を待つ。",
       "args": {"c": "書く接続", "off": "相手の公開メモリの先頭からのオフセット", "src": "書くデータ", "len": "長さ(バイト)"},
       "ret": "`BFM_OK`: 書けた。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗。そのほか `post()` / `wait_done()` の戻り値(`BFM_E_TIMEOUT`、エラー完了の値)。",
@@ -448,6 +474,7 @@
     },
     {
       "func": "bfm_write_post",
+      "purpose": "アプリケーションが、短いデータを相手の公開メモリへ、完了を待たずに続けて書くための関数。1 つずつ確かめない分だけ速い。届いたことは、後で `bfm_flush()` でまとめて確かめる。",
       "summary": "データを WQE に埋め込んだ write を、完了を待たずに出す。完了は 1 つずつは知らせない。後で `bfm_flush()` を呼ぶと、それまでに出した write が全部相手に受け取られた(ACK が返った)ところで `BFM_OK` が返る。どれかが失敗していればエラーが返る(どれが失敗したかは分からない)。\n\nWQE には、通知なしが `g_bfm_signal_every` 個続いたとき、または SQ に積んだ量が半分を超えたときだけ、完了通知(CQ_UPDATE。終わったら CQE を書かせる印)を付ける。この関数は CQ を読まない(SQ が満杯のときの `post()` を除く)。",
       "args": {"c": "書く接続", "off": "相手の公開メモリの先頭からのオフセット", "src": "書くデータ", "len": "長さ(バイト。`bfm_inline_max()` 以下)"},
       "ret": "`BFM_OK`: 出した。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗、または `len` が `INLINE_MAX` を超える。そのほか `post()` の戻り値。",
@@ -466,6 +493,7 @@
     },
     {
       "func": "bfm_flush",
+      "purpose": "アプリケーションが、`bfm_write_post()` で出した write が全部相手に届いたことを確かめるための関数。成功が返れば全部届いており、どれかが失敗していればエラーが返る。",
       "summary": "`bfm_write_post()` で出した write が全部相手に受け取られる(ACK が返る)まで待つ。`BFM_OK` が返れば全部届いた。どれかが失敗していればエラーを返す(通知なしの WQE でも、失敗すれば NIC はエラーの CQE を書く。どれが失敗したかは分からない)。最後に出したものが通知なしなら、通知を求める NOP を足して出し、その完了を待つ(完了は投稿の順なので、NOP の完了 = それまでの write が全部相手に受け取られた)。",
       "args": {"c": "待つ接続"},
       "ret": "`BFM_OK`: 全部終わった(出したものが無いときも)。`BFM_E_STATE`: 接続が使えない。そのほか `post()` / `wait_done()` の戻り値。",
@@ -488,6 +516,7 @@
     },
     {
       "func": "bfm_read",
+      "purpose": "アプリケーションが、相手のノードの公開メモリからデータを読み、読み終わるまで待って手元のバッファに受け取るための関数。どんな長さでも 1 回の呼び出しで読める。",
       "summary": "相手の公開メモリ + `off` から `len` バイト読む。中継バッファの大きさずつ RDMA read を出して完了を待ち、応答が CQE に入っていて 32 バイト以下ならその CQE から、そうでなければ中継バッファから、引数のポインタ `dst` が指すバッファへ CPU がコピーする。",
       "args": {"c": "読む接続", "off": "相手の公開メモリの先頭からのオフセット", "dst": "読んだデータを置く先", "len": "長さ(バイト)"},
       "ret": "`BFM_OK`: 読めた。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗。そのほか `post()` / `wait_done()` の戻り値。",
@@ -519,6 +548,7 @@
     },
     {
       "func": "atomic_result",
+      "purpose": "8 バイトの atomic が終わった後に、相手のメモリにあった元の値を取り出すための下請け関数。元の値の届く場所によってバイト順が違うのを吸収する。`atomic_op()` が使う。",
       "summary": "atomic の元の値(8 バイト)を数にする。応答が CQE に入っていればそこから `bfm_rd64be()` でビッグエンディアンとして読む。そうでなければ中継バッファの 8 バイトをそのまま(ホスト順として)読む。",
       "args": {"c": "atomic を終えた接続"},
       "ret": "atomic の元の値(ホスト順)。",
@@ -534,6 +564,7 @@
     },
     {
       "func": "atomic32_result",
+      "purpose": "4 バイトの atomic が終わった後に、相手のメモリにあった元の値を取り出すための下請け関数。`atomic32_op()` が使う。",
       "summary": "4 バイトの atomic の元の値を数にする。応答が CQE に入っていればそこから、そうでなければ中継バッファから、`bfm_rd32be()` でビッグエンディアンとして読む。",
       "args": {"c": "atomic を終えた接続"},
       "ret": "atomic の元の値(ホスト順)。",
@@ -548,6 +579,7 @@
     },
     {
       "func": "bfm_ops_build_atomic",
+      "purpose": "atomic(8 バイト / 4 バイトの compare-and-swap・fetch-and-add)の WQE を組むための関数。同期版の `atomic_op()` / `atomic32_op()` と、多重度つきの操作の `issue_atomic()`(`bfm_async.c`)が共通に使う。組む前に、範囲・境界・装置の対応を確かめて断る。",
       "summary": "atomic の WQE を 1 個(1 WQEBB、完了通知あり)組む。`opcode` が `MLX5_OPCODE_ATOMIC_MASKED_CS` / `MLX5_OPCODE_ATOMIC_MASKED_FA` なら 4 バイト(拡張 atomic = masked atomic。IB の規格には無い mlx5 の拡張)、そうでなければ 8 バイト。範囲・境界と、4 バイトなら自分の装置が対応しているかを確かめてから組む。WQE は制御セグメント・remote address セグメント・atomic セグメント(16 バイト)・元の値を受けるデータセグメント(手元の `addr`)の 64 バイト。\n\n* 8 バイト: atomic セグメントの byte 32 に `swap_add`、byte 40 に `cmp`(各 8 バイト)。\n* 4 バイト: 制御セグメントの opmod に大きさ `MLX5_OPMOD_EXT_ATOMIC(2)` = 0x08 を入れる。atomic セグメントは、CAS なら swap・compare・swap_mask・compare_mask(各 4 バイト。mask は全ビット)、FAA なら add・field_boundary(0 = 32 ビットで 1 つの数)・予約 8 バイト。\n\n同期版の `atomic_op()` / `atomic32_op()` と、多重度つきの `issue_atomic()`(`bfm_async.c`)が使う。",
       "args": {"c": "接続", "w": "WQE の作業域(64 バイト)", "opcode": "`MLX5_OPCODE_ATOMIC_CS` / `MLX5_OPCODE_ATOMIC_FA` / `MLX5_OPCODE_ATOMIC_MASKED_CS` / `MLX5_OPCODE_ATOMIC_MASKED_FA`", "off": "相手の公開メモリの先頭からのオフセット", "swap_add": "CAS なら置き換える値、FAA なら足す値(4 バイトでは下位 32 ビットを使う)", "cmp": "CAS なら比べる値(4 バイトでは下位 32 ビットを使う。FAA では使わない)", "addr": "元の値を NIC に書かせる手元のアドレス(中継バッファ)"},
       "ret": "`BFM_OK`: 組んだ。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗。`BFM_E_PARAM`: 相手のアドレス(`raddr + off`)が大きさ(8 か 4)の倍数でない。`BFM_E_NOTSUP`: 4 バイトで、自分の装置が拡張 atomic の 4 バイトに対応していない(接続のポートの装置 `c->dev` の atomic の能力の `atomic_ops` の bit2・3 と `atomic_size_qp` の bit2)。",
@@ -577,6 +609,7 @@
     },
     {
       "func": "atomic_op",
+      "purpose": "8 バイトの atomic を出して終わるまで待ち、元の値を受け取るための下請け関数。`bfm_cas()` と `bfm_faa()` が使う。",
       "summary": "8 バイトの atomic(CAS・FAA)を 1 個出して完了を待ち、元の値を `*old` に返す。WQE は `bfm_ops_build_atomic()` で組む(元の値は中継バッファで受ける)。",
       "args": {"c": "操作する接続", "opcode": "`MLX5_OPCODE_ATOMIC_CS` か `MLX5_OPCODE_ATOMIC_FA`", "off": "相手の公開メモリの先頭からのオフセット", "swap_add": "CAS なら置き換える値、FAA なら足す値", "cmp": "CAS なら比べる値(FAA では 0)", "old": "元の値を入れる先(NULL なら返さない)"},
       "ret": "`BFM_OK`: 終わった。`BFM_E_STATE` / `BFM_E_PARAM`: `bfm_ops_build_atomic()` の失敗(範囲の外、または相手のアドレス `raddr + off` が 8 の倍数でない)。そのほか `post()` / `wait_done()` の戻り値。",
@@ -595,6 +628,7 @@
     },
     {
       "func": "atomic32_op",
+      "purpose": "4 バイトの atomic を出して終わるまで待ち、元の値を受け取るための下請け関数。`bfm_cas32()` と `bfm_faa32()` が使う。",
       "summary": "4 バイトの atomic(拡張 atomic = masked atomic。IB の規格には無い mlx5 の拡張)を 1 個出して完了を待ち、元の値を `*old` に返す。WQE は `bfm_ops_build_atomic()` で組む(組み方はそちらを見よ。元の値は中継バッファで受ける)。",
       "args": {"c": "操作する接続", "opcode": "`MLX5_OPCODE_ATOMIC_MASKED_CS` か `MLX5_OPCODE_ATOMIC_MASKED_FA`", "off": "相手の公開メモリの先頭からのオフセット", "swap_add": "CAS なら置き換える値、FAA なら足す値", "cmp": "CAS なら比べる値(FAA では使わない)", "old": "元の値を入れる先(NULL なら返さない)"},
       "ret": "`BFM_OK`: 終わった。`BFM_E_STATE` / `BFM_E_PARAM`: `bfm_ops_build_atomic()` の失敗(範囲の外、または相手のアドレス `raddr + off` が 4 の倍数でない)。`BFM_E_NOTSUP`: 自分の装置が拡張 atomic の 4 バイトに対応していない(`bfm_ops_build_atomic()` が見る)。そのほか `post()` / `wait_done()` の戻り値。",
@@ -613,6 +647,7 @@
     },
     {
       "func": "bfm_cas",
+      "purpose": "アプリケーションが、相手の公開メモリの 8 バイトの値を、期待した値のときだけ新しい値に置き換えるための関数(compare-and-swap)。ノードをまたいだ鍵や、値の取り合いに使う。返る元の値で、置き換わったかが分かる。",
       "summary": "相手の公開メモリ + `off` の 8 バイトに compare-and-swap を行う。値が `expect` なら `desired` に置き換え、元の値を `*old` に返す。",
       "args": {"c": "操作する接続", "off": "相手の公開メモリの先頭からのオフセット(8 の倍数)", "expect": "比べる値", "desired": "置き換える値", "old": "元の値を入れる先(NULL なら返さない)"},
       "ret": "`atomic_op()` の戻り値。",
@@ -625,6 +660,7 @@
     },
     {
       "func": "bfm_faa",
+      "purpose": "アプリケーションが、相手の公開メモリの 8 バイトの値に数を足し、足す前の値を受け取るための関数(fetch-and-add)。ノードをまたいだカウンタや番号の払い出しに使う。",
       "summary": "相手の公開メモリ + `off` の 8 バイトに fetch-and-add を行い、足す前の値を `*old` に返す。",
       "args": {"c": "操作する接続", "off": "相手の公開メモリの先頭からのオフセット(8 の倍数)", "add": "足す値", "old": "足す前の値を入れる先(NULL なら返さない)"},
       "ret": "`atomic_op()` の戻り値。",
@@ -637,6 +673,7 @@
     },
     {
       "func": "bfm_cas32",
+      "purpose": "アプリケーションが、相手の公開メモリの 4 バイトの値を、期待した値のときだけ新しい値に置き換えるための関数(4 バイトの compare-and-swap)。両方の装置が 4 バイトの atomic に対応しているときに使える。",
       "summary": "相手の公開メモリ + `off` の 4 バイトに compare-and-swap を行う。値が `expect` なら `desired` に置き換え、元の値を `*old` に返す。",
       "args": {"c": "操作する接続", "off": "相手の公開メモリの先頭からのオフセット(4 の倍数)", "expect": "比べる値", "desired": "置き換える値", "old": "元の値を入れる先(NULL なら返さない)"},
       "ret": "`atomic32_op()` の戻り値。",
@@ -649,6 +686,7 @@
     },
     {
       "func": "bfm_faa32",
+      "purpose": "アプリケーションが、相手の公開メモリの 4 バイトの値に数を足し、足す前の値を受け取るための関数(4 バイトの fetch-and-add)。両方の装置が 4 バイトの atomic に対応しているときに使える。",
       "summary": "相手の公開メモリ + `off` の 4 バイトに fetch-and-add を行い、足す前の値を `*old` に返す。",
       "args": {"c": "操作する接続", "off": "相手の公開メモリの先頭からのオフセット(4 の倍数)", "add": "足す値", "old": "足す前の値を入れる先(NULL なら返さない)"},
       "ret": "`atomic32_op()` の戻り値。",
@@ -661,6 +699,7 @@
     },
     {
       "func": "bfm_inline_max",
+      "purpose": "アプリケーションが、データを WQE に埋め込んで送れる write の最大の長さを知るための関数。`bfm_write_post()` で書ける長さの上限であり、`bfm_write()` などがこの長さまでは速い形で送る。",
       "summary": "WQE に埋め込める write の最大バイト数(`INLINE_MAX` = `BFM_WQE_MAX` - 32 - 4)を返す。",
       "args": {},
       "ret": "`INLINE_MAX`(`BFM_WQE_MAX` が 256 なら 220)。",
@@ -672,6 +711,7 @@
     },
     {
       "func": "bfm_bf_active",
+      "purpose": "アプリケーションや試験が、その接続が BlueFlame(NIC への指示を 1 回の書き込みで届ける仕組み)を使えているかを知るための関数。遅延を測るときなどに、状態として表示する。",
       "summary": "接続が BlueFlame で WQE を送っている(WC の窓が取れた)かを返す。",
       "args": {"c": "調べる接続(NULL 可)"},
       "ret": "1: BlueFlame を使っている。0: 使っていない、または `c` が NULL。",
@@ -683,6 +723,7 @@
     },
     {
       "func": "bfm_is_up",
+      "purpose": "アプリケーションが、接続がまだ使えるか(エラーや相手からの切断で使えなくなっていないか)を確かめるための関数。使えなくなっていれば `bfm_reconnect()` で張り直す。",
       "summary": "接続が使えるかを返す(`conn_usable()`)。",
       "args": {"c": "調べる接続(NULL 可)"},
       "ret": "1: 使える。0: エラーか相手から切断された、または `c` が NULL。",
@@ -695,6 +736,7 @@
     },
     {
       "func": "bfm_remote_size",
+      "purpose": "アプリケーションが、相手の公開メモリの大きさ(読み書きできる位置の上限)を知るための関数。転送の位置と長さを、この範囲に収めるのに使う。",
       "summary": "相手の公開メモリの大きさ(`off` の上限)を返す。",
       "args": {"c": "調べる接続(NULL 可)"},
       "ret": "相手の公開メモリの大きさ(バイト)。`c` が NULL なら 0。",
@@ -706,6 +748,7 @@
     },
     {
       "func": "bfm_last_syndrome",
+      "purpose": "アプリケーションが、転送がエラー完了で失敗したときに、NIC が報告した理由の番号(syndrome)を知り、原因を調べるための関数。",
       "summary": "直前のエラー完了の syndrome を返す。",
       "args": {"c": "調べる接続(NULL 可)"},
       "ret": "直前のエラー完了の syndrome(0 = なし)。`c` が NULL なら 0。",
@@ -717,6 +760,7 @@
     },
     {
       "func": "bfm_strerror",
+      "purpose": "アプリケーションが、ライブラリの関数の戻り値を、表示やログのための説明の文字列にするための関数。",
       "summary": "ライブラリの戻り値を、表示用の説明の文字列に直す。",
       "args": {"rc": "ライブラリの戻り値(`BFM_OK` / `BFM_E_*` / `BFM_INPROGRESS`)"},
       "ret": "説明の文字列(静的な文字列)。知らない値は `\"?\"`。",

@@ -4,6 +4,7 @@
   "functions": [
     {
       "func": "mbox_in",
+      "purpose": "FW のコマンドの入力が 16 バイトを超えるとき、超えた分を入れる入力のメールボックス(512 バイトずつのブロックの鎖)の、指定したブロックの位置を得るための下請けの関数。`cmd_post()` がブロックに入力を詰め、次のブロックの物理アドレスを書くときに使う。",
       "summary": "入力のメールボックスの `i` 番目のブロックの先頭を返す(`d->mbox_in + i * BFM_MBOX_STRIDE`)。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "i": "ブロックの番号"},
       "ret": "ブロックの先頭のアドレス。",
@@ -15,6 +16,7 @@
     },
     {
       "func": "mbox_out",
+      "purpose": "FW のコマンドの出力が 16 バイトを超えるとき、超えた分を FW が書き込む出力のメールボックス(512 バイトずつのブロックの鎖)の、指定したブロックの位置を得るための下請けの関数。`cmd_post()` が鎖を用意するときと、`cmd_finish()` が出力を読み出すときに使う。",
       "summary": "出力のメールボックスの `i` 番目のブロックの先頭を返す(`d->mbox_out + i * BFM_MBOX_STRIDE`)。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)", "i": "ブロックの番号"},
       "ret": "ブロックの先頭のアドレス。",
@@ -26,6 +28,7 @@
     },
     {
       "func": "mlx5_cmd_init",
+      "purpose": "FW へコマンドを出せるようにするための関数。HCA の立ち上げ(`mlx5_hca_init_step()`)の初めに 1 度呼び、コマンドキューの置き場所を FW に教える。これより後、`mlx5_cmd_run()` で FW のコマンドを出せる。",
       "summary": "コマンドキューを FW に登録する。DMA 領域からコマンドキュー(1 ページ)と入力・出力のメールボックス(各 `BFM_MBOX_BLOCKS` ブロック)を取り、Initialization Segment の `CMDQ_ADDR_L_SZ` の log_stride が 6(entry が 64 バイト)であることを確かめてから、コマンドキューの物理アドレスを `CMDQ_ADDR_H` / `CMDQ_ADDR_L_SZ` へ書く。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)(`cmdq` / `mbox_in` / `mbox_out` を埋める)"},
       "ret": "`BFM_OK`: 登録した。`BFM_E_NOMEM`: DMA 領域が足りない。`BFM_E_HW`: entry の大きさが 64 バイトでない。",
@@ -46,6 +49,7 @@
     },
     {
       "func": "cmd_post",
+      "purpose": "コマンドキューの唯一の entry に FW のコマンドを置いて FW に知らせるための下請けの関数。`mlx5_cmd_run()` が、entry が空いていてまだ出していないコマンドを出すときにだけ使う。",
       "summary": "コマンドを entry 0 に出す。\n\n* entry 0 を 0 で埋め、入力の先頭 16 バイトを entry に入れる。16 バイトを超える分は 512 バイトずつ入力のメールボックスの鎖に入れる(ブロック番号と次のブロックの物理アドレスを書く)。\n* 出力が 16 バイトを超えるときは、出力のメールボックスの鎖を用意する。\n* 種類(PCI)と持ち主(FW)を書いてドアベル(`CMD_DBELL` に 1)を鳴らす。完了は待たない。",
       "args": {
         "d": "ポートの装置(`g_bfm_dev[port]`)",
@@ -90,6 +94,7 @@
     },
     {
       "func": "cmd_finish",
+      "purpose": "FW が完了したコマンドの結果を受け取るための下請けの関数。`mlx5_cmd_run()` が完了を見つけたときに使い、出力を呼び出し側のバッファへコピーし、FW がコマンドを受け付けたか(成功したか)を確かめる。",
       "summary": "完了した entry 0 とメールボックスから出力を読む。delivery status を確かめ、出力を entry とメールボックスから `out` へ `j->outlen` バイト写し、出力の status(`out[0]`)が 0 であることを確かめる。",
       "args": {
         "d": "ポートの装置(`g_bfm_dev[port]`)",
@@ -121,6 +126,7 @@
     },
     {
       "func": "mlx5_cmd_run",
+      "purpose": "FW のコマンドを 1 つ、待たずに実行するための関数。HCA の立ち上げ・資源(UAR・PD・CQ・QP など)の作成と破棄・停止で FW のコマンドを出す関数は、すべてこれを通す。コマンドが終わるまでは `BFM_INPROGRESS` を返すので、呼び出し側は同じ手順の記録と同じ引数で呼び直し、完了したら出力と成否を受け取る。",
       "summary": "コマンドを 1 つ、待たずに進める。\n\n* `j` がまだ出していなければ、長さと FW の状態を確かめ、entry が空いていれば `cmd_post()` で出して `j` を持ち主(`d->cmd_owner`)にする。entry がほかの持ち主に使われていれば、出さずに `BFM_INPROGRESS` を返す。\n* 出してあれば(出したその呼び出しでも)完了を 1 回だけ見る。FW がまだ持っていれば `BFM_INPROGRESS` を返す。10 秒を超えたら時間切れにし、以後コマンドを出さない(`d->cmd_dead`)。\n* 完了していれば持ち主を外し、`cmd_finish()` で出力を `out` に写して status を確かめる。",
       "args": {
         "d": "ポートの装置(`g_bfm_dev[port]`)",
@@ -182,6 +188,7 @@
     },
     {
       "func": "mlx5_cmd_drain",
+      "purpose": "ポートを止めるとき、出したまま結果を受け取られていない FW のコマンドを片付けるための関数。停止の手順(`bfm_core.c` の `dev_stop_step()`)が、`TEARDOWN_HCA` で FW を止める前に呼び、コマンドキューを空にする。",
       "summary": "出したまま持ち主が受け取っていないコマンド(`d->cmd_owner`)を、完了を待って捨てる。止めるときに使う。FW が 10 秒を超えて答えなければ、以後コマンドを出さないようにして(`d->cmd_dead`)捨てる。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)"},
       "ret": "`BFM_INPROGRESS`: FW がまだ持っている(呼び直す)。`BFM_OK`: entry は空いた(持ち主がいなかったときと、時間切れのときも)。",
@@ -203,6 +210,7 @@
     },
     {
       "func": "mlx5_destroy_obj",
+      "purpose": "FW に作らせた資源を、その番号を指定して解放するための共通の関数。`mlx5_qp_destroy()` が QP と CQ を壊すときに使う(`DESTROY_QP`・`DESTROY_CQ` のように、入力が同じ形の解放のコマンドに使える)。",
       "summary": "入力が 16 バイトで byte 9〜11 にオブジェクトの番号を置く形の解放のコマンド(`DESTROY_QP` / `DESTROY_CQ` など)を進める。",
       "args": {
         "d": "ポートの装置(`g_bfm_dev[port]`)",
@@ -222,6 +230,7 @@
     },
     {
       "func": "mlx5_pages_start",
+      "purpose": "FW が動くために求めるメモリのページを、FW へ渡す手順を始めるための関数。HCA の立ち上げで FW が求めるページ(boot・init)と、動いている間に EQ で FW が求めてきたページに答えるときに呼ぶ。実際に渡すのは、続けて呼ぶ `mlx5_pages_step()`。",
       "summary": "FW へ `npages` ページ渡す手順を始める。`p` を 0 で埋めて `func` を入れ、区画の残りが足りれば `p->left` に `npages` を入れる。渡すのは `mlx5_pages_step()`。",
       "args": {
         "d": "ポートの装置(`g_bfm_dev[port]`)",
@@ -245,6 +254,7 @@
     },
     {
       "func": "mlx5_pages_step",
+      "purpose": "`mlx5_pages_start()` で始めた、FW へメモリのページを渡す手順を、待たずに進めるための関数。立ち上げの手順と `mlx5_eq_poll()` が、渡し終えるまで呼び続ける。ページが足りなければ、渡せないことを FW に伝える。",
       "summary": "FW へのページの受け渡しを、待たずに進める。\n\n* `p->cant` が立っていれば、代わりに `MANAGE_PAGES`(op_mod = CANT_GIVE)を 1 回出して、ページを渡せないと伝える(伝えないと FW は要求を出し直し続ける)。完了したら `p->cant` を 0 にする。\n* そうでなければ、`MANAGE_PAGES`(op_mod = GIVE)で残り(`p->left`)を 512 ページずつ渡す。ページは DMA 領域の中の FW 用の区画(`d->fw_pages`、`g_bfm_fw_pages_max` ページ)から `d->fw_pages_used` の続きを順に出す。1 回のコマンドが完了するたびに `d->fw_pages_used` を増やし、`p->left` を減らす。",
       "args": {
         "d": "ポートの装置(`g_bfm_dev[port]`)",
@@ -289,6 +299,7 @@
     },
     {
       "func": "mlx5_eq_reset",
+      "purpose": "ポートの、EQ で受けた FW のページ要求に答える手順を、何も答えていない状態に戻すための関数。立ち上げを最初からやり直すとき(`mlx5_hca_init_reset()`)に使い、前の試みの答えかけの要求が残らないようにする。",
       "summary": "ポート `d` の、EQ で受けたページ要求に答える手順(`s_eq_pages[d->port]`・`s_eq_next[d->port]`・`s_eq_pages_busy[d->port]`)を空にする。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)"},
       "ret": "なし",
@@ -300,6 +311,7 @@
     },
     {
       "func": "eq_pages_begin",
+      "purpose": "EQ で受けた FW のページ要求に答え始めるための下請けの関数。`mlx5_eq_poll()` が、読んだ要求のうち最後のものと、答えている間に来て覚えておいた要求に答えるときに使う。FW がページの返却を申し出たときは、返さずに預けたままにする。",
       "summary": "EQ で受けたページ要求に答える手順を始める。`n` が正なら `mlx5_pages_start()` で `s_eq_pages[d->port]` を始め(区画が足りなければ代わりに CANT_GIVE を伝える手順にする)、`s_eq_pages_busy[d->port]` を立てる。`n` が負(返却の申し出)なら預けたままにする。",
       "args": {
         "d": "ポートの装置(`g_bfm_dev[port]`)",
@@ -325,6 +337,7 @@
     },
     {
       "func": "mlx5_eq_prepare",
+      "purpose": "EQ(FW から装置のイベントを知らせてもらう待ち行列)を作る前に、そのリングと受け取るイベントの種類を用意するための関数。HCA の立ち上げで、`mlx5_eq_create()` の前に 1 度呼ぶ。",
       "summary": "EQ を作る前の準備をする(コマンドは出さない)。\n\n* DMA 領域から EQ のリング(`2^BFM_EQ_LOG` 個 x 64 バイト)を取り、全 EQE の owner を 1 にする。\n* 購読するイベント(Linux の `MLX5_ASYNC_EVENT_MASK` と同じ組。`page_request_disable` が 0 ならページ要求も)を `d->eq_mask` に入れる。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)(`eq_buf` / `eq_mask` を埋める)"},
       "ret": "`BFM_OK`: 用意した。`BFM_E_PARAM`: EQ の領域が 4 ページを超える(`BFM_EQ_LOG` が 8 を超える)。`BFM_E_NOMEM`: DMA 領域が足りない。",
@@ -345,6 +358,7 @@
     },
     {
       "func": "mlx5_eq_create",
+      "purpose": "FW に EQ を作らせ、FW からのイベント(ページ要求・ポートの変化・QP や CQ のエラー)を受け取れるようにするための関数。HCA の立ち上げで `mlx5_eq_prepare()` の後に呼ぶ。作った後は `mlx5_eq_poll()` で中身を読む。",
       "summary": "EQ を 1 本作るコマンド(`CREATE_EQ`)を待たずに進める。EQC に log_eq_size(`BFM_EQ_LOG`)・uar_page(`d->eq_uarn`)・log_page_size(0 = 4KiB)を、event_bitmask に `d->eq_mask` を入れ、EQ の各ページの物理アドレスを並べる。完了したら返った EQ の番号を `d->eqn` に入れ、`d->eq_cc` を 0 にし、`d->eq_ready` を立てる。\n\n割り込みは使わない(arm しない)。中身は `mlx5_eq_poll()` で読む。",
       "args": {
         "d": "ポートの装置(`g_bfm_dev[port]`)(`eqn` / `eq_cc` / `eq_ready` を埋める)",
@@ -367,6 +381,7 @@
     },
     {
       "func": "mlx5_eq_update_ci",
+      "purpose": "EQ のイベントをどこまで読んだかを FW に知らせ、読み終えた場所を FW が再び使えるようにするための下請けの関数。`mlx5_eq_poll()` がイベントを読み進める途中と読み終わりに使う。",
       "summary": "EQ の消費位置を FW へ知らせる。UAR ページの中の EQ のドアベル(arm しない。オフセット 0x48)に、`eq_cc` の下位 24 ビットと EQ の番号(上位 8 ビット)を書く。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)"},
       "ret": "なし",
@@ -378,6 +393,7 @@
     },
     {
       "func": "mlx5_eq_poll",
+      "purpose": "FW から EQ に届いたイベントを読み、それに応じた処理をするための関数。割り込みを使わないので、立ち上げの最後・接続の状態機械・`bfm_run()`(立ち上がったポート)から周期的に呼ぶ。これにより、FW のページ要求に答え、リンクの変化を記録し、QP のエラーを受けた接続をエラーにする。",
       "summary": "EQ に溜まったイベントを最大 `2^BFM_EQ_LOG` 個読み、ページ要求に答える手順を進める。\n\n* ページ要求: function とページ数を覚えておき、読み終わった後に最後の 1 つにだけ答える。答えている途中(`s_eq_pages_busy[d->port]`)なら、`s_eq_next[d->port]` に覚えておき(来た中で最後のもの)、答え終えてから答える。\n* ポートの変化: `d->link_up` を更新して表示する。\n* CQ のエラー: 表示する。\n* QP のエラー(WQ_CATAS_ERROR・WQ_INVAL_REQ・WQ_ACCESS_ERROR・PATH_MIG_FAILED): 種類が QP なら `bfm_conn_mark_error()` でそのポートの接続をエラーにし、表示する。\n* そのほか(COMM_EST など): 何もしない。\n\n16 個ごとと読み終わりに、消費位置を FW へ知らせる。最後に、答えている途中なら `mlx5_pages_step()` を 1 回呼んで進める。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)"},
       "ret": "読んだイベントの数。EQ を作っていなければ(`d->eq_ready` が 0)0。",
@@ -447,6 +463,7 @@
     },
     {
       "func": "mlx5_eq_busy",
+      "purpose": "EQ で受けた FW のページ要求に、まだ答えている途中かを調べるための関数。HCA の立ち上げの最後で、FW の追加のページ要求が収まったか(立ち上げを終えてよいか)を判断するのに使う。",
       "summary": "ポート `d` の、EQ で受けたページ要求に答えている途中かを返す(`s_eq_pages_busy[d->port]`)。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)"},
       "ret": "1: 答えている途中。0: 答えていない。",

@@ -4,6 +4,7 @@
   "functions": [
     {
       "func": "cm_rand32",
+      "purpose": "OS の乱数を使わずに、接続の id(相手とのメッセージで接続を見分ける番号)を選ぶための下請け関数。`conn_begin()` が確立を始めるたびに呼び、試みごとに新しい id を得る。",
       "summary": "32 ビットの擬似乱数を返す。静的変数 `x` に `bfm_port_time_ns()` と定数を足した値を XOR で混ぜ、xorshift(13・7・17)をかけて、`x >> 16` の下位 32 ビットの最下位ビットを立てて返す。",
       "args": {},
       "ret": "32 ビットの擬似乱数(0 にはならない。最下位ビットは常に 1)。",
@@ -17,6 +18,7 @@
     },
     {
       "func": "ms_since",
+      "purpose": "接続の管理で、時間で判断するところが、どれだけ時間がたったかを知るための下請け関数。REQ を送り直す間隔、古くなった REQ を捨てる判断、BYE や GSI の送信が出ていくのを待つ上限に使う。",
       "summary": "時刻 `t0` から今までの経過時間をミリ秒で返す。",
       "args": {"t0": "起点の時刻(`bfm_port_time_ns()` の値、ナノ秒)"},
       "ret": "経過時間(ミリ秒、切り捨て)。",
@@ -29,6 +31,7 @@
     },
     {
       "func": "mac_is_zero",
+      "purpose": "相手の MAC アドレスが設定で与えられているかを判断するための下請け関数。`conn_begin()` が使い、与えられていなければ REQ を同報で送るようにする(相手の MAC は REP で知る)。",
       "summary": "MAC アドレス `mac` が全部 0(相手の MAC を知らない)かを返す。",
       "args": {"mac": "調べる MAC アドレス(6 バイト)"},
       "ret": "1: 全部 0。0: 0 でないバイトがある。",
@@ -43,6 +46,7 @@
     },
     {
       "func": "steplog_add",
+      "purpose": "接続の状態機械が手順を移るたびに、その移り方を後から調べられるように記録しておくための下請け関数。`set_step()` が呼び、記録は `bfm_conn_steplog()` が表示する。",
       "summary": "接続 `c` の状態遷移の記録(`c->slog[]`。`BFM_STEPLOG_N` 件の輪)に `from` → `to` を、今の時刻と、移したコア(`bfm_port_cpu_id()` の下位 16bit)と一緒に足す。記録が 1 件以上あれば、直前の 1 件に、そこにとどまった時間(今 − その時刻)を書く。",
       "args": {"c": "接続", "from": "移る前の手順(`K_*`)", "to": "移った後の手順(`K_*`)"},
       "ret": "なし",
@@ -60,6 +64,7 @@
     },
     {
       "func": "set_step",
+      "purpose": "接続の状態機械の手順を移すときに必ず通す下請け関数。ほかのコアが鍵を取らずに接続の状態を読んでも(`bfm_conn()`・`bfm_conn_state()`)、移る前に書いた内容がそろって見えるようにし、あわせて移り方を記録に残す。",
       "summary": "接続 `c` の手順 `c->step` を `step` にする(release で書く)。手順が変わるときは、状態遷移の記録に足す(`steplog_add()`)。",
       "args": {"c": "接続", "step": "新しい手順(`K_*`)"},
       "ret": "なし",
@@ -72,6 +77,7 @@
     },
     {
       "func": "own_rr",
+      "purpose": "相手に知らせる「自分が同時に受け付けられる read / atomic の数」を決めるための下請け関数。`build_msg()` が REQ / REP に入れるのに使う。",
       "summary": "自分が受け付ける同時の read / atomic の数を返す。ポート `d` の HCA の `log_max_ra_res_qp` を 4 で頭打ちにして、2 のその乗を返す。",
       "args": {"d": "ポートの装置"},
       "ret": "同時の read / atomic の数(1〜16)。",
@@ -84,6 +90,7 @@
     },
     {
       "func": "build_msg",
+      "purpose": "相手のノードへ送る接続管理のメッセージ(確立を頼む REQ・それに答える REP・切断を知らせる BYE)を作るための下請け関数。REQ / REP には、相手が自分の QP と繋ぎ、自分の公開メモリへ転送するのに要る情報を入れる。作ったメッセージは `gsi_send()` で送る。",
       "summary": "接続 `c` の自分の情報を詰めたメッセージを `m` に作る。`MSG_SIZE` バイトを 0 で埋め、`'BFM2'`・種類 `type`・経路 MTU(`c->path_mtu`)・待ち受けの番号(`c->port`)・自分の接続の id(`c->local_id`)・相手の接続の id(`c->peer_id`)・宛先の IPv4(`c->peer_ip`)を書く。BYE ならここまで。REQ / REP なら続けて QPN・開始 PSN・`own_rr()`・ポートの MAC・ポートの IPv4・公開メモリの rkey・先頭(`g_bfm_mr_base`)・大きさ(`g_bfm_mr_size`)を書く。",
       "args": {"m": "書く先(`MSG_SIZE` バイト)", "type": "種類(`MSG_REQ` / `MSG_REP` / `MSG_BYE`)", "c": "接続"},
       "ret": "なし",
@@ -101,6 +108,7 @@
     },
     {
       "func": "take_peer",
+      "purpose": "相手から受けた REQ / REP から、相手の QP と繋ぎ、相手の公開メモリへ転送するのに要る情報を、接続に取り込むための下請け関数。受け側は REQ を取り出したとき(`bfm_cm_conn_step()`)、掛け側は REP を受けたとき(`handle_msg()`)に使う。",
       "summary": "REQ / REP のメッセージ `m` から相手の情報を接続の枠 `c` へ写す。相手の接続の id・QPN(下位 24 ビット)・開始 PSN(下位 24 ビット)・同時の read / atomic の数・MAC・IPv4 を読み、IPv4 から GID を作り、公開メモリの rkey・先頭・大きさを読む。",
       "args": {"c": "情報を入れる接続", "m": "受け取った REQ / REP(`MSG_SIZE` バイト)"},
       "ret": "なし",
@@ -116,6 +124,7 @@
     },
     {
       "func": "gsi_post_recv",
+      "purpose": "相手からの接続管理のメッセージを受け取れるように、GSI に受信の置き場を 1 つ渡しておくための下請け関数。GSI を用意したとき(`bfm_cm_init_step()`)にまとめて出し、受け取るたびに `gsi_pump()` が出し直して、受信の置き場が尽きないようにする。",
       "summary": "ポート `d` の GSI の受信キューに受信の WQE を 1 つ出す。`rq_pc` の位置の WQE(16 バイト)に、受信枠の大きさ `BFM_GSI_RX_SLOT`・`d->lkey`・受信枠 `rx_ring + idx * BFM_GSI_RX_SLOT` の DMA アドレスを書き、`rq_pc` を進めてドアベルレコード(`dbr[0]`)を書き換える。",
       "args": {"d": "ポートの装置(`s_cm[d->port]` の GSI を使う)"},
       "ret": "なし",
@@ -130,6 +139,7 @@
     },
     {
       "func": "gsi_send",
+      "purpose": "接続管理のメッセージ(REQ・REP・BYE)を相手のノードへ送るための下請け関数。IP のスタックを持たないので、RoCE v2 の UD で相手の決まった QP(QP1)へ送る。接続の状態機械(`bfm_cm_conn_step()`)と、REP の送り直し(`handle_msg()`)が使う。",
       "summary": "メッセージ(`MSG_SIZE` バイト)を、接続 `c` のポートの GSI から相手の QP1 へ UD の SEND で送る。送信中の数が `BFM_GSI_TXBUFS` に達していれば `gsi_pump()` を 1 回呼び、それでも空かなければ待たずに `BFM_INPROGRESS` を返す。メッセージを送信の置き場 `tx_buf`(順に使い回す)へ写し、ctrl(16)・datagram(48。Q_Key・宛先 QPN 1・UDP の送り元ポート・相手の MAC・hop limit 64・GRH・相手の GID)・data(16)の 2 WQEBB の WQE を作り、ドアベルレコードを書き換えて、WQE の先頭 8 バイトを GSI の UAR のドアベルへ書く。",
       "args": {"msg": "送るメッセージ(`MSG_SIZE` バイト)", "c": "宛先の接続(ポートは `c->dev`、宛先は `peer_mac`・`peer_gid`)"},
       "ret": "`BFM_OK`: 送信を出した(完了は待たない)。`BFM_INPROGRESS`: 送信の置き場が空いていない(出していない。呼び出し側が後で送り直す)。`BFM_E_CQE`: 置き場を空けるための `gsi_pump()` が GSI のエラー完了を見た。",
@@ -162,6 +172,7 @@
     },
     {
       "func": "req_put",
+      "purpose": "相手から来た REQ を、それを受ける接続が取りに来るまで取っておくための下請け関数。REQ は受け側の接続が待ち始める前にも届くので、`handle_msg()` がここに置き、受け側の接続が `req_take()` で取り出す。",
       "summary": "受けた REQ を受け側の接続のために取っておく。同じ掛け側(接続の id と IPv4 が同じ)の REQ が既にあれば置き換え(送り直し)、無ければ空きに、空きが無ければ最も古いものに入れ、受けた時刻を記録する。",
       "args": {"m": "そのポートの接続管理の状態(`s_cm[d->port]`)", "msg": "受け取った REQ(`MSG_SIZE` バイト)"},
       "ret": "なし",
@@ -187,6 +198,7 @@
     },
     {
       "func": "req_take",
+      "purpose": "REQ を待っている受け側の接続が、自分宛ての REQ を受け取るための下請け関数。`bfm_cm_conn_step()` が REQ を待つ手順で呼び、取れたら確立を進める。",
       "summary": "ポート `d` に取っておいた REQ のうち、待ち受けの番号が `port` で、送り手の IPv4 がそのポートの相手(`g_bfm_peer_ip[d->port]`)のもので最も古いものを取り出して `msg` に写す。受けてから `REQ_STALE_MS`(2 秒)以上たったもの(掛け側があきらめた)は捨てる。",
       "args": {"d": "ポートの装置", "port": "待ち受けの番号", "msg": "写す先(`MSG_SIZE` バイト)"},
       "ret": "1: 取り出した。0: 無い。",
@@ -210,6 +222,7 @@
     },
     {
       "func": "handle_msg",
+      "purpose": "相手から受け取った接続管理のメッセージを、宛ての接続に反映するための下請け関数。`gsi_pump()` が受け取るたびに呼ぶ。REQ は受け側の接続のために取っておき(REP が落ちたときの送り直しには REP を送り直す)、REP は掛け側の接続へ届け、BYE はその接続を相手が切った扱いにする。",
       "summary": "ポート `d` で受け取ったメッセージ 1 つを処理する。宛先の IPv4(msg[56..59])がポートの IPv4 でなければ捨てる(同報の REQ は同じ L2 の別の bfmem にも届く)。REQ なら、そのポートの使っている枠(`BFM_CS_FREE` でない)で相手の接続の id と IPv4 が同じものがあれば(もう受けた掛け側からの送り直し)、その枠が確立済み(`BFM_CS_UP` かつ手順が `K_UP`)なら REP が落ちたので REP を送り直し、用意の途中なら捨てる。そのような枠が無ければ `req_put()` で取っておく。REQ 以外は、受け手の接続の id が `local_id` と同じ最初の枠について、REP で枠の手順が `K_WAIT_REP` かつまだ REP を受けていなければ相手の情報を写して `got_rep = 1` にし、BYE で相手の接続の id が同じかつ枠が `BFM_CS_UP` か `BFM_CS_ERROR` なら `BFM_CS_CLOSED` にする。",
       "args": {"d": "受け取ったポートの装置", "msg": "受け取ったメッセージ(`MSG_SIZE` バイト。magic は確認済み)"},
       "ret": "なし",
@@ -250,6 +263,7 @@
     },
     {
       "func": "gsi_pump",
+      "purpose": "ポートの GSI で送り終えたもの・受け取ったものを片付け、受け取ったメッセージを処理するための下請け関数。メッセージを待つ確立の手順(`bfm_cm_conn_step()`)、確立の後の `bfm_cm_poll()`、送信の置き場が空かないときの `gsi_send()`、停止のときの `bfm_cm_fini_step()` が呼ぶ。",
       "summary": "ポート `d` の GSI の CQ を読み切る。送信の完了(`MLX5_CQE_REQ`)は送信中の数 `tx_outstanding` を減らすだけ。受信の完了(`MLX5_CQE_RESP_SEND`)は、受信枠の GRH(`MLX5_GRH_BYTES`)の後ろからメッセージを写して受信を出し直し、長さが足りて magic が `MSG_MAGIC` なら `handle_msg()` で処理して数える。それ以外の完了はエラーとして表示して -1 を返す。",
       "args": {"d": "ポートの装置"},
       "ret": "受け取って `handle_msg()` で処理したメッセージの数。GSI のエラー完了を見たら -1。",
@@ -286,6 +300,7 @@
     },
     {
       "func": "conn_begin",
+      "purpose": "接続の確立を最初から始めるための下請け関数。`bfm_cm_conn_step()` が、ポートの立ち上げが済んだときと、張り直しで前の接続を畳み終えたときに呼ぶ。掛け側か受け側かと、相手の宛先などの確立に要る値を決める。",
       "summary": "接続 `c` を確立の手順の最初に置く(FW のコマンドはまだ出さない)。`BFM_CS_SETUP` にし、役割をポートの IPv4 の大小で決め(`d->initiator` なら掛け側 `ROLE_CONNECT`、そうでなければ受け側 `ROLE_ACCEPT`)、畳む印・張り直しの印・結果を戻し、待ち受けの番号(`g_bfm_cm_port + c->pidx`)・自分の接続の id(`cm_rand32()`)・相手の IPv4(`g_bfm_peer_ip[]`)・MAC(`g_bfm_peer_mac[]`。全部 0 なら同報)・GID・path_mtu・scatter to CQE の設定・始めた時刻を入れ、出しているコマンドの記録 `c->cmd` を 0 にする。手順は掛け側 `K_CQ`、受け側 `K_WAIT_REQ` にする。",
       "args": {"c": "接続"},
       "ret": "なし",
@@ -309,6 +324,7 @@
     },
     {
       "func": "conn_fail",
+      "purpose": "接続の確立の途中で失敗したときに、その理由を覚え、作りかけた QP などを畳んで失敗の状態にするよう頼むための下請け関数。`bfm_cm_conn_step()` が、FW のコマンドの失敗などで使う。",
       "summary": "接続 `c` の確立に失敗したことを記録する。結果 `c->result` に `rc` を入れ、畳む印 `c->abort` を立てる。畳む手順への切り替えは、次の `bfm_cm_conn_step()` の頭で行われる。",
       "args": {"c": "接続", "rc": "畳み終えたときの結果(失敗の理由)"},
       "ret": "なし",
@@ -321,6 +337,7 @@
     },
     {
       "func": "bfm_cm_conn_step",
+      "purpose": "1 本の接続の一生(ポートの立ち上げを待つ・確立・使える・切断・張り直し・畳む)を受け持つ状態機械。`bfm_run()` が、鍵を取れた接続について呼び、呼ぶたびに 1 つだけ進める。ポートを止めるときは `bfm_cm_fini_step()` も、接続を畳むためにこれを呼ぶ。",
       "summary": "接続 `c` の状態機械を 1 つ進める(1 回の呼び出しで 1 つの手順)。\n\n* `K_IDLE`: 使わない行。`BFM_E_STATE` を返す。\n* `K_PORT`: ポートの立ち上げ(`bfm_dev_step()`)を進める。途中なら `BFM_INPROGRESS`、失敗なら `K_FAILED` にしてその理由を返し、済んだら `conn_begin()` で確立を始める。\n* `K_FAILED`: `c->result` を返す。\n\nそれ以外の手順では、まず(`K_UP`・`K_DOWN` でなければ)`mlx5_eq_poll()` で EQ を読み(FW のページ要求に答える手順がコマンドの入口を持っていれば進める)、`K_UP` / `K_DOWN` で張り直しを頼まれていれば(`c->reconnect`)畳む印を立て、畳む印が立っていてコマンドを出していなければ、`BFM_CS_UP` / `BFM_CS_ERROR` なら `K_BYE`、それ以外なら `K_DESTROY` へ移る。その後、手順 `c->step` の処理を 1 つ行う。\n\n* `K_WAIT_REQ`(受け側): `gsi_pump()` を呼び、`req_take()` で `c->port` 宛ての相手からの REQ を取る。取れたら相手の情報を写し(`take_peer()`)、REQ の経路 MTU([5])が 1 以上で自分のより小さければそれに合わせて `K_CQ` へ。\n* `K_CQ` / `K_QP` / `K_INIT` / `K_RTR`: CREATE_CQ / CREATE_QP(RC)/ RST2INIT_QP / INIT2RTR_QP を出す(`c->cmd` で出したかを覚える)。\n* `K_WAIT_REP`(掛け側): `gsi_pump()` を呼び、REP を受けていれば `K_RTR` へ。まだなら REQ を最初と `g_bfm_req_retry_ms` ごとに送る(相手のノードが立ち上がるまで送り直し続ける。時間切れにしない)。\n* `K_RTS`: RTR2RTS_QP を `c->amode`(はじめはポートの `atomic_mode`)で出す。失敗して `c->amode` が 0 でなければ、0 にして次に出し直す。成功したら `bfm_ops_attach()` でデータ経路に繋ぎ、`BFM_CS_UP` にして接続の内容を表示し、受け側は `K_REP`、掛け側は `K_UP` へ。\n* `K_REP`(受け側): REP を送り、`K_UP` へ。\n* `K_UP`: `BFM_CS_UP` なら `BFM_OK`。相手の BYE(`BFM_CS_CLOSED`)やエラー(`BFM_CS_ERROR`)なら表示して `K_DOWN` へ。\n* `K_DOWN`: `BFM_E_STATE` を返す(`bfm_reconnect()` を待つ)。\n* `K_BYE`: BYE を送る。送信の置き場が空かなければ、`c->t_sent` から `TX_DRAIN_MS`(100 ミリ秒)まで送り直し、それでも出なければあきらめて `K_DESTROY` へ。\n* `K_DESTROY`: `bfm_ops_detach()` の後、`mlx5_qp_destroy()` で QP と CQ を消し、枠を `BFM_CS_FREE` に戻す。張り直しなら `conn_begin()` で確立の最初へ、失敗(`c->result` が `BFM_OK` でない)なら `K_FAILED`、停止なら `K_PORT` にする。",
       "args": {"c": "接続の表の行"},
       "ret": "`BFM_INPROGRESS`: 途中(コマンドの完了・REQ / REP・GSI の送信の空き・ポートの立ち上げを待っている、または次の手順へ移った)。`BFM_OK`: 使える(`K_UP`)か、停止で畳み終えた。`BFM_E_STATE`: エラー・切断のまま(`K_DOWN`)、または使わない行(`K_IDLE`)。そのほかの負: 失敗した(`K_FAILED`。その理由)。",
@@ -533,6 +550,7 @@
     },
     {
       "func": "bfm_cm_conn_state",
+      "purpose": "接続の状態機械の細かい手順を、アプリケーションに見せる大まかな状態(使わない・立ち上げ中・確立中・使える・切れた・失敗)に直すための関数。`bfm_conn_state()` と、全体の様子をまとめる `bfm_run()` が使う。",
       "summary": "接続 `c` の公開する状態(`BFM_ST_*`)を返す。手順 `c->step` を acquire で読み、`K_IDLE` は `BFM_ST_UNUSED`、`K_PORT` は `BFM_ST_INIT`、`K_UP` は `BFM_CS_UP` なら `BFM_ST_UP`(そうでなければ `BFM_ST_DOWN`)、`K_DOWN` は `BFM_ST_DOWN`、`K_FAILED` は `BFM_ST_FAILED`、それ以外(確立・畳みの途中)は `BFM_ST_CONNECT` にする。",
       "args": {"c": "接続の表の行"},
       "ret": "`BFM_ST_UNUSED` / `BFM_ST_INIT` / `BFM_ST_CONNECT` / `BFM_ST_UP` / `BFM_ST_DOWN` / `BFM_ST_FAILED`。",
@@ -553,6 +571,7 @@
     },
     {
       "func": "bfm_cm_table_init",
+      "purpose": "接続の表を作り、使う接続をポートの立ち上げを待つ状態に置くための関数。最初の `bfm_run()` の準備(`run_start()`)で 1 回呼び、これ以降 `bfm_run()` が各接続の状態機械を進められるようになる。",
       "summary": "接続の表 `g_bfm_conn` を 0 で埋め、ポートごとに装置の `conn` をそのポートの行の先頭(`p * BFM_MAX_PORT_CONN`)に向け、各行に表の番号 `index`・ポートの中の番号 `pidx`・装置 `dev` を入れる。使うポートの `nconn` 本の内側の行を使う行(`used = 1`、手順 `K_PORT`)に、それ以外を `K_IDLE` にする。状態遷移の記録の時刻の起点 `s_slog_t0` を今の時刻にし、使う行には最初の遷移 `K_IDLE` → `K_PORT` を記録する(`set_step()`)。",
       "args": {},
       "ret": "なし",
@@ -573,6 +592,7 @@
     },
     {
       "func": "bfm_cm_reset",
+      "purpose": "ポートの接続管理(GSI と取っておいた REQ など)を、最初から用意し直せるようにするための関数。`bfm_dev_step()` がポートの立ち上げを始めるときに呼び、前回の立ち上げの状態を残さないようにする。",
       "summary": "ポート `d` の接続管理の状態 `s_cm[d->port]`(GSI の QP の状態・送信の置き場の番号・取っておいた REQ・立ち上げと停止の状態)を 0 で埋める。",
       "args": {"d": "ポートの装置"},
       "ret": "なし",
@@ -584,6 +604,7 @@
     },
     {
       "func": "slot_alloc",
+      "purpose": "1 本の接続が使うメモリ(QP と CQ の置き場、転送で使う中継バッファ)を、ポートの立ち上げのときに DMA 領域から前もって取っておくための下請け関数。`bfm_cm_init_step()` が接続ごとに呼ぶ。",
       "summary": "ポート `d` の接続 `i` の枠の QP の状態を 0 で埋めて `BFM_CS_FREE` にし、RC QP の WQ・ドアベルレコード・CQ・CQ のドアベルレコード・中継バッファ(`g_bfm_stage_size` を `BFM_PAGE` に切り上げた大きさ)・T10-DIF 用の中継バッファ(`BFM_DIF_SLOTS` 面。1 面 = `g_bfm_dif_buf_size / BFM_DIF_SLOTS` を `BFM_PAGE` に切り上げた大きさ)・多重度の枠の中継バッファ(`c->abuf`。枠の数 `c->aqd` x 1 枠 `c->abuf_slot`)を DMA 領域から切り出す。枠の数は `g_bfm_qdepth`(1〜`BFM_QD_MAX` の外なら `BFM_QD_MAX`)、1 枠の大きさは `g_bfm_async_buf_size` を 64 の倍数に切り上げた値(64 未満なら 64)。",
       "args": {"d": "ポートの装置", "i": "ポートの中の接続の番号"},
       "ret": "`BFM_OK`: 切り出した。`BFM_E_NOMEM`: DMA 領域が足りない。",
@@ -605,6 +626,7 @@
     },
     {
       "func": "bfm_cm_init_step",
+      "purpose": "ポートの立ち上げの最後の段階として、相手と接続管理のメッセージを交わす GSI と、各接続が使う資源を用意する状態機械。`bfm_dev_step()` が、済むまで繰り返し呼ぶ。済むと、そのポートの接続の確立を始められる。",
       "summary": "ポート `d` の GSI と接続の枠を、待つところまで用意する(`bfm_dev_step()` の `D_CM` から呼ばれる)。状態 `ci.step` に従い、GSI の WQ・ドアベルレコード・CQ・受信枠・送信の置き場を DMA 領域から切り出し(`G_START`)、UAR を取り(`G_UAR`)、CQ と GSI(QP1)を作って(`G_CQ`・`G_QP`)INIT・RTR・RTS へ進め(`G_INIT`・`G_RTR`・`G_RTS`)、受信を `BFM_GSI_PREPOST` 個出す。続けて接続の枠ごとに(`G_SLOT` を `d->nconn` 回)、メモリを切り出し(`slot_alloc()`)、UAR を取ってドアベルの窓を決め、BlueFlame を使うなら UAR を write-combining でも張る。全部そろってから `gsi_ready = 1` にする(`G_DONE`)。",
       "args": {"d": "ポートの装置"},
       "ret": "`BFM_INPROGRESS`: 途中(FW のコマンドの完了を待っている)。`BFM_OK`: 済んだ。`BFM_E_NOMEM`: DMA 領域が足りない。そのほか `mlx5_alloc_uar()` / `mlx5_cq_create()` / `mlx5_qp_create()` / `mlx5_qp_rst2init()` / `mlx5_qp_ud_init2rtr()` / `mlx5_qp_ud_rtr2rts()` / `slot_alloc()` の戻り値。",
@@ -698,6 +720,7 @@
     },
     {
       "func": "bfm_cm_fini_step",
+      "purpose": "ポートを止めるときの最初の段階として、そのポートの全部の接続を畳み(相手へ切断を知らせ)、接続管理の資源を片付ける状態機械。ポートを止める手順(`dev_stop_step()`)が、済むまで繰り返し呼ぶ。済むと、FW を止められる。",
       "summary": "ポート `d` の接続を畳み、GSI の送信が出ていくのを待ち、WC の窓を返す(`bfm_core.c` の止める手順 `dev_stop_step()` の `S_CM` から呼ばれる。`bfm_shutdown()` と、ポートの立ち上げの失敗)。状態 `cf.step` に従って進める。`F_CONNS` では、そのポートの使っている接続(`BFM_CS_FREE` でない)ごとに、畳む印が立っていなければ立てて(張り直しの印は落とし、結果は `BFM_OK`)`bfm_cm_conn_step()` で畳む手順を 1 つ進める(UP なら BYE を送り、QP と CQ を消す)。全部の接続が畳み終わったら `F_DRAIN` へ移り、GSI の送信が出ていくのを最大 `TX_DRAIN_MS`(100 ミリ秒)待ってから、write-combining で張った UAR の窓を返し、`gsi_ready = 0` にする(`F_DONE`)。",
       "args": {"d": "ポートの装置"},
       "ret": "`BFM_INPROGRESS`: 途中(接続を畳んでいる、または GSI の送信が出ていくのを待っている)。`BFM_OK`: 済んだ。",
@@ -746,6 +769,7 @@
     },
     {
       "func": "bfm_cm_poll",
+      "purpose": "立ち上がったポートで、相手から来た接続管理のメッセージを処理するための関数。`bfm_run()` が呼び、確立の後に来るもの(相手の切断の知らせ・REP が落ちたときの REQ の送り直し)にも答えられるようにする。",
       "summary": "ポート `d` の GSI に来たものを処理する(`gsi_pump()` を 1 回呼ぶ)。相手からの BYE で接続を閉じた扱いにし、REP が落ちたときの REQ の送り直しに REP を送り直す(どちらも `handle_msg()` が行う)。",
       "args": {"d": "ポートの装置"},
       "ret": "処理したメッセージの数(0 以上)。GSI が用意されていないときや GSI のエラー完了を見たときは 0。",
@@ -759,7 +783,8 @@
     },
     {
       "func": "bfm_conn",
-      "summary": "ポート `port` の接続 `i` を返す。使う行で、手順が `K_UP`(acquire で読む)かつ `BFM_CS_UP` のときだけ返す。",
+      "purpose": "アプリケーションが、`bfm_write()` などの転送の関数に渡す接続のハンドルを手に入れるための関数。接続はポートごとに番号で並んでおり、ポートの番号と接続の番号で選ぶ。使える接続のときだけハンドルを返すので、NULL でないことを確かめてから転送に使う(使えない理由を知るには `bfm_conn_state()` を使う)。",
+      "summary":"ポート `port` の接続 `i` を返す。使う行で、手順が `K_UP`(acquire で読む)かつ `BFM_CS_UP` のときだけ返す。",
       "args": {"port": "ConnectX のポートの番号(0〜`BFM_MAX_PORT`-1)", "i": "ポートの中の接続の番号(0〜`BFM_MAX_PORT_CONN`-1)"},
       "ret": "接続(`BFM_ST_UP` のとき)。範囲外・使わない行・使えない(確立の途中・エラー・切断・失敗)ときは NULL。",
       "pre": "どのコアから呼んでもよい(鍵は要らない)。",
@@ -773,6 +798,7 @@
     },
     {
       "func": "bfm_conn_state",
+      "purpose": "アプリケーションが、1 本の接続がいまどうなっているか(立ち上げ中・確立中・使える・切れた・失敗など)を知るための関数。`bfm_conn()` が NULL を返したときの理由を調べたり、切れた接続を見つけて `bfm_reconnect()` で張り直すかを決めたりするのに使う。どのコアから呼んでもよい。",
       "summary": "ポート `port` の接続 `i` の状態(`BFM_ST_*`)を返す(`bfm_cm_conn_state()`)。",
       "args": {"port": "ConnectX のポートの番号", "i": "ポートの中の接続の番号"},
       "ret": "`BFM_ST_*`。範囲外・使わない行は `BFM_ST_UNUSED`。",
@@ -789,6 +815,7 @@
     },
     {
       "func": "bfm_reconnect",
+      "purpose": "アプリケーションが、エラーになった・相手が切った接続(または使える接続)を張り直すための関数。bfmem は切れた接続を自分からは畳まないので、その接続で転送しているコアが無いことを確かめてから、これで張り直しを頼む。実際の張り直しはその後の `bfm_run()` が進め、相手のノードでも同じ接続についてこれを呼ぶ。",
       "summary": "ポート `port` の接続 `i` に、張り直すよう頼む。行の鍵 `c->lock` を(回って)取り、手順が `K_UP` か `K_DOWN` なら張り直しの印 `c->reconnect` を立てる。実際の張り直し(相手へ BYE を送って畳み、確立からやり直す)は、その後の `bfm_run()` が `bfm_cm_conn_step()` で進める。",
       "args": {"port": "ConnectX のポートの番号", "i": "ポートの中の接続の番号"},
       "ret": "`BFM_OK`: 頼んだ。`BFM_E_PARAM`: 範囲外か、使わない行。`BFM_E_STATE`: 使える・エラー・切断のどれでもない(確立の途中・失敗・畳みの途中)。",
@@ -807,6 +834,7 @@
     },
     {
       "func": "step_name",
+      "purpose": "接続の状態機械の手順を、人が読める名前で表示するための下請け関数。`bfm_conn_steplog()` が状態遷移の記録を表示するのに使う。",
       "summary": "手順 `s`(`K_*`)の名前(`K_` を除いたもの。例: `WAIT_REP`)を返す。",
       "args": {"s": "手順(`K_*`)"},
       "ret": "名前の文字列。知らない値なら `\"?\"`。",
@@ -818,6 +846,7 @@
     },
     {
       "func": "bfm_conn_steplog",
+      "purpose": "アプリケーションや試験が、1 本の接続がどの手順をどの順に通り、それぞれにどれだけ時間がかかり、どのコアが進めたかを調べるための関数。確立が進まない・張り直しが遅いといったときの切り分けに使う。どのコアから呼んでもよい。",
       "summary": "ポート `port` の接続 `i` の状態遷移の記録を表示する。行の鍵 `c->lock` と `g_bfm_ctl_lock` を(回って)取り、記録 `c->slog[]`・遷移の数・今の手順・今の時刻を手元に写して鍵を離し、見出し(今の手順・全部の遷移の数。上書きされていればその旨)と、最後の `BFM_STEPLOG_N` 回までを古い順に 1 行ずつ表示する。1 行は、通し番号・移った時刻(接続の表を作った時 `s_slog_t0` から、ms)・移したコア(Linux は CPU の番号、VxWorks は APIC ID)・移る前と後の手順の名前・移った先にとどまった時間(ms)。最後の行は今もとどまっているので、今までの時間を表示する。",
       "args": {"port": "ConnectX のポートの番号", "i": "ポートの中の接続の番号"},
       "ret": "`BFM_OK`: 表示した。`BFM_E_PARAM`: 範囲外か、使わない行。",

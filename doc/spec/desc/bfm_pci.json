@@ -4,6 +4,7 @@
   "functions": [
     {
       "func": "pci_cmd_read",
+      "purpose": "PCIe の設定空間の Command レジスタの今の値を知るための下請け関数。BAR0 を測る間・FLR の前・設定の後・Bus Master の切り替えで、Command の一部のビットだけを変えるときに、元の値を読むのに使う。",
       "summary": "ポート `d` の設定空間の Command レジスタ(オフセット 0x04 の下位 16bit)を読む。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`。`port` を使う)"},
       "ret": "Command レジスタの値。",
@@ -16,6 +17,7 @@
     },
     {
       "func": "pci_cmd_write",
+      "purpose": "PCIe の設定空間の Command レジスタを書き換えるための下請け関数。Memory Space・Bus Master・INTx の有効・無効を切り替えるときに使う。同じ 4 バイトにある Status は書いて消すビットなので、触らずに Command だけを書けるようにしてある。",
       "summary": "ポート `d` の設定空間の Command レジスタに `cmd` を書く。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`。`port` を使う)", "cmd": "Command レジスタに書く値"},
       "ret": "なし",
@@ -27,6 +29,7 @@
     },
     {
       "func": "pci_find_pcie_cap",
+      "purpose": "装置の PCI Express の capability の場所を知るための下請け関数。`pci_probe()` が呼び、見つけた場所は、FLR・Max Read Request Size の設定・リンクの速さと幅の表示で、PCIe のレジスタを読み書きするのに使う。",
       "summary": "ポート `d` の capability の連結リストをたどり、PCI Express の capability(ID 0x10)の位置を探す。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`。`port` を使う)"},
       "ret": "PCI Express の capability の設定空間の位置。無ければ 0。",
@@ -48,6 +51,7 @@
     },
     {
       "func": "ms_since",
+      "purpose": "PCIe の設定の手順で、時間で待つところ(保留中の DMA が消えるのを待つ・FLR の後の決まった待ち・設定空間が読めるようになるのを待つ)が、どれだけ待ったかを知るための下請け関数。`bfm_pci_setup_step()` が、回って待たずに待ち終えたかを判断するのに使う。",
       "summary": "時刻 `t0` からの経過時間をミリ秒で返す。",
       "args": {"t0": "起点の時刻(`bfm_port_time_ns()` の値。ナノ秒)"},
       "ret": "`t0` からの経過時間(ミリ秒。切り捨て)。",
@@ -60,6 +64,7 @@
     },
     {
       "func": "pci_setup_bar0",
+      "purpose": "NIC のレジスタの窓(BAR0)を、設定で決めたアドレスに置き、その場所と大きさを知るための下請け関数。`pci_setup()` が呼ぶ。得た場所と大きさは、後でポート層が BAR0 を CPU から触れるように張るのに使う。",
       "summary": "BAR0 の大きさを測り(全ビットに 1 を書いて読み戻す)、`addr` が 0 でなければ BAR0 に `addr` を書き込む。0 なら元の値を書き戻す。BAR0 の値(物理アドレス)と大きさを返す。測る間は Memory Space と Bus Master を止め、終わったら Command を元に戻す。",
       "args": {
         "d": "ポートの装置(`g_bfm_dev[port]`。`port` を使う)",
@@ -106,6 +111,7 @@
     },
     {
       "func": "pci_probe",
+      "purpose": "設定で指定した PCIe の装置が、bfmem が扱える ConnectX(4〜7)の PF であることを確かめるための下請け関数。`bfm_pci_setup_step()` が最初の手順で呼び、違う装置なら立ち上げを断る。あわせて、表示に使う装置の名前と、後の手順で使う PCI Express の capability の場所を得る。",
       "summary": "装置を確かめる(Mellanox の ConnectX-4〜7 の PF か)。設定空間の ID を読んで `d` の `vendor` / `device` を埋め、対応する ConnectX の表(`s_ids`)から `name` を引く。続けて PCI Express の capability を探し、その位置を `s_pci[d->port].pcie` に入れる。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)。`vendor` / `device` / `name` を埋める"},
       "ret": "0: 対応する装置。-1: 対応していない装置(ベンダ ID が違う、デバイス ID が表に無い)、または PCI Express の capability が無い。",
@@ -133,6 +139,7 @@
     },
     {
       "func": "bfm_pci_setup_reset",
+      "purpose": "ポートの PCIe の設定の手順を、最初からやり直せるようにするための関数。`bfm_dev_step()` がポートの立ち上げを始めるときに呼び、前回の立ち上げ(停止の後の立ち上げ直しなど)の途中の状態を残さないようにする。",
       "summary": "ポート `d` の PCIe の設定の状態を最初に戻す(`s_pci[d->port].step = P_PROBE`、capability の位置と時刻の起点を 0)。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`。`port` を使う)"},
       "ret": "なし",
@@ -144,6 +151,7 @@
     },
     {
       "func": "bfm_pci_setup_step",
+      "purpose": "OS もドライバも設定しない NIC の PCIe の設定空間を、bfmem 自身で使える状態にするための状態機械。ポートの立ち上げの最初の段階として `bfm_dev_step()` が、済むまで繰り返し呼ぶ。済むと、BAR0 の場所と大きさが分かり、NIC のレジスタを触れるように張れて、NIC がメモリへ DMA できるようになる。",
       "summary": "ポート `d` の PCIe の設定一式を、待つところまで進める(状態は `s_pci[d->port].step`)。装置の確認(`pci_probe()`)→ FLR(`g_bfm_pcie_flr` が 0 でなく、装置が対応していれば。Bus Master を落とし、保留中の DMA(Transactions Pending)が消えるのを最大 100ms 待ってから FLR を出し、100ms 待ち(PCIe 基本仕様の決まり)、設定空間が読めるようになるまで最大 1 秒待つ)→ BAR0・MRRS・Command の設定(`pci_setup()`)の順に行う。`d` の `vendor` / `device` / `name` / `bar0_phys` / `bar0_size` を埋める。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)。`vendor` / `device` / `name` / `bar0_phys` / `bar0_size` を埋める"},
       "ret": "`BFM_INPROGRESS`: 途中(もう一度呼ぶと先へ進む)。`BFM_OK`: 済んだ。`BFM_E_HW`: 対応していない装置、PCI Express の capability が無い、FLR の後に設定空間が読めない、BAR0 の設定に失敗した。",
@@ -225,6 +233,7 @@
     },
     {
       "func": "pci_setup",
+      "purpose": "PCIe の設定の手順の最後の段階で、NIC のレジスタの窓を置き、メモリへの読み書きと DMA を許すための下請け関数。`bfm_pci_setup_step()` が、装置を確かめて FLR を済ませた後に呼ぶ。",
       "summary": "ポート `d` の BAR0(`pci_setup_bar0()`。`g_bfm_bar0_addr[d->port]`)→ Max Read Request Size(`g_bfm_pcie_mrrs` が 0 でなければ)→ Memory Space・Bus Master を有効にし INTx を止める、の順に設定し、装置の名前・ID・BAR0・リンクの速さと幅・MRRS を(ポートの番号とともに)表示する。`d` の `bar0_phys` / `bar0_size` を埋める。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)。`name` / `vendor` / `device` を `pci_probe()` で埋めてあること。`bar0_phys` / `bar0_size` を埋める"},
       "ret": "0: 成功。-1: BAR0 の設定に失敗した。",
@@ -251,6 +260,7 @@
     },
     {
       "func": "bfm_pci_bus_master",
+      "purpose": "NIC がメモリへ DMA するのを許す・止めるための関数。ポートを止める手順(`dev_stop_step()`)が、FW を止めた後に DMA を止めるのに使う。",
       "summary": "ポート `d` の Command レジスタの Bus Master ビットを入れる、または落とす。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`。`port` を使う)", "on": "0 以外なら入れる、0 なら落とす"},
       "ret": "なし",

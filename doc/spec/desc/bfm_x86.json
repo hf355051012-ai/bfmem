@@ -4,6 +4,7 @@
   "functions": [
     {
       "func": "cpu_probe",
+      "purpose": "CPU の種類と使える機能を最初に一度だけ調べておくための関数。`bfm_x86_init()` が呼び、TSC の周波数の決め方・読んでよい MSR の判断・CPU の情報の表示がこの結果を使う。",
       "summary": "CPUID で CPU の種類(Intel かどうか・family・model・名前)と、使える機能(CPUID の最大の番号、leaf 1 の ecx、leaf 6 の eax / ecx、TSC が invariant か)を調べて、ファイルの中の変数に覚える。",
       "args": {},
       "ret": "なし",
@@ -40,6 +41,7 @@
     },
     {
       "func": "msr_read",
+      "purpose": "MSR(CPU の機種ごとのレジスタ)を、この CPU で読んでよい場合だけ読むための関数。`tsc_hz_find()` と `bfm_x86_report()` が、読めない CPU で落ちないように使う。",
       "summary": "移植層が渡した関数(`s_rdmsr`)で MSR を読む。読む関数が無いとき、Intel の family 6 でないときは読まずに -1 を返す。",
       "args": {"msr": "MSR の番号", "val": "読んだ値を入れる先"},
       "ret": "0: 読めた。-1: 読まなかった・読めなかった。",
@@ -55,6 +57,7 @@
     },
     {
       "func": "tsc_hz_find",
+      "purpose": "TSC(CPU の時刻のカウンタ)の数を時間に直すために、その周波数を決める関数。`bfm_x86_init()` が呼ぶ。",
       "summary": "TSC の周波数(Hz)を決める。`g_bfm_tsc_hz` → CPUID 15h(水晶の周波数 × ebx / eax)→ CPUID 16h(基準の周波数 MHz)→ `MSR_PLATFORM_INFO`(基準の倍率 × 100MHz)の順に、最初に得られたものを使い、どれを使ったかを `s_tsc_src` に覚える。",
       "args": {},
       "ret": "TSC の周波数(Hz)。0 = 分からない。",
@@ -88,6 +91,7 @@
     },
     {
       "func": "bfm_x86_init",
+      "purpose": "移植層が、TSC から時刻と待ちを作れるように最初に一度だけ呼ぶ関数。VxWorks 版と Linux 版の `bfm_port_init()` が呼び、成功すると `bfm_x86_time_ns()` と `bfm_x86_delay_us()` が使えるようになる。",
       "summary": "CPU を調べ(`cpu_probe()`)、TSC の周波数を決めて(`tsc_hz_find()`)、TSC からナノ秒へ直す係数(`s_ns_mult` = 10^9 × 2^32 / 周波数)を求める。TSC が invariant でなければ注意を表示する。`g_bfm_verbose` なら `bfm_x86_report()` で CPU の情報を表示する。",
       "args": {"rdmsr": "MSR を読む関数(移植層が渡す)。NULL なら MSR を読まない"},
       "ret": "0: 成功。-1: TSC の周波数が分からない(理由を表示する)。",
@@ -113,6 +117,7 @@
     },
     {
       "func": "bfm_x86_time_ns",
+      "purpose": "OS の時計を使わずに、ナノ秒の時刻を得るための関数。VxWorks 版の `bfm_port_time_ns()` がこれを返し、bfmem の本体は時間切れや時間で待つところの判定に使う。",
       "summary": "TSC を読み、`s_ns_mult` を掛けて 32bit 右へずらし、ナノ秒にして返す(128bit で計算)。",
       "args": {},
       "ret": "時刻(ナノ秒)。TSC が 0 のときを 0 とする単調な値。",
@@ -125,6 +130,7 @@
     },
     {
       "func": "bfm_x86_delay_us",
+      "purpose": "OS の機能を使わずに、指定したマイクロ秒だけ待つための関数。VxWorks 版の `bfm_port_delay_us()` が使い、`bfm_x86_report()` も実効の周波数を測る間の待ちに使う。",
       "summary": "`us` マイクロ秒ぶんの TSC の数を求め、TSC がそれだけ進むまで `pause` を挟んで空回りする。",
       "args": {"us": "待つ時間(マイクロ秒)"},
       "ret": "なし",
@@ -140,6 +146,7 @@
     },
     {
       "func": "bfm_x86_apic_id",
+      "purpose": "OS の機能を使わずに、いま動いているコアを見分ける番号を得るための関数。VxWorks 版の `bfm_port_cpu_id()` がこれを返し、Linux 版も OS から CPU の番号を得られないときに使う。",
       "summary": "今動いているコアの APIC ID を返す。CPUID の基本の葉が 0Bh まであり、0Bh の ebx が 0 でなければ(0Bh がある)、0Bh の edx(x2APIC ID。32bit)を返す。そうでなければ CPUID 1 の ebx[31:24](8bit の APIC ID)を返す。",
       "args": {},
       "ret": "APIC ID。",
@@ -161,6 +168,7 @@
     },
     {
       "func": "bfm_x86_report",
+      "purpose": "試験や不具合の調べのときに、時刻の精度や遅延に関わる CPU の状態(周波数・パッケージ C-state の上限など)を表示して確かめるための関数。詳しく表示する設定(`g_bfm_verbose`)のときに `bfm_x86_init()` が呼ぶ。",
       "summary": "CPU の名前・family・model と、TSC の周波数(どこから求めたか・invariant か)を表示する。MSR を読めるなら、基準と最小の周波数(`MSR_PLATFORM_INFO`)、ターボの最大(`MSR_TURBO_RATIO_LIMIT`、1 コア)、今の倍率(`IA32_PERF_STATUS`)、実効の周波数(10ms 空回りする間の `IA32_APERF` / `IA32_MPERF` の増え方の比 × TSC の周波数)、パッケージ C-state の上限と固定されているか(`MSR_PKG_CST_CONFIG_CONTROL`)も表示する。",
       "args": {},
       "ret": "なし",

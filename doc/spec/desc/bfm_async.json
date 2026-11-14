@@ -4,6 +4,7 @@
   "functions": [
     {
       "func": "timeout_ns",
+      "purpose": "多重度つきの操作の時間切れの判定(`overdue()`・`get_slot()`・`bfm_test()`)が、設定の値をナノ秒の時刻と比べられる形で得るための下請け関数。",
       "summary": "非同期の操作の時間切れ(`g_bfm_async_timeout_ms`)をナノ秒にして返す。",
       "args": {},
       "ret": "時間切れ(ns)。",
@@ -15,6 +16,7 @@
     },
     {
       "func": "bfm_async_attach",
+      "purpose": "接続ができたとき(張り直しを含む)に、多重度つきの操作の枠を全部空いた状態にし、新しい接続で非同期の操作を出せるようにするための関数。`bfm_ops_attach()` が呼ぶ。張り直しの前に出した操作の tag を見分けられるように、通し番号は続けて使う。",
       "summary": "接続ができたとき(張り直しを含む)に、多重度の枠を全部空ける。枠の表(`c->as[]`)と位置ごとの枠の番号(`c->wqe_slot[]`)を 0 にし、空きの印(`c->afree`)を枠の数(`c->aqd`)だけ立て、仕掛かり中の数とエラーを 0 にする。通し番号(`c->aseq`)は張り直しをまたいで続け、今の接続になってから進めた数 `c->asince` を 0 にする。",
       "args": {"c": "接続ができた接続"},
       "ret": "なし",
@@ -30,6 +32,7 @@
     },
     {
       "func": "kind_name",
+      "purpose": "多重度つきの操作の失敗や時間切れを表示するときに、操作の種類を名前にするための下請け関数。`bfm_async_done()` と `fail_timeout()` が使う。",
       "summary": "枠の操作の種類(`BFM_AK_*`)の名前を返す(表示用)。",
       "args": {"kind": "操作の種類(`BFM_AK_READ` / `BFM_AK_WRITE` / `BFM_AK_ATOMIC` / `BFM_AK_ATOMIC32` / `BFM_AK_WRITE_NOACK`)"},
       "ret": "名前の文字列(\"read\"、\"write\"、\"atomic(8 バイト)\"、\"atomic(4 バイト)\"、それ以外は \"write(ACK を確かめない)\")。",
@@ -47,6 +50,7 @@
     },
     {
       "func": "bfm_async_done",
+      "purpose": "多重度つきの操作の完了を受け取ったときに、その結果を操作の枠に入れるための関数。`poll_one()`(`bfm_ops.c`)が、拾った完了が多重度つきの操作のものなら呼ぶ。これで read のデータや atomic の元の値がアプリケーションのバッファに入り、枠が空いて次の操作に使えるようになる。",
       "summary": "位置 `pc` の WQE の完了を、その枠に入れる(`poll_one()` から)。成功なら、read は応答を手元の `dst` へ写し(32 バイトまでで CQE に入っていれば `scat` から、そうでなければ枠の中継バッファから)、atomic は元の値を `dst` へ入れる(`dst` が NULL なら入れない)。結果を枠に残し、枠を空きに戻し、仕掛かり中の数を減らす。エラーなら最初のエラーを `c->aerr` に覚えて表示する。",
       "args": {"c": "接続", "pc": "完了した WQE の SQ の位置(WQEBB 単位)", "scat": "応答データを抱えた CQE(無ければ NULL)", "rc": "完了の結果(`BFM_OK` か、エラー完了の負の値)"},
       "ret": "なし",
@@ -87,6 +91,7 @@
     },
     {
       "func": "overdue",
+      "purpose": "仕掛かり中の操作のうち、出してから時間切れを過ぎたものがあるかを調べるための下請け関数。`get_slot()` と `bfm_check()` が、返事の来ない操作を見つけるのに使う。",
       "summary": "仕掛かり中の枠のうち、出した時刻が最も古いものを探し、それが出してから時間切れを過ぎていればその番号を返す。",
       "args": {"c": "接続", "now": "今の時刻(ns)"},
       "ret": "時間切れを過ぎた最も古い枠の番号。無ければ -1。",
@@ -105,6 +110,7 @@
     },
     {
       "func": "fail_timeout",
+      "purpose": "多重度つきの操作に返事が来ないまま時間切れになったときに、それを表示して接続を使えない状態にするための下請け関数。`get_slot()`・`bfm_test()`・`bfm_check()` が使う。",
       "summary": "時間切れ: 枠 `k` の操作(種類の名前は `kind_name()`)に ACK・応答が無いことを表示し、接続をエラーにする(`BFM_CS_UP` なら `BFM_CS_ERROR` にし、`c->aerr` が 0 なら `BFM_E_TIMEOUT` を覚える)。",
       "args": {"c": "接続", "k": "時間切れになった枠の番号", "why": "表示する理由"},
       "ret": "`BFM_E_TIMEOUT`(常に)。",
@@ -119,6 +125,7 @@
     },
     {
       "func": "get_slot",
+      "purpose": "多重度つきの操作を出す関数(`issue()`・`issue_atomic()`)が、操作を記録する空きの枠を 1 つ手に入れるための下請け関数。枠が全部使われていれば、完了を受け取って空くのを待つ(時間切れの上限つき)。",
       "summary": "空いている枠を 1 つ取る(SQ にも `bbs` 個の WQEBB の空きがあること)。空いていれば待たずに返す。空いていなければ `bfm_ops_reap_all()` で完了を刈り取って空くまで回って待つ。仕掛かり中のどれかが出してから時間切れを過ぎたら、または待ち始めてから時間切れを過ぎたら、接続をエラーにして `BFM_E_TIMEOUT` を返す。",
       "args": {"c": "接続", "bbs": "出す WQE の大きさ(WQEBB の数)", "slot": "取った枠の番号を入れる先"},
       "ret": "`BFM_OK`: 取れた(`*slot` に番号)。`BFM_E_TIMEOUT`: 時間切れ。`BFM_E_STATE`: 接続が使えなくなった。そのほか負: `c->aerr`(非同期の操作で先に見たエラー)。",
@@ -157,6 +164,7 @@
     },
     {
       "func": "commit",
+      "purpose": "多重度つきの操作を NIC に渡した後に、その操作を枠に記録して仕掛かり中にし、アプリケーションに返す tag を作るための下請け関数。`issue()` と `issue_atomic()` が使う。これで、後で完了が来たときにどの操作のものか分かる。",
       "summary": "出した操作を枠 `k` に記録する。枠に通し番号・種類・`dst`・長さ・位置・出した時刻を入れて仕掛かり中にし、出した位置 `pc` に枠の番号 + 1 を書き(`c->wqe_slot[]`)、空きの印から外し、仕掛かり中の数を増やす。`tag` が NULL でなければ tag(通し番号 << 6 OR 枠の番号)を返す。今の接続になってから進めた通し番号の数 `c->asince` を、進めた分だけ増やす(`SEQ_MASK` で止める)。`issue()` と `issue_atomic()` が使う。",
       "args": {"c": "接続", "k": "使う枠の番号(`get_slot()` で取ったもの)", "pc": "出した WQE の SQ の位置(出す前の `c->qp.sq_pc`)", "kind": "操作の種類(`BFM_AK_*`)", "dst": "read なら読んだデータを置く先、atomic なら元の値を入れる先(write では NULL)", "len": "操作の長さ(バイト)", "off": "相手の公開メモリの中の位置(表示用)", "tag": "tag を入れる先(NULL なら返さない)"},
       "ret": "なし",
@@ -174,6 +182,7 @@
     },
     {
       "func": "issue",
+      "purpose": "非同期の write / read を 1 つ出すための下請け関数。`bfm_write_async()` と `bfm_read_async()` が使う。",
       "summary": "非同期の write / read を 1 個出す。範囲と先のエラーを確かめ、write で `len` が `bfm_inline_max()` 以下ならデータを WQE に埋め込み(`bfm_ops_build_write_inline()`)、そうでなければ枠を取って、write なら `src` を枠の中継バッファへ写してから、read なら枠の中継バッファを着地点にして `bfm_ops_build_rdma()` で組む。`bfm_ops_post()` で出した後、`commit()` で枠に記録して仕掛かり中にする(`tag` が NULL でなければ tag を返す)。",
       "args": {"c": "接続", "kind": "`BFM_AK_WRITE` / `BFM_AK_WRITE_NOACK` / `BFM_AK_READ`", "off": "相手の公開メモリの先頭からのオフセット", "src": "write で書くデータ(read では NULL)", "dst": "read で読んだデータを置く先(write では NULL)", "len": "長さ(バイト)", "tag": "tag を入れる先(NULL なら返さない)"},
       "ret": "`BFM_OK`: 出した。`BFM_E_STATE` / `BFM_E_PARAM`: `bfm_ops_check_range()` の失敗。`BFM_E_PARAM`: inline でない操作で `len` が枠の中継バッファ(`c->abuf_slot`)を超える。そのほか負: `c->aerr`(先に見たエラー)、`get_slot()` / `bfm_ops_post()` の戻り値。",
@@ -203,6 +212,7 @@
     },
     {
       "func": "issue_atomic",
+      "purpose": "非同期の atomic を 1 つ出すための下請け関数。`bfm_cas_async()`・`bfm_faa_async()`・`bfm_cas32_async()`・`bfm_faa32_async()` が使う。",
       "summary": "非同期の atomic を 1 個出す。先のエラーを確かめ、範囲・境界・未対応を一度組んでみて確かめてから `get_slot()` で枠を取り、`bfm_ops_build_atomic()` で、元の値の着地点をその枠の中継バッファにした atomic の WQE を組んで `bfm_ops_post()` で出し、`commit()` で枠に記録して tag を返す。種類は、`opcode` が `MLX5_OPCODE_ATOMIC_MASKED_CS` / `MLX5_OPCODE_ATOMIC_MASKED_FA` なら `BFM_AK_ATOMIC32`(長さ 4)、そうでなければ `BFM_AK_ATOMIC`(長さ 8)。元の値は、完了を刈り取ったときに `bfm_async_done()` が `old` へ入れる。",
       "args": {"c": "接続", "opcode": "`MLX5_OPCODE_ATOMIC_CS` / `MLX5_OPCODE_ATOMIC_FA` / `MLX5_OPCODE_ATOMIC_MASKED_CS` / `MLX5_OPCODE_ATOMIC_MASKED_FA`", "off": "相手の公開メモリの先頭からのオフセット", "swap_add": "CAS なら置き換える値、FAA なら足す値", "cmp": "CAS なら比べる値(FAA では 0)", "old": "元の値を入れる先(8 バイトなら `uint64_t`、4 バイトなら `uint32_t`。NULL なら入れない)", "tag": "tag を入れる先"},
       "ret": "`BFM_OK`: 出した。そのほか負: `c->aerr`(先に見たエラー)、`get_slot()` / `bfm_ops_build_atomic()`(`BFM_E_STATE`・`BFM_E_PARAM`・`BFM_E_NOTSUP`)/ `bfm_ops_post()` の戻り値。",
@@ -226,6 +236,7 @@
     },
     {
       "func": "bfm_write_async",
+      "purpose": "アプリケーションが、相手の公開メモリへの write を完了を待たずに出し、複数の write を重ねて流すための関数。届いたことを 1 つずつ確かめるときは tag を受け取って `bfm_test()` / `bfm_wait()` で確かめ、確かめないときは `bfm_check()` で失敗だけを見る。",
       "summary": "相手の公開メモリ + `off` へ `len` バイト書く write を、完了を待たずに出す。`ack` が `BFM_ACK` なら ACK を確かめる write として出して `*tag` を返し、`BFM_NOACK` なら ACK を確かめない write として出す(tag は返さない)。",
       "args": {"c": "書く接続", "off": "相手の公開メモリの先頭からのオフセット", "src": "書くデータ", "len": "長さ(バイト。`bfm_inline_max()` を超えるなら `g_bfm_async_buf_size` まで)", "ack": "`BFM_ACK`(0 以外): ACK を確かめる(tag を返す)。`BFM_NOACK`(0): 確かめない", "tag": "tag を入れる先(`BFM_ACK` なら NULL にしない。`BFM_NOACK` なら見ない)"},
       "ret": "`BFM_OK`: 出した。`BFM_E_PARAM`: `c` か `src` が NULL、または `BFM_ACK` で `tag` が NULL。そのほか `issue()` の戻り値(`BFM_E_STATE`・`BFM_E_PARAM`・`BFM_E_TIMEOUT`・エラー完了の値)。",
@@ -239,6 +250,7 @@
     },
     {
       "func": "bfm_read_async",
+      "purpose": "アプリケーションが、相手の公開メモリからの read を完了を待たずに出し、複数の read を重ねて流すための関数。返る tag を `bfm_test()` / `bfm_wait()` に渡して、読み終わったかを確かめる。",
       "summary": "相手の公開メモリ + `off` から `len` バイト読む read を、完了を待たずに出して `*tag` を返す。応答は、完了を刈り取ったときに `dst` へ写す。",
       "args": {"c": "読む接続", "off": "相手の公開メモリの先頭からのオフセット", "dst": "読んだデータを置く先", "len": "長さ(バイト。`g_bfm_async_buf_size` まで)", "tag": "tag を入れる先(NULL にしない)"},
       "ret": "`BFM_OK`: 出した。`BFM_E_PARAM`: `c`・`dst`・`tag` のどれかが NULL。そのほか `issue()` の戻り値。",
@@ -252,6 +264,7 @@
     },
     {
       "func": "bfm_test",
+      "purpose": "アプリケーションが、非同期に出した操作(tag で指す)が済んだかを、待たずに確かめるための関数。済んでいれば、write は相手に届き、read のデータや atomic の元の値は手元に入っている。",
       "summary": "tag の操作が済んだかを確かめる(待たない)。先に `bfm_ops_reap_all()` で来ている完了を刈り取り、tag の枠を見る。張り直しの前に出した操作(何個前に出したか = 次の通し番号との差が、今の接続になってから進めた数 `c->asince` より大きい)なら `BFM_E_STATE`。枠の通し番号が tag のものと違えば(枠が次の操作に使われた)済んで成功、仕掛かり中でなければ枠に残した結果。仕掛かり中で、接続が使えなければそのエラー、出してから時間切れを過ぎていれば接続をエラーにして `BFM_E_TIMEOUT` を返す。",
       "args": {"c": "接続", "tag": "`bfm_write_async()`(`BFM_ACK`)/ `bfm_read_async()` / `bfm_cas_async()` などの atomic が返した tag"},
       "ret": "`BFM_OK`: 済んだ(write は相手が受け取った。read は `dst` に入った。atomic は元の値が `*old` に入った)。`BFM_INPROGRESS`: まだ。`BFM_E_PARAM`: `c` が NULL か、tag の枠の番号が枠の数以上か、通し番号が 0。`BFM_E_STATE`: 張り直しの前に出した操作(結果は分からない)。`BFM_E_TIMEOUT`: 出してから時間切れを過ぎた。そのほか負: 枠に残したエラー完了の値、または接続が使えない(`c->aerr`、それが 0 なら `BFM_E_STATE`)。",
@@ -276,6 +289,7 @@
     },
     {
       "func": "bfm_wait",
+      "purpose": "アプリケーションが、非同期に出した操作(tag で指す)が済むまで待つための関数。`bfm_test()` を待つ形にしたもの。",
       "summary": "tag の操作が済むまで待つ。`bfm_test()` が `BFM_INPROGRESS` 以外を返すまで、`bfm_cpu_relax()` を挟んで呼び続ける。",
       "args": {"c": "接続", "tag": "確かめる tag"},
       "ret": "`bfm_test()` の `BFM_INPROGRESS` 以外の戻り値。",
@@ -290,6 +304,7 @@
     },
     {
       "func": "bfm_check",
+      "purpose": "アプリケーションが、非同期の操作の進み具合(仕掛かり中の数)と、失敗や時間切れが起きていないかを確かめるための関数。tag を受け取らない write(ACK を確かめない write)の失敗は、これで知る。",
       "summary": "完了を刈り取り、仕掛かり中の数を `*inflight` に返す。非同期の操作で先にエラーを見ていればそれを、出してから時間切れを過ぎても ACK・応答の無い操作があれば(表示して接続をエラーにし)`BFM_E_TIMEOUT` を返す。",
       "args": {"c": "接続", "inflight": "仕掛かり中の数を入れる先(NULL なら返さない)"},
       "ret": "`BFM_OK`: エラーも時間切れも無い。`BFM_E_PARAM`: `c` が NULL。`BFM_E_TIMEOUT`: 時間切れの操作がある。`BFM_E_STATE`: 接続が使えない。そのほか負: `c->aerr`(エラー完了の値。ACK を確かめない write の失敗もここで分かる)。",
@@ -311,6 +326,7 @@
     },
     {
       "func": "bfm_cas_async",
+      "purpose": "アプリケーションが、相手の公開メモリの 8 バイトへの compare-and-swap を完了を待たずに出し、複数の atomic を重ねて流すための関数(`bfm_cas()` の非同期版)。返る tag を `bfm_test()` / `bfm_wait()` に渡し、済めば元の値が手元に入っている。",
       "summary": "相手の公開メモリ + `off` の 8 バイトへの compare-and-swap(値が `expect` なら `desired` に置き換える)を、完了を待たずに出して `*tag` を返す(`bfm_cas()` の多重度つき)。元の値は、完了を刈り取ったときに `*old` へ入れる。",
       "args": {"c": "操作する接続", "off": "相手の公開メモリの先頭からのオフセット(8 の倍数)", "expect": "比べる値", "desired": "置き換える値", "old": "元の値を入れる先(NULL なら入れない)", "tag": "tag を入れる先(NULL にしない)"},
       "ret": "`BFM_OK`: 出した。`BFM_E_PARAM`: `c` か `tag` が NULL。そのほか `issue_atomic()` の戻り値(`BFM_E_STATE`・`BFM_E_PARAM`(範囲・境界)・`BFM_E_TIMEOUT`・エラー完了の値)。",
@@ -324,6 +340,7 @@
     },
     {
       "func": "bfm_faa_async",
+      "purpose": "アプリケーションが、相手の公開メモリの 8 バイトへの fetch-and-add を完了を待たずに出し、複数の atomic を重ねて流すための関数(`bfm_faa()` の非同期版)。返る tag を `bfm_test()` / `bfm_wait()` に渡し、済めば足す前の値が手元に入っている。",
       "summary": "相手の公開メモリ + `off` の 8 バイトへの fetch-and-add(`add` を足す)を、完了を待たずに出して `*tag` を返す(`bfm_faa()` の多重度つき)。足す前の値は、完了を刈り取ったときに `*old` へ入れる。",
       "args": {"c": "操作する接続", "off": "相手の公開メモリの先頭からのオフセット(8 の倍数)", "add": "足す値", "old": "足す前の値を入れる先(NULL なら入れない)", "tag": "tag を入れる先(NULL にしない)"},
       "ret": "`bfm_cas_async()` と同じ。",
@@ -337,6 +354,7 @@
     },
     {
       "func": "bfm_cas32_async",
+      "purpose": "アプリケーションが、相手の公開メモリの 4 バイトへの compare-and-swap を完了を待たずに出すための関数(`bfm_cas32()` の非同期版)。両方の装置が 4 バイトの atomic に対応しているときに使える。",
       "summary": "相手の公開メモリ + `off` の 4 バイトへの compare-and-swap(拡張 atomic)を、完了を待たずに出して `*tag` を返す(`bfm_cas32()` の多重度つき)。元の値は、完了を刈り取ったときに `*old` へ入れる。",
       "args": {"c": "操作する接続", "off": "相手の公開メモリの先頭からのオフセット(4 の倍数)", "expect": "比べる値", "desired": "置き換える値", "old": "元の値を入れる先(NULL なら入れない)", "tag": "tag を入れる先(NULL にしない)"},
       "ret": "`BFM_OK`: 出した。`BFM_E_PARAM`: `c` か `tag` が NULL。`BFM_E_NOTSUP`: 自分の装置が拡張 atomic の 4 バイトに対応していない。そのほか `issue_atomic()` の戻り値。",
@@ -350,6 +368,7 @@
     },
     {
       "func": "bfm_faa32_async",
+      "purpose": "アプリケーションが、相手の公開メモリの 4 バイトへの fetch-and-add を完了を待たずに出すための関数(`bfm_faa32()` の非同期版)。両方の装置が 4 バイトの atomic に対応しているときに使える。",
       "summary": "相手の公開メモリ + `off` の 4 バイトへの fetch-and-add(拡張 atomic)を、完了を待たずに出して `*tag` を返す(`bfm_faa32()` の多重度つき)。足す前の値は、完了を刈り取ったときに `*old` へ入れる。",
       "args": {"c": "操作する接続", "off": "相手の公開メモリの先頭からのオフセット(4 の倍数)", "add": "足す値", "old": "足す前の値を入れる先(NULL なら入れない)", "tag": "tag を入れる先(NULL にしない)"},
       "ret": "`bfm_cas32_async()` と同じ。",

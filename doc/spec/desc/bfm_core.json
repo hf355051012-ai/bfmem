@@ -4,6 +4,7 @@
   "functions": [
     {
       "func": "check_config",
+      "purpose": "立ち上げを始める前に、`bfm_config.h` の設定の値の誤りを見つけて立ち上げを断るための関数。`run_start()` が最初に呼ぶ。直せる値(範囲外の数など)は使える値に直し、そのまま進められるようにする。",
       "summary": "立ち上げの前に設定の変数を検査する。\n\n* DMA 領域と公開メモリの先頭・大きさが 4KiB の境界・倍数で、大きさが 0 でないこと\n* DMA 領域と公開メモリが重ならないこと\n* 使うポート(`g_bfm_port_conn[p]` が 0 でない)ごとに、`g_bfm_local_ip[p]` と `g_bfm_peer_ip[p]` が 0 でない別の値であること\n* 使うポートが 1 つ以上あること\n\nあわせて `g_bfm_port_conn[p]` を `BFM_MAX_PORT_CONN` 以下に、`g_bfm_stage_size` を 4KiB 以上に、`g_bfm_dif_buf_size` を 8KiB(2 面 × 4KiB)以上に、`g_bfm_signal_every` と `g_bfm_req_retry_ms` を 1 以上に直す。",
       "args": {},
       "ret": "`BFM_OK`: 使える設定。`BFM_E_PARAM`: 使えない設定(理由を表示する)。",
@@ -41,6 +42,7 @@
     },
     {
       "func": "run_start",
+      "purpose": "最初の `bfm_run()` で 1 回だけ、ポートごとの立ち上げを始められる状態を用意するための関数。これが済むと、接続の表の各行の状態機械を `bfm_run()` が進められるようになる。",
       "summary": "最初の `bfm_run()` で 1 回だけ行う準備。設定を検査し(`check_config()`)、装置 `g_bfm_dev[]` を 0 で埋めてポートごとに番号・使うか(`g_bfm_port_conn[p]` が 0 でない)・接続の数・掛け側か(自分の IPv4 < 相手の IPv4)を入れて `D_IDLE` にする。続けてポート層を開き(`bfm_port_init()`。DMA 領域と公開メモリを使えるようにする)、接続の表を作り(`bfm_cm_table_init()`)、DMA 領域の切り出しを最初に戻し(`bfm_mem_reset()`)、使うポートごとに接続の数・役割・IPv4 を表示する。",
       "args": {},
       "ret": "`BFM_OK`: 準備できた。`BFM_E_PARAM`: 設定が不正(`check_config()`)。`BFM_E_HW`: ポート層の初期化に失敗。",
@@ -70,6 +72,7 @@
     },
     {
       "func": "dev_stop_begin",
+      "purpose": "ポートを止める手順を最初から始めるための関数。`bfm_shutdown()` と、ポートの立ち上げに失敗したときの `bfm_dev_step()` が呼び、その後の `dev_stop_step()` で実際に止める。止め終えたときに返す結果(停止なら成功、立ち上げの失敗ならその理由)をここで覚えさせる。",
       "summary": "ポート `d` を止める手順を始める。`d->phase` を `D_STOP` に、止める手順 `d->stop` を最初(`S_CM`)にし、止め終えたときの結果 `d->stop_rc` に `rc` を入れる。",
       "args": {"d": "止めるポートの装置", "rc": "止め終えたときの結果(立ち上げの失敗の理由。`bfm_shutdown()` からは `BFM_OK`)"},
       "ret": "なし",
@@ -81,6 +84,7 @@
     },
     {
       "func": "dev_stop_step",
+      "purpose": "ポートで取った資源(接続・FW・PCIe の設定)を、回って待たずに少しずつ返していくための関数。`bfm_shutdown()` と、立ち上げに失敗したときの `bfm_dev_step()` が、終わるまで繰り返し呼ぶ。済むと、そのポートの NIC は止まり、メモリへの DMA もしなくなる。",
       "summary": "ポート `d` を止める手順を、待つところまで進める。接続を畳み、GSI の送信を待ち、WC の窓を返す(`bfm_cm_fini_step()`)→ 出したままの FW のコマンドの完了を待って捨てる(`mlx5_cmd_drain()`)→ FW を止める(`mlx5_hca_teardown()`)→ Bus Master を落として BAR0 を外す、の順に行う。",
       "args": {"d": "止めるポートの装置"},
       "ret": "`BFM_INPROGRESS`: 途中(もう一度呼ぶと先へ進む)。`BFM_OK`: 済んだ。",
@@ -137,6 +141,7 @@
     },
     {
       "func": "bfm_dev_step",
+      "purpose": "1 つのポート(ConnectX の 1 つの PCIe の function)を、接続を張れる状態まで立ち上げる状態機械。そのポートの接続がポートの立ち上げを待つ手順にいる間に、`bfm_cm_conn_step()` が繰り返し呼ぶ。済むと、そのポートの接続の確立を始められる。",
       "summary": "ポート `d` の立ち上げを、待つところまで進める(待つところでは `BFM_INPROGRESS` を返す状態機械)。`D_IDLE` では、そのポートの各層の状態を最初に戻し(`bfm_pci_setup_reset()`・`mlx5_hca_init_reset()`・`bfm_dif_init_reset()`・`bfm_cm_reset()`)、その後は PCIe の設定(`bfm_pci_setup_step()`)→ BAR0 を張る(`bfm_port_bar0_map()`)→ HCA の立ち上げ(`mlx5_hca_init_step()`。公開メモリの MKey を含む)→ T10-DIF の準備(`bfm_dif_init_step()`)→ GSI と接続の枠の用意(`bfm_cm_init_step()`)の順に進め、準備完了(使った DMA 領域・接続の数・inline の上限・BlueFlame の窓)を表示して `D_READY` にする。途中で失敗したら、取ったものを返す手順(`D_STOP`。`dev_stop_step()`)を進めてから `D_FAILED` にする。",
       "args": {"d": "立ち上げるポートの装置"},
       "ret": "`BFM_OK`: 使える(`D_READY`)。`BFM_INPROGRESS`: 途中(もう一度呼ぶと先へ進む。失敗の後始末の途中も)。負: 失敗した(その理由。`D_FAILED` の後は呼ぶたびに同じ値)。`BFM_E_HW`: PCIe・BAR0 の失敗。そのほか `mlx5_hca_init_step()` / `bfm_cm_init_step()` の戻り値(`BFM_E_NOMEM` / `BFM_E_TIMEOUT` など)。`BFM_E_STATE`: 状態が不正。",
@@ -233,6 +238,7 @@
     },
     {
       "func": "bfm_run",
+      "purpose": "bfmem の代表 API。アプリケーションはこれを周期的に呼び続けるだけで、装置の立ち上げから接続の確立・メモリの公開までが進み、全部の接続が使えるようになると成功を返す。どのコアから同時に呼んでもよく、使えるようになった後も、相手からの切断の知らせや FW の要求を処理するため、ときどき呼び続ける。",
       "summary": "代表 API。呼ぶたびに待たずに少しずつ進め、接続の表の全体の様子を返す。全体の状態 `s_run`(acquire で読む)の switch で、状態ごとに分けて処理する。\n\n* `R_IDLE`(最初の 1 回): `g_bfm_ctl_lock` を取れたコアだけが(取ってからもう一度 `R_IDLE` を確かめて)`run_start()` で準備し、できたら `R_RUN` にする。準備の失敗ならその理由を、それ以外(準備できた・ほかのコアが準備している)は `BFM_INPROGRESS` を返す。接続の表を進めるのは次の呼び出しから。\n* `R_RUN`(動いている): 次の 3 つを行う。\n* `R_STOP`(`default`。`bfm_shutdown()` の途中): `BFM_E_STATE` を返す。\n\n`R_RUN` で行うこと:\n\n. 接続の表を、コアごとにずらした行から 1 周回り、使う行の鍵 `c->lock` と `g_bfm_ctl_lock` の両方を取れた行について、`R_RUN` なら `bfm_cm_conn_step()` で状態を 1 つ進める。取れなければ待たずに次の行へ行く。\n. 使うポートで `D_READY` のものについて、`g_bfm_ctl_lock` を取れたら EQ(`mlx5_eq_poll()`)と GSI(`bfm_cm_poll()`)を処理する。\n. 使う行の状態(`bfm_cm_conn_state()`)をまとめて返す。",
       "args": {},
       "ret": "`BFM_OK`: 使う接続が全部使える(`BFM_ST_UP`)。`BFM_INPROGRESS`: 途中(立ち上げ・確立の途中の接続がある、最初の準備をした、または最初の準備をほかのコアがしている)。`BFM_E_STATE`: `bfm_shutdown()` の途中か、エラー・切断のままの接続(`BFM_ST_DOWN`)がある。そのほかの負: 失敗した接続(`BFM_ST_FAILED`)がある(最初に見つけた行の `c->result`。負でなければ `BFM_E_HW`)、または `run_start()` の失敗(`BFM_E_PARAM` / `BFM_E_HW`)。",
@@ -309,6 +315,7 @@
     },
     {
       "func": "bfm_shutdown",
+      "purpose": "アプリケーションが bfmem をやめるときに、全部の接続を畳み、NIC を止めるための関数。成功が返るまで呼び続ける。立ち上げの途中でも呼べ、止めた後に `bfm_run()` を呼ぶと最初から立ち上げ直す。ほかのコアが bfmem を使っていないときに 1 つのコアから呼ぶ。",
       "summary": "ライブラリを止める(待つところでは `BFM_INPROGRESS` を返す)。全体の状態を `R_STOP` にして `bfm_run()` が表を進めないようにし、`g_bfm_ctl_lock` を(回って)取って、使うポートのうち `D_IDLE`・`D_FAILED` でないものについて、`D_STOP` でなければ `dev_stop_begin(d, BFM_OK)` で止める手順を始め、`dev_stop_step()` で進める(全部の接続を畳み、出したままのコマンドを捨て、FW を止め、Bus Master を落とし、BAR0 を外す)。止め終えたポートは `D_IDLE` にする。全部のポートが止まったら、ポート層を閉じ(`bfm_port_fini()`)、`R_IDLE` に戻す。",
       "args": {},
       "ret": "`BFM_OK`: 止めた(止まっていたときも)。`BFM_INPROGRESS`: 途中(もう一度呼ぶと先へ進む)。",

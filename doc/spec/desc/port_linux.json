@@ -4,6 +4,7 @@
   "functions": [
     {
       "func": "bfm_port_log",
+      "purpose": "ライブラリが、立ち上げの経過・注意・失敗の理由などの文字を表示するための関数(本体の表示はすべてこれを通る)。移植する人は、`printf` と同じ書式を受け取って、その環境で見える所(標準出力やコンソール)へ出す関数を用意する。Linux 版は標準出力へ出し、すぐに表示されるようにする。",
       "summary": "`printf` と同じ書式で標準出力に表示し、すぐに `fflush` する。",
       "args": {"fmt": "`printf` と同じ書式の文字列", "...": "書式に対応する値"},
       "ret": "なし",
@@ -18,6 +19,7 @@
     },
     {
       "func": "bfm_port_time_ns",
+      "purpose": "ライブラリが、FW のコマンドや接続の手順の時間切れを判定し、状態遷移の記録に時刻を残すための関数。立ち上げ・接続・切断は回って待たないので、待つところでは毎回この時刻を見て経った時間を測る。移植する人は、単調に増えるナノ秒の時刻を返す関数を用意する(分解能は粗くてよい)。",
       "summary": "`clock_gettime(CLOCK_MONOTONIC)` で単調に増える時刻をナノ秒で返す。",
       "args": {},
       "ret": "時刻(ナノ秒)。",
@@ -30,6 +32,7 @@
     },
     {
       "func": "bfm_port_delay_us",
+      "purpose": "指定したマイクロ秒だけ待つための関数。移植層の決まりとして用意するが、ライブラリ本体(`src/`)からは呼ばない(本体は待たずに `bfm_port_time_ns()` で時間を見る)。Linux 版では `cpu_init()` が TSC の周波数を OS の時計と比べて測るときに使う。",
       "summary": "`nanosleep` で `us` マイクロ秒待つ。シグナルで起こされたら残りの時間を眠り直す。",
       "args": {"us": "待つ時間(マイクロ秒)"},
       "ret": "なし",
@@ -44,6 +47,7 @@
     },
     {
       "func": "bfm_port_cpu_id",
+      "purpose": "ライブラリが、接続の状態遷移の記録に、どのコアが状態を進めたかを残すための関数(`bfm_run()` は複数のコアから呼ばれる)。移植する人は、今動いているコアを見分けられる番号を返す関数を用意する。Linux 版は `taskset` などと同じ OS の CPU の番号を返す。",
       "summary": "今動いているコアの番号として、OS の CPU の番号(`sched_getcpu()`。`taskset` や `/proc/cpuinfo` と同じ番号)を返す。取れなければ APIC ID(`bfm_x86_apic_id()`)を返す。",
       "args": {},
       "ret": "CPU の番号(取れなければ APIC ID)。",
@@ -59,6 +63,7 @@
     },
     {
       "func": "linux_rdmsr",
+      "purpose": "`cpu_init()` が `bfm_x86_init()` に渡す、CPU の MSR を読む関数。ユーザ空間では MSR を読む命令を使えないので、カーネルの msr ドライバを通して読み、TSC の周波数などを CPU から求められるようにする。",
       "summary": "`/dev/cpu/N/msr`(`cpu_init()` が開いた `s_msr_fd`)を、MSR の番号の位置から 8 バイト読む。`bfm_x86_init()` に渡す、MSR を読む関数。",
       "args": {"msr": "MSR の番号", "val": "読んだ値を入れる先"},
       "ret": "0: 読めた。-1: 読めなかった。",
@@ -75,6 +80,7 @@
     },
     {
       "func": "cpu_init",
+      "purpose": "`bfm_port_init()` が、CPU を調べて TSC の周波数を決めるために呼ぶ下請け。Linux 版の時刻と待ちは OS のものを使うので、ここは VxWorks 版と同じ TSC と MSR の扱いのコードを Linux の上で試し、求めた周波数が正しいかを確かめるためにある。",
       "summary": "今いる CPU の `/dev/cpu/N/msr` を開き、`bfm_x86_init()` で CPU を調べて TSC の周波数を決める(開けたら `linux_rdmsr()` を、開けなければ NULL を渡す)。`g_bfm_verbose` なら、TSC を OS の時計で 100ms 測った周波数も表示して、求めた値と比べられるようにする。",
       "args": {},
       "ret": "なし",
@@ -97,6 +103,7 @@
     },
     {
       "func": "vfio_open_container",
+      "purpose": "`vfio_open_device()` が、装置を VFIO で使う前に、全部のポートで共有する VFIO のコンテナ(IOMMU の対応づけをまとめる入れ物)を用意するために呼ぶ下請け。2 つめのポートからは、開いてあるものをそのまま使う。",
       "summary": "VFIO のコンテナ(`/dev/vfio/vfio`)を開き、API の版と Type1 IOMMU が使えることを確かめる。開いてあれば何もしない(コンテナは全部のポートで 1 つ)。",
       "args": {},
       "ret": "0: 成功(開いてあった場合も)。-1: 失敗(理由を表示する)。",
@@ -116,6 +123,7 @@
     },
     {
       "func": "vfio_open_group",
+      "purpose": "`vfio_open_device()` が、装置の属する IOMMU グループを開いてコンテナに入れ、そのグループから装置を取り出せるようにするために呼ぶ下請け。同じカードの 2 つのポートが同じグループに入っていることがあるので、一度開いたグループは使い回す。",
       "summary": "IOMMU グループ `grp`(`/dev/vfio/<grp>`)を開いてコンテナに入れ、fd を返す。既に開いたグループ(`s_grp[]` にある番号)ならその fd を返す。最初のグループを入れたときに、コンテナの IOMMU の型を Type1 に決める。",
       "args": {"grp": "IOMMU グループの番号"},
       "ret": "グループの fd。-1: 失敗(理由を表示する)。",
@@ -152,6 +160,7 @@
     },
     {
       "func": "vfio_open_device",
+      "purpose": "`bfm_port_init()` が、使うポートの ConnectX の装置を VFIO で掴むために、ポートごとに呼ぶ下請け。これで、そのポートの設定空間の読み書き(`bfm_port_pci_read32()` など)と BAR0 を張ること(`bfm_port_bar0_map()`)ができるようになる。",
       "summary": "ポート `port` の装置(PCI アドレス `g_bfm_linux_pci_bdf[port]`)を VFIO で掴む。sysfs の `iommu_group` からグループ番号を読み、コンテナ(`vfio_open_container()`)とグループ(`vfio_open_group()`)を開いて、装置の fd を `s_dev[port].device` に取る。あわせて設定空間と BAR0 の領域の位置(`s_dev[port].cfg_off`・`bar0_vfio_off`)と BAR0 の大きさ(`bar0_size`)を読む。",
       "args": {"port": "ポートの番号(0〜`BFM_MAX_PORT`-1)"},
       "ret": "0: 成功。-1: 失敗(多くの場合、理由を表示する)。",
@@ -198,6 +207,7 @@
     },
     {
       "func": "map_region",
+      "purpose": "`bfm_port_init()` が、DMA 領域と公開メモリを、CPU と NIC の両方から同じアドレスで触れるようにするために呼ぶ下請け。設定で決めた仮想アドレスにメモリを張り、同じ値を NIC から見たアドレスにすることで、VxWorks の「論理アドレス = 物理アドレス」と同じ扱いを Linux で作る。",
       "summary": "仮想アドレス `va` の位置に `size` バイトの無名メモリを張り(`va` と `size` が 2MiB の境界・倍数なら hugepage を先に試す)、同じ値を IOVA にして `VFIO_IOMMU_MAP_DMA` で NIC から見えるようにする(コンテナの中の全部の装置から見える)。",
       "args": {"va": "張る位置(仮想アドレス = IOVA)", "size": "大きさ(バイト)", "what": "表示に使う名前(「DMA 領域」など)"},
       "ret": "張った先頭(= `va`)。失敗したら NULL(理由を表示する)。",
@@ -229,6 +239,7 @@
     },
     {
       "func": "bfm_port_init",
+      "purpose": "ライブラリが、最初の `bfm_run()` で(ポートの立ち上げより前に)1 回だけ呼ぶ、移植層を使えるようにする関数。呼ぶと、使うポートの装置に設定空間と BAR0 から触れるようになり、DMA 領域と公開メモリが CPU と NIC の両方から同じアドレスで触れるようになり、時刻が取れるようになる。移植する人は、この関数でこれらを用意する。",
       "summary": "移植層を立ち上げる。`g_bfm_port_conn[]` が 0 でないポートの装置を全部 VFIO で掴み(`vfio_open_device()`)、それから DMA 領域と公開メモリを `g_bfm_dma_base` / `g_bfm_mr_base` に張って IOVA に対応づける(`map_region()`)。`cpu_init()` で CPU を調べる(TSC の周波数・MSR。時刻と待ちには使わない)。`g_bfm_cpu_awake` が 0 でなければ `/dev/cpu_dma_latency` に 0 を書いて fd を開いたままにし、CPU を深い C-state に入れない。",
       "args": {},
       "ret": "0: 成功。-1: 失敗(装置を掴んだ後の失敗では、取ったものは `bfm_port_fini()` で返してある)。",
@@ -281,6 +292,7 @@
     },
     {
       "func": "bfm_port_fini",
+      "purpose": "ライブラリが、`bfm_shutdown()` で全部のポートを止めた後に、`bfm_port_init()` で取ったもの(装置・メモリの対応づけなど)を返すために呼ぶ関数。Linux 版では `bfm_port_init()` の途中で失敗したときの後始末にも使う。移植する人は、`bfm_port_init()` で取ったものを返す処理を用意する。",
       "summary": "移植層が取ったものを返す。ポートごとに BAR0 を張っていれば外して装置の fd を閉じ、開いた IOMMU グループの fd とコンテナの fd を閉じ(IOMMU の対応づけもここで外れる)、DMA 領域と公開メモリを外し、`/dev/cpu_dma_latency` と `/dev/cpu/N/msr` を閉じる。",
       "args": {},
       "ret": "なし",
@@ -309,6 +321,7 @@
     },
     {
       "func": "bfm_port_pci_read32",
+      "purpose": "ライブラリが、ポートの立ち上げで装置の PCIe の設定空間を読むための関数(装置の ID・BAR0 の位置と大きさ・機能の一覧・リセットの済み具合などを調べる)。移植する人は、ポートの番号で選んだ装置の設定空間から 32bit を読む関数を用意する。Linux 版は VFIO を通して読む。",
       "summary": "ポート `port` の PCIe の設定空間の `off` から 32bit を読む。VFIO の装置の fd(`s_dev[port].device`)の設定空間の領域を `pread` する。",
       "args": {"port": "ポートの番号(0〜`BFM_MAX_PORT`-1)", "off": "設定空間の中の位置(4 の倍数)"},
       "ret": "読んだ値。読めなかったら `0xffffffff`(理由を表示する)。",
@@ -324,6 +337,7 @@
     },
     {
       "func": "bfm_port_pci_write32",
+      "purpose": "ライブラリが、ポートの立ち上げと停止で装置の PCIe の設定空間へ書くための関数(Bus Master の入り切り・BAR0 の大きさを測る・装置のリセットなど)。移植する人は、ポートの番号で選んだ装置の設定空間へ 32bit を書く関数を用意する。Linux 版は VFIO を通して書く。",
       "summary": "ポート `port` の PCIe の設定空間の `off` へ 32bit を書く。VFIO の装置の fd(`s_dev[port].device`)の設定空間の領域へ `pwrite` する。",
       "args": {"port": "ポートの番号(0〜`BFM_MAX_PORT`-1)", "off": "設定空間の中の位置(4 の倍数)", "val": "書く値"},
       "ret": "なし",
@@ -337,6 +351,7 @@
     },
     {
       "func": "bar_map_uc",
+      "purpose": "BAR0 の一部または全体を、キャッシュしない属性で CPU から触れるように張る下請け。`bfm_port_bar0_map()` が BAR0 全体を張るのと、`bfm_port_bar0_wc()` / `bfm_port_bar0_wc_release()` が write-combining に張り替えるページの前後やそのページを張り直すのに使う。",
       "summary": "ポート `port` の BAR0 の `[off, off+len)` を UC で `va` に張る。`s_dev[port].bar0_sysfs` が 0 でなければ sysfs の `resource0`(`g_bfm_linux_pci_bdf[port]`)を `O_SYNC` で開いて張り、0 なら VFIO の装置の fd の BAR0 の領域から張る。",
       "args": {"port": "ポートの番号", "va": "張る位置(`fixed` が 0 なら NULL でよい)", "off": "BAR0 の中の位置", "len": "大きさ(バイト)", "fixed": "0 以外なら `MAP_FIXED` で `va` に張る(既にある対応づけを置き換える)"},
       "ret": "張った先頭。失敗したら `MAP_FAILED`。",
@@ -358,6 +373,7 @@
     },
     {
       "func": "bfm_port_bar0_map",
+      "purpose": "ライブラリが、ポートの立ち上げで PCIe の設定を済ませた後に、装置のレジスタ(BAR0)を CPU から触れるようにするために呼ぶ関数。返った先頭から、FW のコマンドの受け渡しやドアベルの書き込みができるようになる。移植する人は、BAR0 をキャッシュしない属性で張った先頭を返す関数を用意する。",
       "summary": "ポート `port` の BAR0 全体(VFIO から読んだ大きさ `s_dev[port].bar0_size`)を UC で張って先頭を返す。まず sysfs の `resource0` から張り、だめなら VFIO の fd から張る(このときは BlueFlame を使えない)。UC の窓の mmap の一覧を空にする。",
       "args": {"port": "ポートの番号", "bar_phys": "設定空間から読んだ BAR0 の値(Linux では使わない)", "bar_size": "設定空間から測った BAR0 の大きさ(VFIO の値と比べるだけ)"},
       "ret": "BAR0 の先頭。張れなかったら NULL。",
@@ -383,6 +399,7 @@
     },
     {
       "func": "bfm_port_bar0_unmap",
+      "purpose": "ライブラリが、ポートを止めるときに Bus Master を落とした後で、`bfm_port_bar0_map()` で張った BAR0 の窓を外すために呼ぶ関数。移植する人は、`bfm_port_bar0_map()` で張ったものを外す処理を用意する。",
       "summary": "ポート `port` の BAR0 の窓を外し、UC の窓の mmap の一覧を空にする。",
       "args": {"port": "ポートの番号"},
       "ret": "なし",
@@ -398,6 +415,7 @@
     },
     {
       "func": "seg_add",
+      "purpose": "BAR0 のどの区間がキャッシュしない属性の 1 つの mmap として張られているかを覚えておく下請け。`bfm_port_bar0_wc()` が write-combining に張り替えるページを含む mmap を探せるように、`bfm_port_bar0_wc()` と `bfm_port_bar0_wc_release()` が張り直した区間を足すのに使う。",
       "summary": "UC で張ったポート `port` の BAR0 の区間 `[off, off+len)` を、UC の mmap の一覧 `s_dev[port].seg` に足す。一覧が満杯なら足さない。",
       "args": {"port": "ポートの番号", "off": "BAR0 の中の位置", "len": "大きさ(バイト)"},
       "ret": "なし",
@@ -413,6 +431,7 @@
     },
     {
       "func": "bfm_port_bar0_wc",
+      "purpose": "ライブラリが、接続ごとの UAR(ドアベルと BlueFlame の窓)のページを write-combining で触れるようにするために、接続の枠を用意するときに呼ぶ関数。返ったアドレスへ BlueFlame で WQE を書き込めるようになる。NULL が返れば BlueFlame を使わずにドアベルだけで動かすので、移植する人は、用意できない環境では NULL を返せばよい。",
       "summary": "ポート `port` の BAR0 の `[off, off+len)`(UAR の 1 ページ)を、同じ仮想アドレスのまま write-combining に張り替えて先頭を返す。その範囲を含む UC の mmap を探し、範囲の前と後を UC で張り直して元の mmap をその範囲だけに縮め、その範囲を外してから sysfs の `resource0_wc` で張る。失敗したらその範囲を UC に戻して NULL を返す。",
       "args": {"port": "ポートの番号", "off": "BAR0 の中の位置(ページの境界)", "len": "大きさ(バイト。1 ページ)"},
       "ret": "WC で張った先頭(= BAR0 の窓の `off` の位置)。BlueFlame を使えないときは NULL。",
@@ -478,6 +497,7 @@
     },
     {
       "func": "bfm_port_bar0_wc_release",
+      "purpose": "ライブラリが、ポートを止めるときに接続を畳んだ後で、`bfm_port_bar0_wc()` で write-combining にした UAR のページを返すために呼ぶ関数。移植する人は、`bfm_port_bar0_wc()` で用意したものを元に戻す処理を用意する(何も取っていなければ何もしなくてよい)。",
       "summary": "`bfm_port_bar0_wc()` で WC に張り替えたポート `port` の BAR0 の `[off, off+len)` を外し、同じ仮想アドレスに UC で張り直して、UC の mmap の一覧に足す。",
       "args": {"port": "ポートの番号", "off": "BAR0 の中の位置(`bfm_port_bar0_wc()` に渡したもの)", "len": "大きさ(バイト。`bfm_port_bar0_wc()` に渡したもの)"},
       "ret": "なし",

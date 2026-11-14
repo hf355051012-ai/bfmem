@@ -4,6 +4,7 @@
   "functions": [
     {
       "func": "qp_in_header",
+      "purpose": "QP の状態遷移の FW のコマンドに共通する入力の頭を作るための下請けの関数。RC と GSI の QP の状態遷移の各関数(`mlx5_qp_rst2init()` など)が、入力を作り始めるときに使う。",
       "summary": "QP の状態遷移のコマンドの入力(`QP_IN_SIZE` バイト)を 0 で埋め、opcode・QPN・opt_param_mask を書く。",
       "args": {
         "in": "入力の領域(`QP_IN_SIZE` バイト以上)",
@@ -21,6 +22,7 @@
     },
     {
       "func": "mlx5_udp_sport",
+      "purpose": "RoCE v2 のパケットの UDP の送信元ポートを、Linux と同じ規則で決めるための関数。RC の QP を RTR へ移すとき(`mlx5_qp_init2rtr_rc()`)のアドレスパスと、GSI で接続のメッセージを送るときに使う。",
       "summary": "RoCE v2 の UDP の送信元ポートを、自分と相手の QPN から計算する(Linux の `rdma_calc_flow_label()` + `rdma_flow_label_to_udp_sport()` と同じ)。QPN の積を畳んで 20 ビットの flow label を作り、それを 14 ビットに畳んで 0xc000 を OR する。",
       "args": {
         "lqpn": "自分の QPN",
@@ -37,6 +39,7 @@
     },
     {
       "func": "mlx5_qp_create",
+      "purpose": "FW に QP(送受信の要求を NIC に渡す待ち行列の組)を作らせるための関数。接続の準備で、接続のメッセージを送受信する GSI の QP と、転送に使う各接続の RC の QP を作るときに呼ぶ。作った QP は RST の状態で、使うには状態遷移の関数で RTS まで進める。",
       "summary": "QP を作るコマンド(`CREATE_QP`)を待たずに進める。\n\n* RQ・SQ の大きさを検査し、WQ のページ数を数える(切り上げ)。\n* まだ出していなければ、WQ(RQ の直後に SQ)とドアベルのレコードを 0 で埋め、`qp->sq` を SQ の先頭にし、入力を作る。QPC には st・pd・mtu(1024。後で変える)と log_msg_max(20)・RQ と SQ の大きさ・ts_format・uar_page・送受信の cqn(`qp->cqn`)・dbr_addr・rq_type(通常)・cs_req を入れ、RC なら fre(UMR を出せる)も入れ、WQ の各ページの物理アドレスを並べる。\n* 完了したら、返った QPN を `qp->qpn` に入れ、`has_qp` を立て、生産位置を 0 にし、自分の開始 PSN を時刻から決める。",
       "args": {
         "d": "デバイスの状態",
@@ -68,6 +71,7 @@
     },
     {
       "func": "mlx5_qp_rst2init",
+      "purpose": "作ったばかりの QP を、RST から INIT へ移すための関数。RC と GSI の QP のどちらにも使い、QP の状態遷移の最初の段として、接続の準備から呼ぶ。",
       "summary": "QP を RST から INIT へ移すコマンド(`RST2INIT_QP`)を待たずに進める。QPC には pd・rlky・ポート番号(1)だけを入れ、UD(GSI)なら Q_Key(`MLX5_QP1_QKEY`)も入れる。",
       "args": {
         "d": "デバイスの状態",
@@ -90,6 +94,7 @@
     },
     {
       "func": "mlx5_qp_ud_init2rtr",
+      "purpose": "GSI の QP を、INIT から RTR(受信できる状態)へ移すための関数。接続の準備で、GSI の QP を使えるようにする途中で呼ぶ。",
       "summary": "GSI(UD)の QP を INIT から RTR へ移すコマンド(`INIT2RTR_QP`。opt_param_mask は PKEY・QKEY)を待たずに進める。QPC には pd・mtu(1024)と log_msg_max(20)・ポート番号(1)・Q_Key(`MLX5_QP1_QKEY`)を入れる。",
       "args": {
         "d": "デバイスの状態",
@@ -108,6 +113,7 @@
     },
     {
       "func": "mlx5_qp_ud_rtr2rts",
+      "purpose": "GSI の QP を、RTR から RTS(送信もできる状態)へ移すための関数。接続の準備で GSI の QP を使えるようにする最後の段として呼び、これで接続のメッセージ(REQ・REP・BYE)を送受信できる。",
       "summary": "GSI(UD)の QP を RTR から RTS へ移すコマンド(`RTR2RTS_QP`)を待たずに進める。QPC の next_send_psn に自分の開始 PSN(`qp->local_psn`)を入れる。",
       "args": {
         "d": "デバイスの状態",
@@ -126,6 +132,7 @@
     },
     {
       "func": "floor_log2",
+      "purpose": "数の log2 を切り捨てで求めるための下請けの関数。`mlx5_qp_rtr2rts_rc()` が、相手が受け付ける read / atomic の数を FW に渡す形(log2)に直すのに使う。",
       "summary": "`v` の log2 を切り捨てで求める(`v` が 1 以下なら 0)。",
       "args": {"v": "値(1 以上を想定)"},
       "ret": "切り捨てた log2。",
@@ -141,6 +148,7 @@
     },
     {
       "func": "log_rra",
+      "purpose": "相手からの read / atomic を同時に何個まで受け付けるかを、FW に指定する形(log2)で求めるための下請けの関数。RC の QP を RTR・RTS へ移すとき(`mlx5_qp_init2rtr_rc()`・`mlx5_qp_rtr2rts_rc()`)に使う。",
       "summary": "responder として同時に受け付ける read / atomic の数の log2 を返す。HCA の能力 `log_max_ra_res_qp` を上限 4(16 個)で抑えた値。",
       "args": {"d": "デバイスの状態"},
       "ret": "`log_max_ra_res_qp` と 4 の小さいほう。",
@@ -152,6 +160,7 @@
     },
     {
       "func": "mlx5_qp_init2rtr_rc",
+      "purpose": "RC の QP を、INIT から RTR(相手からの要求を受けられる状態)へ移すための関数。接続の状態機械が、接続のメッセージで相手の QP の番号・PSN・アドレスを知った後に呼び、相手の QP と結びつける。",
       "summary": "RC の QP を INIT から RTR へ移すコマンド(`INIT2RTR_QP`。opt_param_mask は RRE・RAE・RWE・PKEY)を待たずに進める。QPC には pd・経路 MTU と log_msg_max(20)・相手の QPN・log_rra_max・min_rnr_nak(12)・next_rcv_psn(自分が名乗った PSN)を入れ、アドレスパスには GID の 0 番・hop_limit(64)・相手の GID・UDP の送信元ポート(`mlx5_udp_sport()`)・ポート番号(1)・相手の MAC を入れる。",
       "args": {
         "d": "デバイスの状態",
@@ -172,6 +181,7 @@
     },
     {
       "func": "mlx5_qp_rtr2rts_rc",
+      "purpose": "RC の QP を、RTR から RTS(自分からも write / read / atomic を出せる状態)へ移すための関数。接続の状態機械が RTR の後に呼び、これを終えると接続を転送に使えるようになる。",
       "summary": "RC の QP を RTR から RTS へ移すコマンド(`RTR2RTS_QP`。opt_param_mask は RRE・RAE・RWE・PM_STATE・RNR_TIMEOUT)を待たずに進める。\n\n* requester として出せる read / atomic の数(log_sra_max)を、自分の能力(上限 4)と相手が受け付ける数 `c->peer_rr` の小さいほうにし、その数を `c->max_rd` に入れる。\n* QPC には pm_state(MIGRATED)・ack_timeout(`g_bfm_ack_timeout`)・ポート番号・log_sra_max と retry_count(`g_bfm_retry_count`)・rnr_retry(7 = 無限)・next_send_psn(相手が名乗った PSN)・log_rra_max と atomic_mode(`amode`)・rre と rwe(`amode` が 0 でなければ rae も)を入れる。",
       "args": {
         "d": "デバイスの状態",
@@ -200,6 +210,7 @@
     },
     {
       "func": "mlx5_qp_destroy",
+      "purpose": "接続の QP と、その送受信の CQ を FW に壊させるための関数。接続を切るときに接続の状態機械から呼び、作ってある分だけを解放する。",
       "summary": "QP と CQ を壊すコマンドを待たずに進める。作ってあるもの(`has_qp` / `has_cq`)だけに、QP、CQ の順に `DESTROY_QP` / `DESTROY_CQ` を出し、完了したら(失敗でも)その印を 0 にする。",
       "args": {
         "d": "デバイスの状態",
