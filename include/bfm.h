@@ -118,11 +118,14 @@ uint64_t bfm_remote_size(const bfm_conn_t *c);
  * MMIO 書き込みにする。それより長いものは中継バッファから送る。 */
 int bfm_write(bfm_conn_t *c, uint64_t off, const void *src, uint32_t len);
 
-/* 書いて、完了を待たずに戻る(len <= bfm_inline_max())。後で bfm_flush() で待つ。
- * 送る順に相手のメモリへ届く(RC の順序保証)。 */
+/* 書いて、完了を待たずに戻る(len <= bfm_inline_max())。送る順に相手のメモリへ届く(RC の順序保証)。
+ * 完了は 1 つずつは知らせない。後で bfm_flush() を呼ぶと、それまでに出した write が全部
+ * 相手に受け取られた(ACK が返った)ところで BFM_OK が返る。どれかが失敗していればエラーが返る
+ * (どれが失敗したかは分からない)。SQ が満杯のときは、空きができるまでこの中で待つ。 */
 int bfm_write_post(bfm_conn_t *c, uint64_t off, const void *src, uint32_t len);
 
-/* bfm_write_post() で出したものが全部終わるまで待つ。 */
+/* bfm_write_post() で出した write が全部相手に受け取られる(ACK が返る)まで待つ。
+ * BFM_OK = 全部届いた。どれかが失敗していればエラーを返す(どれが失敗したかは分からない)。 */
 int bfm_flush(bfm_conn_t *c);
 
 /* 読む。32 バイトまでは応答が CQE に入るので、dst へ CPU で写す。 */

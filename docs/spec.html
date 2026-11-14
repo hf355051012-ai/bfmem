@@ -988,11 +988,11 @@ body.book #toc,body.book #preamble,body.book h1.sect0,body.book .sect1>h2{page-b
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><a href="#src_bfm_ops-bfm_write_post"><code>bfm_write_post()</code></a></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">書いて、完了を待たずに戻る(len &#8656; <code>bfm_inline_max()</code>)。後で <code>bfm_flush()</code> で待つ。 送る順に相手のメモリへ届く(RC の順序保証)。</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">書いて、完了を待たずに戻る(len &#8656; <code>bfm_inline_max()</code>)。送る順に相手のメモリへ届く(RC の順序保証)。 完了は 1 つずつは知らせない。後で <code>bfm_flush()</code> を呼ぶと、それまでに出した write が全部 相手に受け取られた(ACK が返った)ところで <code>BFM_OK</code> が返る。どれかが失敗していればエラーが返る (どれが失敗したかは分からない)。SQ が満杯のときは、空きができるまでこの中で待つ。</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><a href="#src_bfm_ops-bfm_flush"><code>bfm_flush()</code></a></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>bfm_write_post()</code> で出したものが全部終わるまで待つ。</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>bfm_write_post()</code> で出した write が全部相手に受け取られる(ACK が返る)まで待つ。 <code>BFM_OK</code> = 全部届いた。どれかが失敗していればエラーを返す(どれが失敗したかは分からない)。</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><a href="#src_bfm_ops-bfm_read"><code>bfm_read()</code></a></p></td>
@@ -18003,7 +18003,10 @@ CQ を作るとき、全部の CQE をオペコード 0xf・owner 0 にしてお
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock">処理内容</p></td>
 <td class="tableblock halign-left valign-top"><div class="content"><div class="paragraph">
-<p>データを WQE に埋め込んだ write を、完了を待たずに出す。通知なしが <code>g_bfm_signal_every</code> 個続いたとき、または SQ に積んだ量が半分を超えたときだけ完了通知を求める。</p>
+<p>データを WQE に埋め込んだ write を、完了を待たずに出す。完了は 1 つずつは知らせない。後で <code>bfm_flush()</code> を呼ぶと、それまでに出した write が全部相手に受け取られた(ACK が返った)ところで <code>BFM_OK</code> が返る。どれかが失敗していればエラーが返る(どれが失敗したかは分からない)。</p>
+</div>
+<div class="paragraph">
+<p>WQE には、通知なしが <code>g_bfm_signal_every</code> 個続いたとき、または SQ に積んだ量が半分を超えたときだけ、完了通知(CQ_UPDATE。終わったら CQE を書かせる印)を付ける。この関数は CQ を読まない(SQ が満杯のときの <code>post()</code> を除く)。</p>
 </div></div></td>
 </tr>
 <tr>
@@ -18060,13 +18063,19 @@ CQ を作るとき、全部の CQE をオペコード 0xf・owner 0 にしてお
 <td class="tableblock halign-left valign-top"><div class="content"><div class="ulist">
 <ul>
 <li>
-<p>終わるのを待つには <code>bfm_flush()</code> を呼ぶこと。</p>
+<p>届いたことを確かめるには <code>bfm_flush()</code> を呼ぶこと。</p>
 </li>
 <li>
 <p>送る順に相手のメモリへ届く(RC の順序保証)。</p>
 </li>
 <li>
-<p>通知を挟むのは、通知なしが続きすぎると SQ の空き(<code>sq_done</code>)が分からなくなるため。</p>
+<p>SQ が満杯のときは、<code>post()</code> の中で CQ を読み、空きができるまで待つ(最長 <code>g_bfm_op_timeout_ms</code>)。</p>
+</li>
+<li>
+<p>通知を挟むのは、通知なしが続きすぎると SQ の空き(<code>sq_done</code>)が分からなくなるため。RC は順に完了するので、通知ありの CQE が 1 つ来れば、その前の通知なしの write も全部終わっている。</p>
+</li>
+<li>
+<p>1 つずつ完了を確かめたいときは <code>bfm_write_async()</code> と <code>bfm_test()</code> を使う。</p>
 </li>
 </ul>
 </div></div></td>
@@ -18122,7 +18131,7 @@ CQ を作るとき、全部の CQE をオペコード 0xf・owner 0 にしてお
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock">処理内容</p></td>
 <td class="tableblock halign-left valign-top"><div class="content"><div class="paragraph">
-<p><code>bfm_write_post()</code> で出したものが全部終わるまで待つ。最後に出したものが通知なしなら、通知を求める NOP を足して出し、その完了を待つ(完了は投稿の順なので、NOP の完了 = それまでの write が全部相手に受け取られた)。</p>
+<p><code>bfm_write_post()</code> で出した write が全部相手に受け取られる(ACK が返る)まで待つ。<code>BFM_OK</code> が返れば全部届いた。どれかが失敗していればエラーを返す(通知なしの WQE でも、失敗すれば NIC はエラーの CQE を書く。どれが失敗したかは分からない)。最後に出したものが通知なしなら、通知を求める NOP を足して出し、その完了を待つ(完了は投稿の順なので、NOP の完了 = それまでの write が全部相手に受け取られた)。</p>
 </div></div></td>
 </tr>
 <tr>
@@ -39530,7 +39539,7 @@ MB/s はデータ 512 バイト × ブロックの数で数える(PI の 8 バ�
 </div>
 <div id="footer">
 <div id="footer-text">
-Last updated 2026-11-14 13:57:48 +0900
+Last updated 2026-11-14 14:27:17 +0900
 </div>
 </div>
 </body>

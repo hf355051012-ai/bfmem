@@ -36,8 +36,8 @@ bfmem の関数のうち、外から使うもの。関数名を押すと、そ�
 |<<src_bfm_ops-bfm_remote_size,`bfm_remote_size()`>> |相手の公開メモリの大きさ(off の上限)。
 2+h|メモリ操作(相手の公開メモリ + off)
 |<<src_bfm_ops-bfm_write,`bfm_write()`>> |書いて、相手の NIC が受け取った(ACK が返った)ところで戻る。 `bfm_inline_max()` バイトまではデータを WQE に埋め込み、BlueFlame で 1 回の MMIO 書き込みにする。それより長いものは中継バッファから送る。
-|<<src_bfm_ops-bfm_write_post,`bfm_write_post()`>> |書いて、完了を待たずに戻る(len <= `bfm_inline_max()`)。後で `bfm_flush()` で待つ。 送る順に相手のメモリへ届く(RC の順序保証)。
-|<<src_bfm_ops-bfm_flush,`bfm_flush()`>> |`bfm_write_post()` で出したものが全部終わるまで待つ。
+|<<src_bfm_ops-bfm_write_post,`bfm_write_post()`>> |書いて、完了を待たずに戻る(len <= `bfm_inline_max()`)。送る順に相手のメモリへ届く(RC の順序保証)。 完了は 1 つずつは知らせない。後で `bfm_flush()` を呼ぶと、それまでに出した write が全部 相手に受け取られた(ACK が返った)ところで `BFM_OK` が返る。どれかが失敗していればエラーが返る (どれが失敗したかは分からない)。SQ が満杯のときは、空きができるまでこの中で待つ。
+|<<src_bfm_ops-bfm_flush,`bfm_flush()`>> |`bfm_write_post()` で出した write が全部相手に受け取られる(ACK が返る)まで待つ。 `BFM_OK` = 全部届いた。どれかが失敗していればエラーを返す(どれが失敗したかは分からない)。
 |<<src_bfm_ops-bfm_read,`bfm_read()`>> |読む。32 バイトまでは応答が CQE に入るので、dst へ CPU で写す。
 |<<src_bfm_ops-bfm_cas,`bfm_cas()`>> |8 バイトの compare-and-swap。off は 8 の倍数。`*old` に元の値が入る (`*old` == expect なら置き換わった)。
 |<<src_bfm_ops-bfm_faa,`bfm_faa()`>> |8 バイトの fetch-and-add。off は 8 の倍数。`*old` に足す前の値が入る。
@@ -5107,7 +5107,9 @@ image::call_src_bfm_ops-bfm_write.drawio.svg[bfm_write() の関係図]
 |===
 |関数名 |`bfm_write_post`(`src/bfm_ops.c` 380 行目)
 |宣言 |`int bfm_write_post(bfm_conn_t *c, uint64_t off, const void *src, uint32_t len)`
-|処理内容 a|データを WQE に埋め込んだ write を、完了を待たずに出す。通知なしが `g_bfm_signal_every` 個続いたとき、または SQ に積んだ量が半分を超えたときだけ完了通知を求める。
+|処理内容 a|データを WQE に埋め込んだ write を、完了を待たずに出す。完了は 1 つずつは知らせない。後で `bfm_flush()` を呼ぶと、それまでに出した write が全部相手に受け取られた(ACK が返った)ところで `BFM_OK` が返る。どれかが失敗していればエラーが返る(どれが失敗したかは分からない)。
+
+WQE には、通知なしが `g_bfm_signal_every` 個続いたとき、または SQ に積んだ量が半分を超えたときだけ、完了通知(CQ_UPDATE。終わったら CQE を書かせる印)を付ける。この関数は CQ を読まない(SQ が満杯のときの `post()` を除く)。
 |引数 a|
 [cols="2,1,4"]
 !===
@@ -5119,9 +5121,11 @@ image::call_src_bfm_ops-bfm_write.drawio.svg[bfm_write() の関係図]
 !===
 |戻り値 a|`BFM_OK`: 出した。`BFM_E_STATE` / `BFM_E_PARAM`: `check_range()` の失敗、または `len` が `INLINE_MAX` を超える。そのほか `post()` の戻り値。
 |前提条件 a|`bfm_write()` と同じ。
-|注意事項 a|* 終わるのを待つには `bfm_flush()` を呼ぶこと。
+|注意事項 a|* 届いたことを確かめるには `bfm_flush()` を呼ぶこと。
 * 送る順に相手のメモリへ届く(RC の順序保証)。
-* 通知を挟むのは、通知なしが続きすぎると SQ の空き(`sq_done`)が分からなくなるため。
+* SQ が満杯のときは、`post()` の中で CQ を読み、空きができるまで待つ(最長 `g_bfm_op_timeout_ms`)。
+* 通知を挟むのは、通知なしが続きすぎると SQ の空き(`sq_done`)が分からなくなるため。RC は順に完了するので、通知ありの CQE が 1 つ来れば、その前の通知なしの write も全部終わっている。
+* 1 つずつ完了を確かめたいときは `bfm_write_async()` と `bfm_test()` を使う。
 |使用関数 a|* <<src_bfm_ops-check_range,`check_range()`>>
 * <<src_bfm_ops-build_write_inline,`build_write_inline()`>>
 * <<src_bfm_ops-post,`post()`>>
@@ -5140,7 +5144,7 @@ image::call_src_bfm_ops-bfm_write_post.drawio.svg[bfm_write_post() の関係図]
 |===
 |関数名 |`bfm_flush`(`src/bfm_ops.c` 394 行目)
 |宣言 |`int bfm_flush(bfm_conn_t *c)`
-|処理内容 a|`bfm_write_post()` で出したものが全部終わるまで待つ。最後に出したものが通知なしなら、通知を求める NOP を足して出し、その完了を待つ(完了は投稿の順なので、NOP の完了 = それまでの write が全部相手に受け取られた)。
+|処理内容 a|`bfm_write_post()` で出した write が全部相手に受け取られる(ACK が返る)まで待つ。`BFM_OK` が返れば全部届いた。どれかが失敗していればエラーを返す(通知なしの WQE でも、失敗すれば NIC はエラーの CQE を書く。どれが失敗したかは分からない)。最後に出したものが通知なしなら、通知を求める NOP を足して出し、その完了を待つ(完了は投稿の順なので、NOP の完了 = それまでの write が全部相手に受け取られた)。
 |引数 a|
 [cols="2,1,4"]
 !===
