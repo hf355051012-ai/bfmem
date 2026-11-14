@@ -2118,7 +2118,7 @@
             ]},
             {"case": "PF_READ", "body": [{"do": "時間になるまで rc = bfm_read(a->c, base, dst, a->size)、k++"}]},
             {"case": "PF_RASYNC", "body": [
-              {"do": "qd 個まで bfm_read_async() で出し(出した時刻を覚える)、いっぱいなら最も古いものを bfm_wait() で待って遅延を lat に足し k++。時間が来たら出すのをやめ、残りを全部待つ"}
+              {"do": "qd 個まで bfm_read_async() で出し(出した時刻を覚える)、いっぱいなら最も古いものを bfm_wait() で待って遅延を lat に足し、遅延の最大と 1ms・10ms・100ms を超えた数を数えて k++。時間が来たら出すのをやめ、残りを全部待つ"}
             ]},
             {"case": "PF_CAS", "body": [{"do": "時間になるまで 4 バイトなら bfm_cas32()、8 バイトなら bfm_cas() を base + 8192 へ、k++"}]},
             {"case": "PF_FAA", "body": [{"do": "時間になるまで 4 バイトなら bfm_faa32()、8 バイトなら bfm_faa() を base + 8192 へ、k++"}]},
@@ -2137,7 +2137,7 @@
       "args": {"secs": "1 回の秒数(-n。0 なら 2)"},
       "ret": "0: 全部 OK。1: 誤りのあった測定がある、張れなかった、CPU が足りない、接続が使えない、または相手とそろえられなかった。",
       "pre": "相手のノードも perf を動かしていること。CPU が `PERF_CORES` 個以上あること。`main()` が `g_bfm_async_buf_size` を 32KiB に、ポートの接続の数を `PERF_CORES` にしてあること。",
-      "notes": "* IOPS はスレッドごとの回数 / 時間の合計。MB/s は IOPS × 長さ(DIF はデータ 512 バイト × ブロックの数。PI は数えない)/ 10^6。\n* 平均の遅延は、1 回ずつ待つ操作はスレッドごとの「時間 / 回数」の平均。`bfm_read_async()` は遅延の合計 / 回数(出してから完了を見るまで)。`bfm_write_post()` は 1 回出すのにかかる時間(完了は 1 個ずつ見られない)。\n* 「perf|」の行は `doc/spec/perf_import.py` が読み、仕様書の 20 章の表とグラフ(`doc/spec/perf.json`)にする。\n* 誤りのあった測定は `g_ng` に数える。",
+      "notes": "* IOPS はスレッドごとの回数 / 時間の合計。MB/s は IOPS × 長さ(DIF はデータ 512 バイト × ブロックの数。PI は数えない)/ 10^6。\n* 平均の遅延は、1 回ずつ待つ操作はスレッドごとの「時間 / 回数」の平均。`bfm_read_async()` は遅延の合計 / 回数(出してから完了を見るまで)。`bfm_write_post()` は 1 回出すのにかかる時間(完了は 1 個ずつ見られない)。\n* 「perf|」の行は `doc/spec/perf_import.py` が読み、仕様書の 20 章の表とグラフ(`doc/spec/perf.json`)にする。\n* 誤りのあった測定は `g_ng` に数える。\n* 切り分けのための口: `-T 項目名[:長さ]` で項目を絞る(長さを書けばその長さだけ)、`-q` で打たずに足並みだけそろえる(相手だけが打つ片方向)、`-Q` で多重度。どれも両方のノードで項目の並びが同じになるように付ける。`bfm_read_async` の 3〜4 コアの落ち込みを、これで OptiPlex のメモリの帯域と切り分けた(20 章)。",
       "flow": [
         {"do": "secs が 0 なら 2、g_pf_ns = secs 秒、使うポートを並べる、g_ng = 0"},
         {"call": "run_up(4) を呼ぶ"},
@@ -2153,12 +2153,22 @@
             {"do": "「対象外」の行を表示"},
             {"continue": true}
           ]},
+          {"if": "-T(g_pf_only)があり、項目名がそれを含まない?", "then": [{"continue": true}]},
+          {"if": "-T に「:長さ」があり、同じ操作の 2 行目以降?", "then": [{"continue": true}]},
+          {"do": "-T に「:長さ」があれば、長さをそれにする"},
           {"while": "n <= PERF_CORES && !g_stop ?(n は 1 から)", "body": [
             {"do": "使う接続が全部使えるまで(30 秒まで)bfm_run() と reconnect_down() を回して待つ"},
             {"call": "sync_at(stage++) を呼ぶ"},
             {"if": "BFM_OK でない?", "then": [{"return": "1"}]},
+            {"if": "g_quiet(-q)?", "then": [
+              {"do": "「受けるだけ」の行を表示(打たない = 相手だけが打つ片方向)"},
+              {"continue": true}
+            ]},
             {"do": "g_pf_bar を n 本で作り、n 本の perf_worker を CPU 0〜n-1 で動かして終わりを待ち、g_pf_bar を壊す"},
             {"do": "IOPS・MB/s・平均の遅延を求め、誤りのあったスレッドを表示し、結果の行を表示する"},
+            {"if": "bfm_read_async ?", "then": [
+              {"do": "スレッドごとの MB/s・平均の遅延・最大・1ms / 10ms / 100ms を超えた数を「perf-a|」の行で表示"}
+            ]},
             {"if": "誤りがあった?", "then": [{"do": "g_ng++"}]}
           ]}
         ]},
@@ -2228,7 +2238,7 @@
     },
     {
       "func": "main",
-      "summary": "オプションと引数を読んで設定の変数を決め、シグナルの受け口を登録し、最初の `bfm_run()` の後で自分の公開メモリを埋めて、引数の動き(run / serve / bench / race / wpost / perf / info)を行い、最後に `do_shutdown()` で止める。`-L` なら、止めた後に全部の接続の状態遷移の記録を表示する(`bfm_conn_steplog()`)。\n\n* `-d BDF` / `-D BDF`: `g_bfm_linux_pci_bdf[0]` / `[1]`(ポート 0 / 1 の装置)\n* `-i IP` / `-I IP`: `g_bfm_local_ip[0]` / `[1]`(ポート 0 / 1 の自分の IP)\n* `-c 本数`: ポートごとの接続の数(`g_bfm_port_conn[]`。ポート 1 は使うときだけ)\n* `-t 本数`: `bfm_run()` を同時に呼ぶスレッドの数(既定 4)\n* `-p 番号`: `g_bfm_cm_port`(接続の番号の起点。両方のノードで同じ値にする)\n* `-m 経路MTU`: `g_bfm_path_mtu`\n* `-M ポートのMTU`: `g_bfm_port_mtu`\n* `-n 回数`: run の回数(0 なら一通りの検査の遅延の測定 20000、mt 100000)、bench の回数(既定 100000)、race の揺さぶる段の秒数(既定 30)、wpost の 1 回の秒数(既定 5)、perf の 1 項目の秒数(既定 2)\n* `-B` / `-S` / `-C`: `g_bfm_bf_enable` / `g_bfm_scatter_cqe` / `g_bfm_cpu_awake` を 0 にする\n* `-Q 多重度`: `g_bfm_qdepth`(多重度つきの write / read を出しておける数。1〜64)\n* `-a N`: `g_bfm_ack_timeout`(RC の ack timeout)\n* `-x`: run で [7](`run_oob()`)を行う\n* `-q` / `-P` / `-z`: `g_quiet` / `g_perf` / `g_silent` を 1 にする(run で、受けるだけ / mt だけ / [10] 無応答の試験 `run_silent()` も行う)\n* `-L`: `g_steplog` を 1 にする(止めた後に状態遷移の記録を表示する)\n* `-R N`: `g_wp_rot`(wpost でコア k に k + N 番目の接続を割り当てる)\n* `-v`: `g_bfm_verbose` を 1 にする\n\n引数は `<動き> <相手のIP> [ポート1の相手のIP]`(`g_bfm_peer_ip[0]` / `[1]`)。",
+      "summary": "オプションと引数を読んで設定の変数を決め、シグナルの受け口を登録し、最初の `bfm_run()` の後で自分の公開メモリを埋めて、引数の動き(run / serve / bench / race / wpost / perf / info)を行い、最後に `do_shutdown()` で止める。`-L` なら、止めた後に全部の接続の状態遷移の記録を表示する(`bfm_conn_steplog()`)。\n\n* `-d BDF` / `-D BDF`: `g_bfm_linux_pci_bdf[0]` / `[1]`(ポート 0 / 1 の装置)\n* `-i IP` / `-I IP`: `g_bfm_local_ip[0]` / `[1]`(ポート 0 / 1 の自分の IP)\n* `-c 本数`: ポートごとの接続の数(`g_bfm_port_conn[]`。ポート 1 は使うときだけ)\n* `-t 本数`: `bfm_run()` を同時に呼ぶスレッドの数(既定 4)\n* `-p 番号`: `g_bfm_cm_port`(接続の番号の起点。両方のノードで同じ値にする)\n* `-m 経路MTU`: `g_bfm_path_mtu`\n* `-M ポートのMTU`: `g_bfm_port_mtu`\n* `-n 回数`: run の回数(0 なら一通りの検査の遅延の測定 20000、mt 100000)、bench の回数(既定 100000)、race の揺さぶる段の秒数(既定 30)、wpost の 1 回の秒数(既定 5)、perf の 1 項目の秒数(既定 2)\n* `-B` / `-S` / `-C`: `g_bfm_bf_enable` / `g_bfm_scatter_cqe` / `g_bfm_cpu_awake` を 0 にする\n* `-Q 多重度`: `g_bfm_qdepth`(多重度つきの write / read を出しておける数。1〜64)\n* `-a N`: `g_bfm_ack_timeout`(RC の ack timeout)\n* `-x`: run で [7](`run_oob()`)を行う\n* `-q` / `-P` / `-z`: `g_quiet` / `g_perf` / `g_silent` を 1 にする(run で、受けるだけ / mt だけ / [10] 無応答の試験 `run_silent()` も行う)\n* `-L`: `g_steplog` を 1 にする(止めた後に状態遷移の記録を表示する)\n* `-R N`: `g_wp_rot`(wpost でコア k に k + N 番目の接続を割り当てる)\n* `-T 項目名[:長さ]`: `g_pf_only`(perf で測る項目を絞る)\n* `-v`: `g_bfm_verbose` を 1 にする\n\n引数は `<動き> <相手のIP> [ポート1の相手のIP]`(`g_bfm_peer_ip[0]` / `[1]`)。",
       "args": {"argc": "引数の数", "argv": "引数"},
       "ret": "0: 成功。1: 最初の `bfm_run()` が失敗した、公開メモリが小さい、または run / bench / race / wpost / perf / info が失敗を返した。2: 引数が正しくない。",
       "pre": "特になし。",
@@ -2268,6 +2278,7 @@
             {"case": "'P'", "body": [{"do": "g_perf = 1"}]},
             {"case": "'z'", "body": [{"do": "g_silent = 1"}]},
             {"case": "'R'", "body": [{"do": "g_wp_rot = atoi(optarg)"}]},
+            {"case": "'T'", "body": [{"do": "g_pf_only = optarg"}]},
             {"case": "'L'", "body": [{"do": "g_steplog = 1"}]},
             {"case": "'a'", "body": [{"do": "g_bfm_ack_timeout = atoi(optarg)"}]},
             {"case": "'Q'", "body": [{"do": "g_bfm_qdepth = atoi(optarg)"}]},

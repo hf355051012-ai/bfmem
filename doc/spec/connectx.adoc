@@ -76,6 +76,10 @@ image::hw_ladder_data.drawio.svg[ラダーチャート(データの転送)]
 
 * write も read も、CPU の MMIO の書き込みは BlueFlame の 1 回だけ。BlueFlame で WQE を受けた NIC は、SQ のリングを読みに行かない。
   埋め込み(inline)の write は送るデータも WQE の中なので、ホストのメモリへの DMA の読み出しが無い。
+* 221 バイト以上の write は、CPU が送るデータを中継バッファへ写し、WQE の data セグメントで中継バッファを指す。NIC は中継バッファを
+  DMA で読み、経路 MTU(既定 1024 バイト)ごとのパケット(First / Middle / Last)に分けて送る。33 バイト以上の read の応答も同じく
+  MTU ごとに分かれて届き、NIC が 1 つずつ中継バッファへ DMA で書く。1 回に運ぶのは中継バッファ(既定 64KiB)までで、超える分は
+  CQE で完了を確かめてから同じ手順を繰り返す。
 * 完了は CQE を CPU が見に行って知る(割り込みは使わない)。CQ の doorbell record は、NIC が CQ の空きを知るためのもの。
 * 相手からの write / read / atomic には、こちらの CPU も FW も関わらない。NIC が rkey と範囲を確かめて、公開メモリを直接読み書きする。
 

@@ -28,6 +28,7 @@
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -89,7 +90,7 @@ static void usage(void)
 {
     printf("使い方: bfmem_test [-d BDF] [-i 自分のIP] [-D ポート1のBDF] [-I ポート1の自分のIP] [-c 接続数/ポート]\n"
            "                   [-t スレッド数] [-p 接続の番号] [-m 経路MTU 1-5] [-M ポートのMTU] [-n 回数]\n"
-           "                   [-Q 多重度 1-64] [-a ack timeout] [-R ずらし] [-B] [-S] [-C] [-x] [-q] [-P] [-z] [-L] [-v]\n"
+           "                   [-Q 多重度 1-64] [-a ack timeout] [-R ずらし] [-T 項目名[:長さ]] [-B] [-S] [-C] [-x] [-q] [-P] [-z] [-L] [-v]\n"
            "                   run <相手のIP> [ポート1の相手のIP] | serve <相手のIP> [ポート1の相手のIP] |\n"
            "                   race <相手のIP> [ポート1の相手のIP] | wpost <相手のIP> [ポート1の相手のIP] |\n"
            "                   perf <相手のIP> [ポート1の相手のIP] | crc |\n"
@@ -123,7 +124,9 @@ static void usage(void)
            "      NIC の再送の間隔(bfm_write() が BFM_E_RETRY になるまでの時間)を確かめて張り直す\n"
            "  -a N  RC の ack timeout(g_bfm_ack_timeout。4.096us x 2^N。既定 12)\n"
            "  -L  最後(止めた後)に、全部の接続の状態遷移の記録(移った時刻・とどまった時間)を表示する\n"
-           "  -R N  wpost で、コア k に (k + N) 番目の接続を割り当てる(既定 0。遅さがコアと接続のどちらに付くかを見る)\n");
+           "  -R N  wpost で、コア k に (k + N) 番目の接続を割り当てる(既定 0。遅さがコアと接続のどちらに付くかを見る)\n"
+           "  -T 項目名[:長さ]  perf で、名前にこれを含む項目だけを測る(:長さ を付ければ、その長さだけ)。-q を付けた perf は\n"
+           "        打たずに足並みだけそろえる(相手だけが打つ片方向)\n");
 }
 
 /* ---------------------------------------------------------------------
@@ -2110,8 +2113,11 @@ struct perf_arg {
     int kind;
     uint32_t size;                       /* 長さ(バイト。DIF はブロックの数)*/
     uint64_t ops, ns, lat_ns;            /* 回数・かかった時間・遅延の合計(read_async だけ)*/
+    uint64_t lat_max, n1ms, n10ms, n100ms;   /* read_async の遅延の最大と、1ms・10ms・100ms を超えた数 */
     int rc;
 };
+
+static const char *g_pf_only;            /* -T: perf で、名前にこの文字列を含む項目だけを測る(NULL = 全部)*/
 
 static pthread_barrier_t g_pf_bar;
 static uint64_t g_pf_ns;
@@ -2202,7 +2208,12 @@ static void *perf_worker(void *p)
                     continue;
                 }
                 rc = bfm_wait(a->c, tag[head]);
-                lat += now_ns() - tp[head];
+                const uint64_t dl = now_ns() - tp[head];
+                lat += dl;
+                if (dl > a->lat_max) a->lat_max = dl;
+                a->n1ms += (dl > 1000000u);
+                a->n10ms += (dl > 10000000u);
+                a->n100ms += (dl > 100000000u);
                 k++;
                 head = (head + 1u) % qd;
                 n--;
@@ -2283,12 +2294,26 @@ static int run_perf(uint32_t secs)
     uint64_t stage = 600;
     for (unsigned it = 0; it < sizeof(items) / sizeof(items[0]) && !g_stop; it++) {
         const int kind = items[it].kind;
-        const uint32_t size = items[it].size;
+        uint32_t size = items[it].size;
         if (kind == PF_WPOST && size > bfm_inline_max()) {
             printf("perf|%s|%u|-|対象外(bfm_write_post() は bfm_inline_max() = %u バイトまで)\n", g_pf_name[kind], size,
                    bfm_inline_max());
             continue;
         }
+        /* -T 項目名[:長さ] で絞る(両方のノードで同じに)。長さを書けば、その項目の最初の行だけを、その長さで測る */
+        uint32_t size2 = size;
+        if (g_pf_only != NULL) {
+            char want[64];
+            const char *colon = strchr(g_pf_only, ':');
+            const size_t wl = colon ? (size_t)(colon - g_pf_only) : strlen(g_pf_only);
+            snprintf(want, sizeof(want), "%.*s", (int)(wl < sizeof(want) ? wl : sizeof(want) - 1u), g_pf_only);
+            if (strstr(g_pf_name[kind], want) == NULL) continue;
+            if (colon != NULL) {
+                if (it > 0 && items[it - 1].kind == kind) continue;
+                size2 = (uint32_t)atoi(colon + 1);
+            }
+        }
+        size = size2;
         const uint32_t bytes = (kind == PF_DIFW || kind == PF_DIFR) ? size * BFM_DIF_BLOCK : size;
         for (unsigned n = 1; n <= PERF_CORES && !g_stop; n++) {
             /* 前の測定の誤りで切れた接続は張り直してから測る(使う接続が全部使えるまで。30 秒まで)*/
@@ -2303,8 +2328,13 @@ static int run_perf(uint32_t secs)
             }
             snprintf(g_mt_msg, sizeof(g_mt_msg), "perf %s %u x%u", g_pf_name[kind], size, n);
             if (sync_at(stage++, g_mt_msg) != BFM_OK) return 1;
+            if (g_quiet) {                                 /* -q: 打たない(相手だけが打つ = 片方向)*/
+                printf("perf|%s|%u|%u|受けるだけ(-q)\n", g_pf_name[kind], size, n);
+                continue;
+            }
             pthread_barrier_init(&g_pf_bar, NULL, n);
             for (unsigned k = 0; k < n; k++) {
+                memset(&args[k].ops, 0, sizeof(args[k]) - offsetof(struct perf_arg, ops));
                 args[k].cpu = k;
                 args[k].kind = kind;
                 args[k].size = size;
@@ -2328,6 +2358,16 @@ static int run_perf(uint32_t secs)
             }
             lat = (kind == PF_RASYNC) ? (ops ? (double)lat_sum / (double)ops : 0) : lat / n;
             printf("perf|%s|%u|%u|%.0f|%.2f|%.0f|%d\n", g_pf_name[kind], size, n, iops, iops * bytes / 1e6, lat, bad);
+            if (kind == PF_RASYNC) {                       /* スレッドごとの速さと遅延の偏り */
+                for (unsigned k = 0; k < n; k++) {
+                    const struct perf_arg *a = &args[k];
+                    printf("perf-a|%u|%u|スレッド %u(ポート %u)|%.1f MB/s|平均 %.0f µs|最大 %.1f ms|>1ms %llu|>10ms %llu|>100ms %llu|回数 %llu\n",
+                           size, n, k, ports[k % np], a->ns ? (double)a->ops * size / ((double)a->ns / 1e3) : 0.0,
+                           a->ops ? (double)a->lat_ns / (double)a->ops / 1e3 : 0.0, (double)a->lat_max / 1e6,
+                           (unsigned long long)a->n1ms, (unsigned long long)a->n10ms, (unsigned long long)a->n100ms,
+                           (unsigned long long)a->ops);
+                }
+            }
             if (bad) g_ng++;
         }
     }
@@ -2420,7 +2460,7 @@ int main(int argc, char **argv)
     uint32_t iters = 0, threads = 4, nconn = 0;
     int oob = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "d:i:D:I:c:p:m:M:n:t:Q:a:R:BSCxqPzLvh")) != -1) {
+    while ((opt = getopt(argc, argv, "d:i:D:I:c:p:m:M:n:t:Q:a:R:T:BSCxqPzLvh")) != -1) {
         switch (opt) {
         case 'd': g_bfm_linux_pci_bdf[0] = optarg; break;
         case 'i': if (parse_ip(optarg, &g_bfm_local_ip[0]) != 0) { usage(); return 2; } break;
@@ -2440,6 +2480,7 @@ int main(int argc, char **argv)
         case 'P': g_perf = 1; break;
         case 'z': g_silent = 1; break;
         case 'R': g_wp_rot = (unsigned)atoi(optarg); break;
+        case 'T': g_pf_only = optarg; break;
         case 'L': g_steplog = 1; break;
         case 'a': g_bfm_ack_timeout = (uint8_t)atoi(optarg); break;
         case 'Q': g_bfm_qdepth = (uint32_t)atoi(optarg); break;
