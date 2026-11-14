@@ -109,6 +109,7 @@ static int parse_general_caps(bfm_dev_t *d)
     uint8_t log_bf = c[77] & 0x1fu;                                   /* bit 0x26b log_bf_reg_size */
     d->num_vhca_ports = c[194];                                       /* bit 0x610 */
     d->sho = (uint8_t)((c[66] & 0x01u) ? 1u : 0u);                    /* bit 0x217 sho(署名のオフロード)*/
+    d->mcam_reg = (uint8_t)((c[53] & 0x40u) ? 1u : 0u);               /* bit 0x1a9 mcam_reg */
     {
         const uint8_t uf = (uint8_t)((c[65] >> 4) & 0x03u);           /* bit 0x20a umr_fence */
         /* Linux の mlx5_get_umr_fence(): 0 = STRONG、1 = SMALL、2 = 要らない */

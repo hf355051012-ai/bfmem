@@ -189,7 +189,32 @@ NIC が DMA で読む、ホストのメモリの 64 バイト(QP・CQ ごと)。
 |0x7004 |HOST_ENDIANNESS |中身 0 を書く(Linux の mlx5_core と同じ)。HCA の能力を読む前
 |0x5003 |PMTU |ポート 1 の MTU。[4..5] 上限、[8..9] admin_mtu(書く)、[12..13] oper_mtu(今の値)。値はフレーム長(IP の MTU + 22)。`g_bfm_port_mtu` が 0 でなければ書く
 |0x5006 |PAOS |ポート 1 の状態。admin_status = UP(byte 2 = 1)と ase(byte 4 bit7)を書いて上げ、oper_status(byte 3 の下位 4bit)が 1 になるのを待つ(`g_bfm_link_wait_ms`)
+|0x907f |MCAM |FW の更新の前に読む(72 バイト)。byte 11 の bit0〜3 = MCQS・MCQI・MCC・MCDA に対応している。HCA の能力の `mcam_reg`(bit 0x1a9)が 1 のときだけ読む
+|0x9060 |MCQS |部品の一覧(16 バイト)。[2..3] component_index を入れて読み、[6..7] identifier(1 = FW の像 BOOT_IMG)、byte 0 bit7 last_index_flag(最後の部品)
+|0x9061 |MCQI |部品の情報(頭 24 バイト + 情報)。[2..3] component_index、byte 11 info_type(0 = 能力、1 = 版)、[22..23] data_size、byte 0 bit7 read_pending_component(1 = 次の起動の像)。能力は 24 バイト目から: [8..11] max_component_size、byte 12 の上位 4bit log_mcda_word_size、[14..15] mcda_max_write_size、byte 16 bit4 match_psid
+|0x9062 |MCC |FW の更新の手順(32 バイト)。byte 3 instruction(1 LOCK・2 RELEASE・3 UPDATE_COMPONENT・4 VERIFY_COMPONENT・6 ACTIVATE・8 CANCEL)、[6..7] component_index、[9..11] update_handle、[16..19] component_size。読むと byte 14 error_code、byte 15 の下位 4bit control_state(0 IDLE・1 LOCKED・3 DOWNLOAD・4 VERIFY・5 APPLY・6 ACTIVATE)
+|0x9063 |MCDA |部品のデータ(頭 16 バイト + データ)。[1..3] update_handle、[4..7] offset、[10..11] size、16 バイト目からデータ(4 バイトずつ、ホスト順の値をビッグエンディアンで)
 |===
+
+MCC / MCDA などは 16 バイトより長いので、FW の更新(`src/bfm_fw.c`)は自分の作業域で ACCESS_REG を組む
+(長い分はメールボックスの鎖で渡す)。手順は Linux の mlxfw と同じ: FSM が IDLE か確かめる → LOCK → LOCKED を待つ →
+UPDATE_COMPONENT → DOWNLOAD を待つ → MCDA で全部渡す → VERIFY_COMPONENT → LOCKED を待つ → ACTIVATE → LOCKED を待つ → RELEASE。
+状態を待つところは 200ms ごとに MCC を読み、30 秒で時間切れ。error_code が 0 でなければ失敗(2 ハッシュが合わない・
+3 当てはまらない像・8 形が正しくない など)で、CANCEL・RELEASE を出して終わる。FW は今動いている像とは別の置き場に書くので、
+切り替える(ACTIVATE)までは次の起動の像は変わらない。新しい FW は装置のリセットか電源の入れ直しで有効になる。
+
+MCDA で渡す部品は、配布の .bin(フラッシュ全体の像。ConnectX-4 Lx で 16MB)そのものではない。mstflint が MFA2 を作るとき・
+MCC で書くときと同じく(`FwExtract4MBImage()`)、像の目次(ITOC。先頭から 4KiB ごとに探す。印は "ITOC" と決まった 12 バイト、
+頭と欄は 32 バイトで、最初の 7 語の CRC16(多項式 0x100b)を最後の語に持つ)を読み、相対番地の欄の終わりまでを渡す。
+先頭の 16 バイト(印 "MTFW")と、ボードごとの情報(MAC・GUID・VPD など。フラッシュの終わりに絶対番地で置かれる)を指す
+device_data の欄は 0xFF にして渡す。ConnectX-4 Lx の 14.29.1016 では、部品の上限 7MB・MCDA 1 回 128 バイトで、
+16,744,768 バイトの .bin のうち 4,840,404 バイトを渡す。
+
+書いた FW はカードのリセットで動き出す。カードだけのリセットは MFRL(0x9028、8 バイト。bfmem はまだ使わない)で頼む:
+byte 7 reset_level(対応しているものの印。bit0 live-patch・bit3 PCI のリセット・bit6 warm reboot)、byte 6 reset_type、
+byte 5 の上位 3bit pci_reset_req_method(0 = リンクの切断)と下位 4bit reset_state。reset_level に 0x08(level 3)を書いて
+ドライバを外し、上流のポートでリンクを切って繋ぎ直すと、FW がカード全体をリセットして新しい像で立ち上がる。
+MCAM の byte 18 bit0 が MFRL への対応の印(ConnectX-4 Lx は 14.29.1016 で 0・14.32.1912 で 1。0 でも MFRL は読み書きできた)。
 
 ==== HCA の能力(QUERY_HCA_CAP / SET_HCA_CAP)
 

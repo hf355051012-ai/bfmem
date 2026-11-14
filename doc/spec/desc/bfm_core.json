@@ -140,6 +140,18 @@
       }
     },
     {
+      "func": "bfm_dev_ready",
+      "purpose": "ポートの立ち上げが済んで、装置にコマンドを出せる状態かを、このファイルの外から知るための関数。立ち上がった装置にだけ許す操作(FW の更新 `bfm_fw_update()`)と、試験の fw が使う。",
+      "summary": "ポートの立ち上げの状態(`d->phase`)が `D_READY` なら 1 を返す。",
+      "args": {"d": "装置"},
+      "ret": "1 = 立ち上がっている。0 = そうでない(止まっている・立ち上げの途中・止めている・失敗した)。",
+      "pre": "特になし(鍵を取らずに読む)。",
+      "notes": "状態の enum(`D_*`)はこのファイルの中だけにあるので、外からはこの関数で見る。",
+      "flow": [
+        {"return": "d->phase == D_READY"}
+      ]
+    },
+    {
       "func": "bfm_dev_step",
       "purpose": "1 つのポート(ConnectX の 1 つの PCIe の function)を、接続を張れる状態まで立ち上げる状態機械。そのポートの接続がポートの立ち上げを待つ手順にいる間に、`bfm_cm_conn_step()` が繰り返し呼ぶ。済むと、そのポートの接続の確立を始められる。",
       "summary": "ポート `d` の立ち上げを、待つところまで進める(待つところでは `BFM_INPROGRESS` を返す状態機械)。`D_IDLE` では、そのポートの各層の状態を最初に戻し(`bfm_pci_setup_reset()`・`mlx5_hca_init_reset()`・`bfm_dif_init_reset()`・`bfm_cm_reset()`)、その後は PCIe の設定(`bfm_pci_setup_step()`)→ BAR0 を張る(`bfm_port_bar0_map()`)→ HCA の立ち上げ(`mlx5_hca_init_step()`。公開メモリの MKey を含む)→ T10-DIF の準備(`bfm_dif_init_step()`)→ GSI と接続の枠の用意(`bfm_cm_init_step()`)の順に進め、準備完了(使った DMA 領域・接続の数・inline の上限・BlueFlame の窓)を表示して `D_READY` にする。途中で失敗したら、取ったものを返す手順(`D_STOP`。`dev_stop_step()`)を進めてから `D_FAILED` にする。",

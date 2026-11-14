@@ -129,6 +129,15 @@ Precision `b3:00.1`、ポート 1 は 192.168.102.11 / .21)ので、2 ポート�
   待たない形にした最初の版で、Precision の FW に渡すページが 7,841 → 5,680 に減った。答えている間に来た要求は
   最後のものを覚えておき、答え終えてから答える(`mlx5_eq_poll()`)。直すと前と同じ 7,841(その後 FW は 2,161 の返却を申し出る)。
 
+- **NVIDIA が配る FW の .bin はフラッシュ全体の像で、そのまま MCC / MCDA で渡すと FW が受けない**(ConnectX-4 Lx で
+  .bin 16MB、部品の上限 7MB)。渡すのは mstflint の `FwExtract4MBImage(img, true)` と同じ部分(ITOC の相対番地の部分の
+  終わりまで。先頭 16 バイトの印と device_data の ITOC の欄は 0xFF)。ボードごとの情報(MAC・GUID・VPD)を渡さないためでもある。
+  FW の更新を試すときは、まず確かめるだけ(`-A` なし)で。取り消した直後は mlx5_core の立ち上げに約 46 秒かかった。
+- **書いた FW を動かすにはカードのリセットが要る。** Precision の ConnectX-4 Lx は MFRL の level 3(PCI のリセット)に対応して
+  いて、MFRL に level 3 を書いてルートポート `0000:b2:00.0` でリンクを切って繋ぎ直せば、ホストを再起動せずに切り替わる
+  (`TEST_PLAN.md`)。14.29.1016 は MCAM に MFRL を載せていないので、Linux の `devlink … fw_activate` は断られる。
+  **Precision の ConnectX は 2026-11-14 から FW 14.32.1912**(OptiPlex は 14.29.1016 のまま)。
+
 ## vfio_nvme から引き継ぐ落とし穴
 
 - **BAR0 は sysfs の `resource0` から張る。** VFIO の fd から張ると PAT が BAR 全体を UC で持ち、

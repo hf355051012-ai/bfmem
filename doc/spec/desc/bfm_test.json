@@ -2282,6 +2282,41 @@
       ]
     },
     {
+      "func": "run_fw",
+      "purpose": "fw の本体。ファイルの FW の像を読み、ポート 0 の装置のフラッシュへ `bfm_fw_update()` で書かせて、FW の更新が実機で動くかを確かめるための関数。既定は確かめるだけ(次の起動の FW は変えない)で、`-A` のときだけ切り替える。",
+      "summary": "`path` のファイルを全部読み(64MiB 未満)、ポート 0 が立ち上がるまで `bfm_run()` を呼ぶ(180 秒まで。接続はできなくてよい)。`bfm_fw_update()` を `BFM_INPROGRESS` 以外が返るまで呼び、その間も `bfm_run()` を呼ぶ。Ctrl-C(`g_stop`)が来たら一度だけ `bfm_fw_update_cancel()` を呼ぶ。結果とかかった時間を表示する。",
+      "args": {"path": "FW の像(.bin)のファイル", "activate": "1 = 確かめた後に切り替える(`BFM_FW_ACTIVATE`)、0 = 確かめるだけ(`BFM_FW_VERIFY_ONLY`)"},
+      "ret": "0: `bfm_fw_update()` が `BFM_OK` を返した。1: ファイルを読めない、ポート 0 が立ち上がらない、または `bfm_fw_update()` が失敗した。",
+      "pre": "設定の変数を決めてあること(`main()`。ポート 0 の接続 1 本だけ)。",
+      "notes": "* 切り替えたときは、装置の電源を入れ直すと新しい FW が有効になる(`bfmem_test` はリセットをかけない)。\n* 同じカードのもう一方のポートの PF も vfio-pci にしてあれば、そちらから同時に更新しないこと(FW の手順の鍵で断られる)。",
+      "flow": [
+        {"do": "fopen(path) で開く"},
+        {"if": "開けない?", "then": [{"do": "「開けない」を表示"}, {"return": "1"}]},
+        {"do": "長さを調べ、0 より大きく 64MiB 未満なら malloc して全部読む(読めなければ解放する)"},
+        {"do": "fclose()"},
+        {"if": "読めなかった?", "then": [{"do": "「読めない」を表示"}, {"return": "1"}]},
+        {"do": "ファイルの名前・長さ・確かめるだけか切り替えるかを表示"},
+        {"while": "ポート 0 が立ち上がっていない(bfm_dev_ready() が 0)?", "body": [
+          {"call": "rc = bfm_run() を呼ぶ"},
+          {"if": "失敗(BFM_E_STATE 以外の負)、g_stop、または 180 秒過ぎた?", "then": [
+            {"do": "「ポート 0 が立ち上がらない」を表示し、像を解放"},
+            {"return": "1"}
+          ]},
+          {"call": "idle() を呼ぶ"}
+        ]},
+        {"while": "bfm_fw_update(0, img, len, activate ? BFM_FW_ACTIVATE : BFM_FW_VERIFY_ONLY) が BFM_INPROGRESS ?", "body": [
+          {"if": "g_stop で、まだ取り消していない?", "then": [
+            {"call": "bfm_fw_update_cancel(0) を呼ぶ"},
+            {"do": "cancelled = 1"}
+          ]},
+          {"call": "bfm_run() を呼ぶ(FW のページの要求などに答え続ける)"}
+        ]},
+        {"call": "bfm_strerror(rc) を呼び、結果とかかった時間を表示"},
+        {"do": "像を解放"},
+        {"return": "rc == BFM_OK ? 0 : 1"}
+      ]
+    },
+    {
       "func": "run_info",
       "purpose": "info の本体。接続はせずにポートだけを立ち上げ、装置の能力(BlueFlame・atomic・T10-DIF のオフロードなど)を表示して、試験や移植の前に装置を確かめるための関数。",
       "summary": "info の本体。使うポートの接続 0 がどれも立ち上げ中(`BFM_ST_INIT`)でなくなるまで(180 秒まで)`bfm_run()` を呼び、使うポートごとに装置の名前・BlueFlame・atomic・QP の能力・FW に渡したページの数・sho を表示し、T10-DIF のオフロードの有無を表示する。接続ができるのは待たない。",
@@ -2314,10 +2349,10 @@
     },
     {
       "func": "main",
-      "purpose": "bfmem_test の開始点。コマンドの引数で選んだ試験(run・serve・bench・race・wpost・perf・crc・info)を、オプションで決めた設定で行い、最後に bfmem を止めるための関数。",
-      "summary": "オプションを読んだ後、引数の動きが crc なら、相手も NIC も使わずに `run_crc()` だけを行って戻る。それ以外は、引数を読んで設定の変数を決め、シグナルの受け口を登録し、最初の `bfm_run()` の後で自分の公開メモリを埋めて、引数の動き(run / serve / bench / race / wpost / perf / info)を行い、最後に `do_shutdown()` で止める。`-L` なら、止めた後に全部の接続の状態遷移の記録を表示する(`bfm_conn_steplog()`)。\n\n* `-d BDF` / `-D BDF`: `g_bfm_linux_pci_bdf[0]` / `[1]`(ポート 0 / 1 の装置)\n* `-i IP` / `-I IP`: `g_bfm_local_ip[0]` / `[1]`(ポート 0 / 1 の自分の IP)\n* `-c 本数`: ポートごとの接続の数(`g_bfm_port_conn[]`。ポート 1 は使うときだけ)\n* `-t 本数`: `bfm_run()` を同時に呼ぶスレッドの数(既定 4)\n* `-p 番号`: `g_bfm_cm_port`(接続の番号の起点。両方のノードで同じ値にする)\n* `-m 経路MTU`: `g_bfm_path_mtu`\n* `-M ポートのMTU`: `g_bfm_port_mtu`\n* `-n 回数`: run の回数(0 なら一通りの検査の遅延の測定 20000、mt 100000)、bench の回数(既定 100000)、race の揺さぶる段の秒数(既定 30)、wpost の 1 回の秒数(既定 5)、perf の 1 項目の秒数(既定 2)\n* `-B` / `-S` / `-C`: `g_bfm_bf_enable` / `g_bfm_scatter_cqe` / `g_bfm_cpu_awake` を 0 にする\n* `-Q 多重度`: `g_bfm_qdepth`(多重度つきの write / read を出しておける数。1〜64)\n* `-a N`: `g_bfm_ack_timeout`(RC の ack timeout)\n* `-x`: run で [7](`run_oob()`)を行う\n* `-q` / `-P` / `-z`: `g_quiet` / `g_perf` / `g_silent` を 1 にする(run で、受けるだけ / mt だけ / [10] 無応答の試験 `run_silent()` も行う)\n* `-L`: `g_steplog` を 1 にする(止めた後に状態遷移の記録を表示する)\n* `-R N`: `g_wp_rot`(wpost でコア k に k + N 番目の接続を割り当てる)\n* `-T 項目名[:長さ]`: `g_pf_only`(perf で測る項目を絞る)\n* `-v`: `g_bfm_verbose` を 1 にする\n\n引数は `<動き> <相手のIP> [ポート1の相手のIP]`(`g_bfm_peer_ip[0]` / `[1]`)。",
+      "purpose": "bfmem_test の開始点。コマンドの引数で選んだ試験(run・serve・bench・race・wpost・perf・crc・info)か FW の更新(fw)を、オプションで決めた設定で行い、最後に bfmem を止めるための関数。",
+      "summary": "オプションを読んだ後、引数の動きが crc なら、相手も NIC も使わずに `run_crc()` だけを行って戻る。それ以外は、引数を読んで設定の変数を決め、シグナルの受け口を登録し、最初の `bfm_run()` の後で自分の公開メモリを埋めて、引数の動き(run / serve / bench / race / wpost / perf / fw / info)を行い、最後に `do_shutdown()` で止める。`-L` なら、止めた後に全部の接続の状態遷移の記録を表示する(`bfm_conn_steplog()`)。\n\n* `-d BDF` / `-D BDF`: `g_bfm_linux_pci_bdf[0]` / `[1]`(ポート 0 / 1 の装置)\n* `-i IP` / `-I IP`: `g_bfm_local_ip[0]` / `[1]`(ポート 0 / 1 の自分の IP)\n* `-c 本数`: ポートごとの接続の数(`g_bfm_port_conn[]`。ポート 1 は使うときだけ)\n* `-t 本数`: `bfm_run()` を同時に呼ぶスレッドの数(既定 4)\n* `-p 番号`: `g_bfm_cm_port`(接続の番号の起点。両方のノードで同じ値にする)\n* `-m 経路MTU`: `g_bfm_path_mtu`\n* `-M ポートのMTU`: `g_bfm_port_mtu`\n* `-n 回数`: run の回数(0 なら一通りの検査の遅延の測定 20000、mt 100000)、bench の回数(既定 100000)、race の揺さぶる段の秒数(既定 30)、wpost の 1 回の秒数(既定 5)、perf の 1 項目の秒数(既定 2)\n* `-B` / `-S` / `-C`: `g_bfm_bf_enable` / `g_bfm_scatter_cqe` / `g_bfm_cpu_awake` を 0 にする\n* `-Q 多重度`: `g_bfm_qdepth`(多重度つきの write / read を出しておける数。1〜64)\n* `-a N`: `g_bfm_ack_timeout`(RC の ack timeout)\n* `-x`: run で [7](`run_oob()`)を行う\n* `-q` / `-P` / `-z`: `g_quiet` / `g_perf` / `g_silent` を 1 にする(run で、受けるだけ / mt だけ / [10] 無応答の試験 `run_silent()` も行う)\n* `-L`: `g_steplog` を 1 にする(止めた後に状態遷移の記録を表示する)\n* `-R N`: `g_wp_rot`(wpost でコア k に k + N 番目の接続を割り当てる)\n* `-T 項目名[:長さ]`: `g_pf_only`(perf で測る項目を絞る)\n* `-v`: `g_bfm_verbose` を 1 にする\n* `-A`: fw で、確かめた後に次の起動から使うよう切り替える(`fw_activate`)\n\n引数は `<動き> <相手のIP> [ポート1の相手のIP]`(`g_bfm_peer_ip[0]` / `[1]`)。fw は `fw <相手のIP> <FW の像の .bin>` で、ポート 0 の接続 1 本だけを使う。",
       "args": {"argc": "引数の数", "argv": "引数"},
-      "ret": "0: 成功。1: 最初の `bfm_run()` が失敗した、公開メモリが小さい、または run / bench / race / wpost / perf / info が失敗を返した。2: 引数が正しくない。",
+      "ret": "0: 成功。1: 最初の `bfm_run()` が失敗した、公開メモリが小さい、または run / bench / race / wpost / perf / fw / info が失敗を返した。2: 引数が正しくない。",
       "pre": "特になし。",
       "notes": "* 相手の IP はどの動きでも要る。ポート 1 の相手の IP を書いたときだけポート 1 を使う(書かなければ `g_bfm_port_conn[1] = 0`)。`-c` を書かずにポート 1 を使い、`g_bfm_port_conn[1]` の既定が 0 なら、ポート 0 と同じ数にする。\n* bench のときは中継バッファ `g_bfm_stage_size` を `BENCH_QD_MAX * BENCH_SIZE_MAX`(4MiB)にし、中継バッファが大きいので接続をポート 0 の 1 本だけにする。\n* `g_serve` は serve のときだけ 1(SIGQUIT で hash を出す。それ以外では SIGQUIT も止める合図。`on_sig()`)。\n* 最初の `bfm_run()` の直後、相手が繋いでくる前に自分の公開メモリを埋める(`fill_area()`)。最初の `bfm_run()` が失敗(`BFM_E_STATE` 以外の負)を返したときは、`do_shutdown()` を呼んで 1 を返す。\n* `-h` と知らないオプションは使い方を表示して 2 を返す。",
       "entry_note": "プログラムの開始点(OS から呼ばれる)",
@@ -2360,6 +2395,7 @@
             {"case": "'a'", "body": [{"do": "g_bfm_ack_timeout = atoi(optarg)"}]},
             {"case": "'Q'", "body": [{"do": "g_bfm_qdepth = atoi(optarg)"}]},
             {"case": "'v'", "body": [{"do": "g_bfm_verbose = 1"}]},
+            {"case": "'A'", "body": [{"do": "fw_activate = 1"}]},
             {"default": true, "body": [
               {"call": "usage() を呼ぶ"},
               {"return": "2"}
@@ -2380,17 +2416,26 @@
           {"call": "usage() を呼ぶ"},
           {"return": "2"}
         ]},
-        {"if": "optind + 2 < argc ?", "then": [
-          {"call": "parse_ip(argv[optind + 2], &g_bfm_peer_ip[1]) を呼ぶ"},
-          {"if": "parse_ip() != 0 ?", "then": [
+        {"do": "fw = (mode が \"fw\")"},
+        {"if": "fw ?", "then": [
+          {"if": "optind + 2 >= argc ?", "then": [
             {"call": "usage() を呼ぶ"},
             {"return": "2"}
-          ]}
+          ]},
+          {"do": "fw_path = argv[optind + 2]、g_bfm_port_conn[0] = 1、g_bfm_port_conn[1] = 0"}
         ], "else": [
-          {"do": "g_bfm_port_conn[1] = 0(ポート 1 は使わない)"}
+          {"if": "optind + 2 < argc ?", "then": [
+            {"call": "parse_ip(argv[optind + 2], &g_bfm_peer_ip[1]) を呼ぶ"},
+            {"if": "parse_ip() != 0 ?", "then": [
+              {"call": "usage() を呼ぶ"},
+              {"return": "2"}
+            ]}
+          ], "else": [
+            {"do": "g_bfm_port_conn[1] = 0(ポート 1 は使わない)"}
+          ]}
         ]},
-        {"if": "nconn != 0 ?", "then": [{"do": "g_bfm_port_conn[0] = nconn"}]},
-        {"if": "optind + 2 < argc ?", "then": [
+        {"if": "nconn != 0 かつ fw でない?", "then": [{"do": "g_bfm_port_conn[0] = nconn"}]},
+        {"if": "optind + 2 < argc かつ fw でない?", "then": [
           {"do": "g_bfm_port_conn[1] = nconn があれば nconn、なければ g_bfm_port_conn[1](0 なら g_bfm_port_conn[0])"}
         ]},
         {"do": "setvbuf() で標準出力を 1 行ずつ出す形にする(ファイルへ出すときも、落ちたときに表示を失わない)"},
@@ -2404,7 +2449,7 @@
         {"if": "perf ?", "then": [
           {"do": "g_bfm_async_buf_size = PERF_BIG(32KiB)、使うポートの接続の数 = PERF_CORES"}
         ]},
-        {"if": "mode が \"run\"・\"serve\"・\"bench\"・\"race\"・\"wpost\"・\"perf\"・\"info\" のどれでもない?", "then": [
+        {"if": "mode が \"run\"・\"serve\"・\"bench\"・\"race\"・\"wpost\"・\"perf\"・\"fw\"・\"info\" のどれでもない?", "then": [
           {"call": "usage() を呼ぶ"},
           {"return": "2"}
         ]},
@@ -2438,7 +2483,11 @@
                   {"if": "perf ?", "then": [
                     {"call": "ret = run_perf(iters) を呼ぶ"}
                   ], "else": [
-                    {"call": "ret = run_all(threads, iters, oob) を呼ぶ"}
+                    {"if": "fw ?", "then": [
+                      {"call": "ret = run_fw(fw_path, fw_activate) を呼ぶ"}
+                    ], "else": [
+                      {"call": "ret = run_all(threads, iters, oob) を呼ぶ"}
+                    ]}
                   ]}
                 ]}
               ]}

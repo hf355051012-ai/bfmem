@@ -119,6 +119,12 @@ extern bfm_lock_t g_bfm_ctl_lock;
 #define MLX5_REG_PMTU            0x5003u
 #define MLX5_REG_PAOS            0x5006u
 #define MLX5_REG_HOST_ENDIANNESS 0x7004u
+/* FW の更新に使うレジスタ(Linux の include/linux/mlx5/driver.h)*/
+#define MLX5_REG_MCQS            0x9060u   /* 部品(component)の一覧と更新の状態 */
+#define MLX5_REG_MCQI            0x9061u   /* 部品の能力・版 */
+#define MLX5_REG_MCC             0x9062u   /* 更新の手順(FSM)を進める命令と状態 */
+#define MLX5_REG_MCDA            0x9063u   /* 部品のデータを渡す */
+#define MLX5_REG_MCAM            0x907fu   /* どのレジスタに対応しているか */
 
 #define MLX5_CAP_GENERAL 0u
 #define MLX5_CAP_ATOMIC  3u
@@ -247,6 +253,7 @@ typedef struct {
     uint16_t atomic_size_qp;         /* 拡張 atomic で扱える大きさ(bit n = 2^n バイト)*/
     uint8_t  atomic_mode;            /* QPC の atomic_mode(0 = 相手からの atomic を受けない)*/
     uint8_t  sho;                    /* 署名(T10-DIF)のオフロードがある */
+    uint8_t  mcam_reg;               /* MCAM レジスタがある(FW の更新に使うレジスタの対応を調べられる)*/
     uint8_t  umr_fence;              /* UMR の WQE に付ける fence(fm_ce_se の値)*/
 
     /* 資源 */
@@ -426,6 +433,7 @@ uint64_t bfm_mem_used(void);
 
 /* bfm_core.c */
 int  bfm_dev_step(bfm_dev_t *d);           /* ポートの立ち上げを進める(接続の状態機械の K_PORT から)*/
+int  bfm_dev_ready(const bfm_dev_t *d);    /* ポートの立ち上げが済んで使える状態か */
 
 /* bfm_pci.c */
 void bfm_pci_setup_reset(bfm_dev_t *d);

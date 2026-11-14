@@ -81,6 +81,7 @@ uint8_t  g_bfm_ack_timeout        = 12u;            /* RC の ack timeout(設定
 uint8_t  g_bfm_retry_count        = 7u;             /* RC の再送回数(最大)*/
 uint32_t g_bfm_op_timeout_ms      = 5000u;          /* 1 回の操作の完了を待つ上限。5 秒 */
 uint32_t g_bfm_signal_every       = 32u;            /* bfm_write_post() で完了通知を求める間隔(WQE 32 個ごと)*/
+uint32_t g_bfm_fw_allow_no_psid_check = 0u;         /* FW が PSID を確かめない装置へは FW を書かない */
 uint32_t g_bfm_cpu_awake          = 1u;             /* CPU を深い C-state に入れない(相手からの read / atomic の遅延に効く)*/
 uint64_t g_bfm_tsc_hz             = 0u;             /* TSC の周波数。0 = CPUID / MSR から求める */
 uint32_t g_bfm_verbose            = 0u;             /* 経過を細かく表示する。0 = しない */

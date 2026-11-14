@@ -169,6 +169,12 @@ static int dev_stop_step(bfm_dev_t *d)
  * 途中で失敗したら、取ったものを返す手順(D_STOP)を同じように進めてから D_FAILED にする。
  * 戻り値: BFM_INPROGRESS = 途中。BFM_OK = 使える。負 = 失敗した(その理由)。
  * ===============================================================*/
+/* ポートの立ち上げが済んで使える状態か(FW の更新など、立ち上がった装置にだけ許すものが見る)。 */
+int bfm_dev_ready(const bfm_dev_t *d)
+{
+    return d->phase == D_READY;
+}
+
 int bfm_dev_step(bfm_dev_t *d)
 {
     int rc = BFM_OK;

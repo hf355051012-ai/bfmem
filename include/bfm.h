@@ -56,7 +56,7 @@
 #define BFM_E_CQE       (-8)   /* そのほかのエラー完了 */
 #define BFM_E_DIF       (-9)   /* T10-DIF の検査で誤りを見つけた(bfm_dif_err_t に詳しく)*/
 #define BFM_E_NOTSUP    (-10)  /* 装置が対応していない(T10-DIF のオフロードなど)*/
-#define BFM_E_BUSY      (-11)  /* その接続の前の T10-DIF の転送が、まだ終わっていない */
+#define BFM_E_BUSY      (-11)  /* その接続の前の T10-DIF の転送が、まだ終わっていない。FW の更新がほかで進んでいる */
 
 /* 待ちの途中(正の値)。同じ関数を後でもう一度呼ぶと先へ進む。 */
 #define BFM_INPROGRESS    1
@@ -287,6 +287,32 @@ int bfm_dif_hw_supported(void);
 
 /* データ 512 バイトの PI(8 バイト)を作る(アプリケーションが PI つきのデータを用意するため)。 */
 void bfm_dif_make_pi(const void *data, uint16_t app_tag, uint32_t ref_tag, uint8_t pi[8]);
+
+/* ---- FW の更新 ----
+ * ConnectX のフラッシュの FW を、FW 自身に書かせる(MCC / MCDA レジスタ。Linux の devlink の flash と同じ方式)。
+ * FW は今動いている像とは別の置き場に新しい像を書き、確かめてから切り替えるので、途中で止まっても前の像で起動する。
+ * 新しい FW は、装置の電源を入れ直したとき(またはリセットしたとき)に有効になる。bfmem はリセットをかけない。 */
+
+#define BFM_FW_VERIFY_ONLY  0   /* 書いて FW に確かめさせるが、切り替えずに取り消す(次の起動の像は変わらない)*/
+#define BFM_FW_ACTIVATE     1   /* 確かめた後、次の起動からこの像を使うよう切り替える */
+
+/* ポート port の装置のフラッシュへ、FW の像 img(len バイト)を書く。img は NVIDIA の配布の .bin(zip を展開したもの。
+ * ボードの PSID 用)をそのまま渡す。FW に渡すのはそのうちの FW の像の部分だけで、ボードごとの情報(MAC・GUID・
+ * VPD など)は渡さない(mstflint が MCC で書くときと同じ。ConnectX-4 / 4 Lx の形の像だけを扱う)。
+ * 待たずに少しずつ進めるので、BFM_INPROGRESS 以外が返るまで、同じ引数で呼び続ける
+ * (2 回目からは引数を見ない。img は終わるまで残しておくこと)。bfm_run() はその間も呼び続けてよい。
+ * ポートが立ち上がっている(bfm_run() が進めて使える状態)ときだけ使える。同じカードのポートは
+ * フラッシュを共有するので、1 つのポートからだけ行う。
+ * 戻り値: BFM_OK = 済んだ(mode のとおり)。BFM_INPROGRESS = 途中。BFM_E_NOTSUP = 装置が対応していない、
+ *         または PSID を確かめない装置(g_bfm_fw_allow_no_psid_check)。BFM_E_PARAM = 像が正しくない(印・目次の CRC が合わない)・大きすぎる。
+ *         BFM_E_BUSY = ほかの更新が進んでいる。BFM_E_STATE = ポートが立ち上がっていない。
+ *         BFM_E_HW = FW が断った(理由を表示する)。BFM_E_TIMEOUT = FW の状態が変わらない。
+ *         失敗したときは、取り消してから手放してあり、次の起動の像は変わっていない。 */
+int bfm_fw_update(unsigned port, const void *img, uint32_t len, int mode);
+
+/* 進めている bfm_fw_update() を取り消すよう頼む。この後も bfm_fw_update() を呼び続けると、
+ * 取り消して手放し、BFM_E_STATE を返して終わる(切り替えの後は取り消せない)。 */
+void bfm_fw_update_cancel(unsigned port);
 
 /* ---- 情報 ---- */
 

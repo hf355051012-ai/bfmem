@@ -205,6 +205,10 @@ extern uint32_t g_bfm_op_timeout_ms;
 /* bfm_write_post() で完了通知(CQE)を求める間隔(WQE の数)。 */
 extern uint32_t g_bfm_signal_every;
 
+/* bfm_fw_update(): 1 = FW が像の PSID(ボードの種類)の一致を確かめない装置でも書く。
+ * 0(既定)なら、そういう装置では書かずに断る(別のボード用の像を書く危険を避ける)。 */
+extern uint32_t g_bfm_fw_allow_no_psid_check;
+
 /* 1 = 動いている間、CPU を深い省電力状態(パッケージの C-state)に入れない。
  * **相手からの read / atomic の遅延に効く。** 受け側の NIC はホストのメモリを読んで応答するので、
  * CPU が深く眠っているとメモリ側が起きるまで待たされる(ConnectX-4 Lx + Core i3-8100 の受け側で

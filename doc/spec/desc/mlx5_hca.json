@@ -107,7 +107,7 @@
     {
       "func": "parse_general_caps",
       "purpose": "`query_cap()` で読んだ general の能力から、bfmem が使う値(BlueFlame の窓の大きさ、read / atomic を同時に出せる数、RoCE が使えるかなど)を装置の情報に取り出すための下請けの関数。HCA の立ち上げで使い、RoCE が使えない装置はここで断る。",
-      "summary": "`s_cap_out[d->port]` にある general の能力から、要るもの(`page_request_disable`・`log_max_ra_req_qp`・`log_max_ra_res_qp`・`port_type`・`roce`・`bf`・`log_bf_reg_size`・`num_vhca_ports`・署名オフロードの `sho`・`umr_fence`)を取り出して `d` に入れる。BlueFlame の 1 面の大きさ `bf_buf_size` を `2^log_bf_reg_size / 2`(上限 `BFM_WQE_MAX`)にする。",
+      "summary": "`s_cap_out[d->port]` にある general の能力から、要るもの(`page_request_disable`・`log_max_ra_req_qp`・`log_max_ra_res_qp`・`port_type`・`roce`・`bf`・`log_bf_reg_size`・`num_vhca_ports`・署名オフロードの `sho`・`umr_fence`・FW の更新に使う MCAM があるかの `mcam_reg`)を取り出して `d` に入れる。BlueFlame の 1 面の大きさ `bf_buf_size` を `2^log_bf_reg_size / 2`(上限 `BFM_WQE_MAX`)にする。",
       "args": {"d": "ポートの装置(`g_bfm_dev[port]`)"},
       "ret": "`BFM_OK`: 取り出せた。`BFM_E_HW`: ポートが Ethernet でない。",
       "pre": "`query_cap(MLX5_CAP_GENERAL)` が完了して `s_cap_out[d->port]` に general の能力が入っていること。",

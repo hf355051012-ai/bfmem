@@ -49,6 +49,7 @@ FILES = [
     ("src/bfm_ops.c", ["linux", "vxworks"]),
     ("src/bfm_async.c", ["linux", "vxworks"]),
     ("src/bfm_dif.c", ["linux", "vxworks"]),
+    ("src/bfm_fw.c", ["linux", "vxworks"]),
     ("port/linux_vfio/port_linux.c", ["linux"]),
     ("port/vxworks/port_vxworks.c", ["vxworks"]),
     ("port/x86/bfm_x86.c", ["linux", "vxworks"]),

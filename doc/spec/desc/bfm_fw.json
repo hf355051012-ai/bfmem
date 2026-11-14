@@ -1,0 +1,397 @@
+{
+  "file": "src/bfm_fw.c",
+  "summary": "ConnectX のフラッシュの FW の更新。FW 自身に書かせる方式(Linux の mlx5_core の `fw.c` と mlxfw の `mlxfw_fsm.c` と同じ)で、FW の中の更新の手順(FSM)を ACCESS_REG のレジスタで進める。\n\n* MCAM(0x907f): どのレジスタに対応しているか。MCQS・MCQI・MCC・MCDA がそろっていなければ何もしない。\n* MCQS(0x9060): 部品(component)の一覧。FW の像の部品(identifier = BOOT_IMG)の番号を探す。\n* MCQI(0x9061): 部品の能力(受けられる大きさ・1 回に渡せる大きさ・PSID を確かめるか)と版。\n* MCC(0x9062): FSM の命令(LOCK・UPDATE_COMPONENT・VERIFY_COMPONENT・ACTIVATE・CANCEL・RELEASE)と、状態・エラーの番号。\n* MCDA(0x9063): 部品のデータを渡す。\n\n流れは、FSM が IDLE か確かめる → LOCK → LOCKED を待つ → UPDATE_COMPONENT → DOWNLOAD を待つ → MCDA で全部渡す → VERIFY → LOCKED を待つ → (ACTIVATE → LOCKED を待つ)→ RELEASE。失敗したら、部品の更新を始めていれば CANCEL、手順を取っていれば RELEASE を出してから終わる。\n\n起動しなくなる危険を小さくするために: FW は今動いている像とは別の置き場に書き、VERIFY で確かめてから ACTIVATE で切り替える(ACTIVATE は VERIFY が通った後にしか出さない)。`BFM_FW_VERIFY_ONLY` では ACTIVATE を出さずに取り消す。像の先頭の印・長さ・FW が受けられる大きさを確かめ、FW が PSID を確かめない装置には `g_bfm_fw_allow_no_psid_check` が 0 なら書かない。FSM が IDLE でなければ(ほかの道具・ほかのポートが更新している)何もしない。装置のリセットはかけない(新しい FW は電源を入れ直したときに有効になる)。\n\n呼び出しは待たない。FW のコマンドを出したら `BFM_INPROGRESS` を返し、次の呼び出しで完了を見る。FSM の状態を待つところは 200ms ごとに MCC を読み、30 秒で時間切れにする(mlxfw と同じ)。FW のコマンドの entry と作業域(`s_in`・`s_out`)はポートをまたいで使うので、`g_bfm_ctl_lock` の中で進める。",
+  "functions": [
+    {
+      "func": "ms_since",
+      "purpose": "FW の更新で、FSM の状態を読み直す間隔と、状態が変わるのを待つ上限を判断するために、ある時刻からの経過をミリ秒で知るための下請け関数。`fw_step()` が使う。",
+      "summary": "`bfm_port_time_ns()` と `t0` の差をミリ秒にして返す。",
+      "args": {"t0": "起点の時刻(ナノ秒。`bfm_port_time_ns()` の値)"},
+      "ret": "`t0` からの経過(ミリ秒)。",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"return": "(bfm_port_time_ns() - t0) / 1000000"}
+      ]
+    },
+    {
+      "func": "reg_in",
+      "purpose": "これから出す ACCESS_REG のレジスタの部分を、0 で埋めた状態で用意するための下請け関数。`fw_step()` と `mcc_set()` が、レジスタの欄を書く前に使う。",
+      "summary": "ポート `port` の入力の作業域(`s_in[port]`)を全部 0 で埋め、そのうちレジスタの部分(頭 16 バイトの後)の先頭を返す。",
+      "args": {"port": "ポートの番号"},
+      "ret": "レジスタの部分の先頭(`&s_in[port][16]`)。",
+      "pre": "`g_bfm_ctl_lock` を持っていること。コマンドを出していない(`cmd.posted` が 0)こと(出した後は入力を書き換えない)。",
+      "notes": "特になし。",
+      "flow": [
+        {"do": "s_in[port] を 0 で埋める"},
+        {"return": "&s_in[port][16]"}
+      ]
+    },
+    {
+      "func": "access_reg",
+      "purpose": "FW の更新のレジスタ(MCAM・MCQS・MCQI・MCC・MCDA)を、ACCESS_REG のコマンドで待たずに読み書きするための下請け関数。`fw_step()` と `mcc_set()` が使う。",
+      "summary": "まだ出していなければ、作業域の頭に ACCESS_REG の opcode・op_mod(1 = 読む、0 = 書く)・レジスタの番号を書く。`mlx5_cmd_run()` でコマンドを出す・完了を見る。読んだレジスタは `s_out[port]` の 16 バイト目から。",
+      "args": {"d": "装置", "f": "その装置の FW の更新の状態(出しているコマンドを持つ)", "reg": "レジスタの番号(`MLX5_REG_MCC` など)", "read": "1 = 読む、0 = 書く", "inlen": "入力のレジスタの部分の長さ(バイト)", "outlen": "出力のレジスタの部分の長さ(バイト)", "what": "表示用のコマンドの名前"},
+      "ret": "`mlx5_cmd_run()` の値(`BFM_INPROGRESS` = まだ、`BFM_OK` = 済んだ、負 = 失敗)。",
+      "pre": "`g_bfm_ctl_lock` を持っていること。最初の呼び出しの前に、`reg_in()` でレジスタの入力を用意しておくこと。",
+      "notes": "入力・出力の長さは、Linux の `mlx5_core_access_reg()` に渡す長さと同じにしてある(MCC 32 / 32、MCDA 16 + データ / 16、MCQI 24 / 24 + 情報、MCQS 16 / 16、MCAM 72 / 72)。",
+      "flow": [
+        {"if": "まだ出していない?", "then": [
+          {"do": "s_in[port] の頭に opcode = ACCESS_REG、op_mod = read ? 1 : 0、レジスタの番号 = reg を書く"}
+        ]},
+        {"call": "mlx5_cmd_run(d, &f->cmd, s_in[port], 16 + inlen, s_out[port], 16 + outlen, what) を呼ぶ"},
+        {"return": "mlx5_cmd_run() の値"}
+      ]
+    },
+    {
+      "func": "mcc_set",
+      "purpose": "FW の中の更新の手順(FSM)に、LOCK・UPDATE_COMPONENT・VERIFY_COMPONENT・ACTIVATE・CANCEL・RELEASE の命令を出すための下請け関数。`fw_step()` が使う(Linux の `mlx5_reg_mcc_set()` と同じ)。",
+      "summary": "まだ出していなければ、MCC の instruction・component_index・update_handle(`f->handle`)・component_size を書く。`access_reg()` で MCC を書く。",
+      "args": {"d": "装置", "f": "その装置の FW の更新の状態", "instr": "MCC の命令(`MCC_LOCK` など)", "comp": "部品の番号(UPDATE_COMPONENT・VERIFY_COMPONENT で使う。ほかは 0)", "size": "部品の大きさ(UPDATE_COMPONENT で使う。ほかは 0)", "what": "表示用のコマンドの名前"},
+      "ret": "`access_reg()` の値。",
+      "pre": "`g_bfm_ctl_lock` を持っていること。",
+      "notes": "MCC の欄の位置: instruction = byte 3、component_index = byte 6〜7、update_handle = byte 9〜11、component_size = byte 16〜19(`struct mlx5_ifc_mcc_reg_bits`)。",
+      "flow": [
+        {"if": "まだ出していない?", "then": [
+          {"call": "r = reg_in(port) を呼ぶ"},
+          {"do": "r に instruction = instr、component_index = comp、update_handle = f->handle、component_size = size を書く"}
+        ]},
+        {"call": "access_reg(d, f, MLX5_REG_MCC, 0, 32, 32, what) を呼ぶ"},
+        {"return": "access_reg() の値"}
+      ]
+    },
+    {
+      "func": "fsm_err_str",
+      "purpose": "FW が更新の手順を断ったときに、その理由(MCC の error_code)を表示できる文にするための下請け関数。`fw_step()` が使う。",
+      "summary": "error_code(Linux の mlxfw の `enum mlxfw_fsm_state_err`)を文にする。1 一般のエラー、2 像のハッシュが合わない、3 この装置には当てはまらない像、4 知らない鍵、5 認証に失敗した、6 署名の無い像、7 当てはまらない鍵、8 像の形が正しくない、9 前の更新の後のリセット待ち。",
+      "args": {"e": "MCC の error_code"},
+      "ret": "理由の文。知らない番号なら「知らないエラー」。",
+      "pre": "特になし。",
+      "notes": "特になし。",
+      "flow": [
+        {"switch": "e", "cases": [
+          {"case": "1", "body": [{"return": "\"一般のエラー\""}]},
+          {"case": "2", "body": [{"return": "\"像のハッシュが合わない\""}]},
+          {"case": "3", "body": [{"return": "\"この装置には当てはまらない像(PSID などが違う)\""}]},
+          {"case": "4", "body": [{"return": "\"知らない鍵\""}]},
+          {"case": "5", "body": [{"return": "\"認証に失敗した\""}]},
+          {"case": "6", "body": [{"return": "\"署名の無い像\""}]},
+          {"case": "7", "body": [{"return": "\"当てはまらない鍵\""}]},
+          {"case": "8", "body": [{"return": "\"像の形が正しくない\""}]},
+          {"case": "9", "body": [{"return": "\"前の更新の後、リセットを待っている\""}]},
+          {"default": true, "body": [{"return": "\"知らないエラー\""}]}
+        ]}
+      ]
+    },
+    {
+      "func": "show_version",
+      "purpose": "更新の前に今動いている FW の版を、切り替えた後に次の起動で使われる FW の版を表示して、何を書いたかを確かめられるようにするための下請け関数。`fw_step()` が使う。",
+      "summary": "MCQI で読んだ版の情報(`s_out[port]` の 16 + 24 バイト目から)から、版の数(major.minor.subminor)と版の文字列を取り出して表示する。",
+      "args": {"d": "装置", "what": "表示の頭に付ける言葉(「今の」「次の起動の」)"},
+      "ret": "なし",
+      "pre": "直前の `access_reg()` で MCQI の版の情報(info_type = VERSION)を読んであること。",
+      "notes": "版の数は byte 4〜7(上位 8 ビット = major、次の 8 ビット = minor、下位 16 ビット = subminor)、文字列の長さは byte 3、文字列は byte 32 から(`struct mlx5_ifc_mcqi_version_bits`)。文字列は 92 バイトで切る。",
+      "flow": [
+        {"do": "ver = 版の数、n = 文字列の長さ(92 で切る)"},
+        {"do": "文字列を写して終わりに 0 を付ける"},
+        {"do": "BFM_LOG で「ポート p: what FW major.minor.subminor 文字列」を表示する"}
+      ]
+    },
+    {
+      "func": "itoc_crc",
+      "purpose": "FW の像の目次(ITOC)が壊れていないかを確かめるために、目次の頭・欄の CRC を mstflint と同じ式で求めるための下請け関数。`img_parse()` が使う。",
+      "summary": "ビッグエンディアンの 4 バイトの語を `n` 個読み、初めの値 0xffff・多項式 0x100b の 16 bit の CRC を、各語の上の bit から順に流して求める。最後に 0 を 16 bit 流し、全部の bit を反転して返す(mstflint の `CalcImageCRC()` と同じ)。",
+      "args": {"p": "語の並びの先頭", "n": "語の数"},
+      "ret": "CRC(16 bit)",
+      "pre": "特になし。",
+      "notes": "目次の頭・欄は 32 バイトで、最初の 7 語の CRC が最後の語の下位 16 bit に入っている。",
+      "flow": [
+        {"do": "c = 0xffff"},
+        {"while": "i < n + 1 ?(i は 0 から。最後の 1 回は 0 を 16 bit 流す)", "body": [
+          {"do": "c を 1 bit 左へずらして語の上の bit を入れ、あふれたら 0x100b と排他的論理和を取る"}
+        ]},
+        {"return": "c ^ 0xffff"}
+      ]
+    },
+    {
+      "func": "img_parse",
+      "purpose": "NVIDIA が配る FW のファイル(フラッシュ全体の像)から、FW の更新で FW に渡す部分を決めるための下請け関数。ボードごとの情報(MAC・GUID など)を渡さないように、mstflint が MCC で書くときと同じ部分を選ぶ。`bfm_fw_update()` が最初の呼び出しで使う。",
+      "summary": "先頭の 16 バイトが FW の像の印(\"MTFW\" と決まった 12 バイト)か確かめる。0x1000 から 0x10000 まで 4KiB ごとに目次(ITOC)の印を探し、頭の CRC が合う最初のものを使う。目次の欄を最後(種類 0xff)まで読み、各欄の CRC を確かめる。相対番地の欄はファイルの中にあることを確かめ、その終わりの最大を FW に渡す長さにする。ボードの情報の欄(device_data)は、その欄の位置を 0xFF で消す一覧(`f->mask`)に入れる。\n\n欄の位置: 種類 = bit 0〜7、size = bit 8〜29(語の数)、relative_addr = bit 160、flash_addr = bit 161〜189(語の番地)、device_data = bit 206(各語の上の bit から数える。mstflint の `cibfw_itoc_entry`)。",
+      "args": {"f": "その装置の FW の更新の状態(`len`・`mask`・`nmask` を決める)", "b": "配布の .bin の中身", "len": "ファイルの長さ(バイト)"},
+      "ret": "`BFM_OK`: 決まった(`f->len` が FW に渡す長さ)。`BFM_E_PARAM`: FW の像でない・目次が見つからない・CRC が合わない・ファイルの外を指す・欄が多すぎる・長さが決まらない(理由を表示する)。",
+      "pre": "特になし。",
+      "notes": "* ConnectX-4 / 4 Lx の形(FS3)の像だけを扱う。ConnectX-5 以降の形(FS4)は目次の場所が違うので断る。\n* 実機の 14.29.1016(MT_2420110034)の .bin は 16,744,768 バイトで、渡すのは 4,840,404 バイト、消す欄は 6 つ。mstflint の `FwExtract4MBImage(img, true)` の結果とバイト単位で同じことを確かめてある。",
+      "flow": [
+        {"if": "len < 0x2000、または先頭が FW の像の印でない?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"while": "a < 0x10000 かつ目次がファイルに入る ?(a は 0x1000 から 4KiB ごと)", "body": [
+          {"call": "itoc_crc(&b[a], 7) を呼ぶ"},
+          {"if": "目次の印があり、頭の CRC が合う?", "then": [{"do": "it = a"}, {"break": true}]}
+        ]},
+        {"if": "目次が見つからない?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"do": "end = 0、nmask = 0"},
+        {"loop": "for (i = 0;; i++)(目次の欄を順に)", "body": [
+          {"if": "64 個を超えた、またはファイルの外?", "then": [{"return": "BFM_E_PARAM"}]},
+          {"if": "種類が 0xff(最後)?", "then": [{"break": true}]},
+          {"call": "itoc_crc(e, 7) を呼ぶ"},
+          {"if": "欄の CRC が合わない?", "then": [{"return": "BFM_E_PARAM"}]},
+          {"do": "size・addr・relative・device を取り出す"},
+          {"if": "相対番地の欄?", "then": [
+            {"if": "ファイルの外を指す?", "then": [{"return": "BFM_E_PARAM"}]},
+            {"do": "end = max(end, addr + size)"}
+          ]},
+          {"if": "ボードの情報の欄?", "then": [
+            {"if": "一覧がいっぱい?", "then": [{"return": "BFM_E_PARAM"}]},
+            {"do": "mask[nmask++] = 欄の位置"}
+          ]}
+        ]},
+        {"if": "end が目次より前、または 4 の倍数でない?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"do": "f->len = end"},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "img_word",
+      "purpose": "FW の更新で MCDA に載せるデータを 4 バイトずつ作るための下請け関数。先頭の印と、ボードの情報を指す目次の欄を 0xFF に置き換えて返す(mstflint と同じ)。`fw_step()` が F_DATA で使う。",
+      "summary": "位置 `off` が先頭の 16 バイトの中か、`f->mask` のどれかの欄(32 バイト)の中なら 0xffffffff を返す。そうでなければ、像の `off` から 4 バイトをホスト順の値として返す。",
+      "args": {"f": "その装置の FW の更新の状態", "off": "像の中の位置(4 の倍数)"},
+      "ret": "4 バイトの値(ホスト順)",
+      "pre": "`img_parse()` が済んでいること。",
+      "notes": "消す範囲はどれも 4 バイトにそろっているので、4 バイト単位で判定してよい。",
+      "flow": [
+        {"if": "off < 16 ?", "then": [{"return": "0xffffffff"}]},
+        {"while": "i < nmask ?(i は 0 から)", "body": [
+          {"if": "off がその欄の 32 バイトの中?", "then": [{"return": "0xffffffff"}]}
+        ]},
+        {"do": "像の off から 4 バイトを写す"},
+        {"return": "その値"}
+      ]
+    },
+    {
+      "func": "fail",
+      "purpose": "FW の更新の途中で失敗したり取り消しを頼まれたりしたときに、取ったもの(部品の更新・手順の番号)を正しい順に返してから終わるよう、次の手順を選ぶための下請け関数。`fw_step()` が使う。",
+      "summary": "まだ結果が決まっていなければ `rc` を結果にする。部品の更新を始めていて切り替えていなければ CANCEL へ、手順を取っていれば RELEASE へ、どちらでもなければ終わり(F_DONE)へ移る。",
+      "args": {"f": "その装置の FW の更新の状態", "rc": "失敗の理由(戻り値にする値)"},
+      "ret": "なし",
+      "pre": "特になし。",
+      "notes": "切り替え(ACTIVATE)の後は CANCEL を出さない(RELEASE だけ)。最初の失敗の理由を残す(取り消しの途中の失敗で上書きしない)。",
+      "flow": [
+        {"if": "f->rc == BFM_OK ?", "then": [{"do": "f->rc = rc"}]},
+        {"if": "部品の更新を始めていて、切り替えていない?", "then": [{"do": "step = F_CANCEL"}],
+         "else": [
+          {"if": "手順を取っている(LOCK が通った)?", "then": [{"do": "step = F_RELEASE"}], "else": [{"do": "step = F_DONE"}]}
+        ]}
+      ]
+    },
+    {
+      "func": "wait_state",
+      "purpose": "FW の更新の手順(FSM)が、命令を受けて次の状態になるのを待つ手順に入るための下請け関数。`fw_step()` が LOCK・UPDATE_COMPONENT・VERIFY_COMPONENT・ACTIVATE の後に使う。",
+      "summary": "待つ状態 `want` と、待ち終えたら移る手順 `next` を覚え、待ち始めた時刻を記録し、手順を `step` にする。",
+      "args": {"f": "その装置の FW の更新の状態", "want": "待つ FSM の状態(LOCKED・DOWNLOAD)", "next": "待ち終えたら移る手順", "step": "待つ手順(F_WAIT_*)"},
+      "ret": "なし",
+      "pre": "特になし。",
+      "notes": "最初の MCC の読みはすぐ出す(`t_poll` = 0)。",
+      "flow": [
+        {"do": "f->want = want、f->next = next、f->t_wait = 今の時刻、f->t_poll = 0、f->step = step"}
+      ]
+    },
+    {
+      "func": "fw_step",
+      "purpose": "FW の更新の手順を、待たずに 1 つずつ進めるための状態機械。`bfm_fw_update()` が `g_bfm_ctl_lock` の中で、呼ばれるたびに 1 回呼ぶ。",
+      "summary": "取り消しを頼まれていて、コマンドを出していなければ、取り消しの手順(`fail()`)へ移る。手順(`f->step`)に応じて 1 つ進める。\n\n* F_MCAM: MCAM を読み、MCQS・MCQI・MCC・MCDA に対応しているか確かめる(能力の `mcam_reg` が無ければ読まない)。\n* F_MCQS: 部品の番号を 0 から順に MCQS で読み、identifier が BOOT_IMG(1)の部品を探す(最後の部品まで無ければ断る)。\n* F_CAP: その部品の能力を MCQI で読む。像が受けられる大きさを超える、PSID を確かめない(`g_bfm_fw_allow_no_psid_check` が 0 のとき)、1 回に渡せる大きさが 0 なら断る。1 回に渡す長さを決める(2048 バイトと FW の上限の小さいほう、単位に合わせる)。\n* F_VER_RUN / F_VER_NEW: 版を読めれば表示する(今の版 / 切り替えた後の次の起動の版。読めなくても進める)。\n* F_QUERY: MCC を読み、FSM が IDLE でなければ断る。手順の番号(update_handle)を得る。\n* F_LOCK → F_WAIT_LOCK → F_UPDATE → F_WAIT_DL → F_DATA(MCDA で全部渡す。10% ごとに表示)→ F_VERIFY → F_WAIT_VERIFY → F_ACTIVATE(確かめるだけなら F_CANCEL へ)→ F_WAIT_ACT → F_RELEASE。\n* F_WAIT_*: 200ms おきに MCC を読み、error_code が 0 でなければ理由を表示して失敗、状態が待つものになれば次へ、30 秒過ぎれば時間切れ。\n* F_CANCEL / F_RELEASE: 命令を出す(失敗しても表示して先へ進む)。",
+      "args": {"d": "装置", "f": "その装置の FW の更新の状態"},
+      "ret": "`BFM_INPROGRESS`(いつも。終わったかは `f->step` が F_DONE かで見る)。",
+      "pre": "`g_bfm_ctl_lock` を持っていること。`f->step` が F_IDLE・F_DONE でないこと。",
+      "notes": "* MCDA のデータは 4 バイトずつ、ホスト順の値として読んでビッグエンディアンで書く(Linux の `mlx5_reg_mcda_set()` の `htonl(*(u32 *)&data[j])` と同じ)。\n* ACTIVATE は VERIFY の後に LOCKED が来たとき(FW が像を確かめて書き終えたとき)にしか出さない。\n* MCC・MCQI などの欄の位置は、Linux の `include/linux/mlx5/mlx5_ifc.h` の構造から求めたもの(各 case のコメント)。",
+      "states": {
+        "start": "bfm_fw_update() の最初の呼び出し(像と引数を確かめて F_MCAM)",
+        "list": [
+          {"id": "F_MCAM", "text": "MCAM を読み、MCQS・MCQI・MCC・MCDA に対応しているか確かめる", "wait": "ACCESS_REG の完了"},
+          {"id": "F_MCQS", "text": "FW の像の部品(BOOT_IMG)の番号を探す", "wait": "部品ごとの MCQS の読み"},
+          {"id": "F_CAP", "text": "部品の能力を読み、像の大きさ・PSID の確かめを調べ、1 回に渡す長さを決める",
+           "next": [{"to": "F_VER_RUN", "label": "版を読める"}, {"to": "F_QUERY", "label": "版を読めない"}]},
+          {"id": "F_VER_RUN", "text": "今の版を表示する"},
+          {"id": "F_QUERY", "text": "FSM が IDLE か確かめ、手順の番号を得る"},
+          {"id": "F_LOCK", "text": "MCC: LOCK_UPDATE_HANDLE"},
+          {"id": "F_WAIT_LOCK", "text": "LOCKED を待つ", "wait": "200ms ごとに MCC を読む(30 秒まで)"},
+          {"id": "F_UPDATE", "text": "MCC: UPDATE_COMPONENT(部品の番号・像の大きさ)"},
+          {"id": "F_WAIT_DL", "text": "DOWNLOAD を待つ", "wait": "200ms ごとに MCC を読む(30 秒まで)"},
+          {"id": "F_DATA", "text": "MCDA で像を渡す", "wait": "全部渡し終える(1 回に 1 コマンド)"},
+          {"id": "F_VERIFY", "text": "MCC: VERIFY_COMPONENT"},
+          {"id": "F_WAIT_VERIFY", "text": "LOCKED を待つ(FW が像を確かめて書き終える)", "wait": "200ms ごとに MCC を読む(30 秒まで)"},
+          {"id": "F_ACTIVATE", "text": "MCC: ACTIVATE(BFM_FW_ACTIVATE のときだけ)",
+           "next": [{"to": "F_WAIT_ACT", "label": "BFM_FW_ACTIVATE"}, {"to": "F_CANCEL", "label": "BFM_FW_VERIFY_ONLY"}]},
+          {"id": "F_WAIT_ACT", "text": "LOCKED を待つ", "wait": "200ms ごとに MCC を読む(30 秒まで)",
+           "next": [{"to": "F_RELEASE"}]},
+          {"id": "F_CANCEL", "text": "MCC: CANCEL(確かめるだけ・失敗・取り消し)"},
+          {"id": "F_RELEASE", "text": "MCC: RELEASE_UPDATE_HANDLE",
+           "next": [{"to": "F_VER_NEW", "label": "切り替えた(版を読める)"}, {"to": "F_DONE", "label": "そのほか"}]},
+          {"id": "F_VER_NEW", "text": "次の起動の版を表示する"},
+          {"id": "F_DONE", "text": "済んだ", "next": [{"to": "END"}]}
+        ],
+        "end": "bfm_fw_update() が結果を返し F_IDLE に戻す",
+        "note": "どの手順でも、失敗・取り消しのときは fail() が次を選ぶ: 部品の更新を始めていて切り替えていなければ F_CANCEL、手順を取っていれば F_RELEASE、どちらでもなければ F_DONE。"
+      },
+      "flow": [
+        {"if": "取り消しを頼まれ、コマンドを出しておらず、切り替えておらず、取り消し・手放し・終わりの手順でない?", "then": [
+          {"do": "BFM_LOG で「FW の更新を取り消す」"},
+          {"call": "fail(f, BFM_E_STATE) を呼ぶ"}
+        ]},
+        {"switch": "f->step", "cases": [
+          {"case": "F_MCAM", "body": [
+            {"if": "能力に mcam_reg が無い?", "then": [{"call": "fail(f, BFM_E_NOTSUP) を呼ぶ"}, {"return": "BFM_INPROGRESS"}]},
+            {"call": "access_reg(MCAM 読み) を呼ぶ"},
+            {"if": "まだ・失敗?", "then": [{"do": "失敗なら fail(f, BFM_E_NOTSUP)"}, {"return": "BFM_INPROGRESS"}]},
+            {"if": "MCQS・MCQI・MCC・MCDA のどれかに対応していない?", "then": [{"call": "fail(f, BFM_E_NOTSUP) を呼ぶ"}, {"return": "BFM_INPROGRESS"}]},
+            {"do": "comp = 0、step = F_MCQS"},
+            {"return": "BFM_INPROGRESS"}
+          ]},
+          {"case": "F_MCQS", "body": [
+            {"call": "access_reg(MCQS 読み。component_index = comp) を呼ぶ"},
+            {"if": "まだ・失敗?", "then": [{"do": "失敗なら fail(f, rc)"}, {"return": "BFM_INPROGRESS"}]},
+            {"if": "identifier が BOOT_IMG ?", "then": [{"do": "step = F_CAP"}, {"return": "BFM_INPROGRESS"}]},
+            {"if": "最後の部品(last_index_flag)か、64 個調べた?", "then": [{"call": "fail(f, BFM_E_NOTSUP) を呼ぶ"}, {"return": "BFM_INPROGRESS"}]},
+            {"do": "comp++"},
+            {"return": "BFM_INPROGRESS"}
+          ]},
+          {"case": "F_CAP", "body": [
+            {"call": "access_reg(MCQI 能力) を呼ぶ"},
+            {"if": "まだ・失敗?", "then": [{"do": "失敗なら fail(f, rc)"}, {"return": "BFM_INPROGRESS"}]},
+            {"do": "上限・1 回の大きさ・単位・PSID を確かめるかを読んで表示する"},
+            {"if": "像が上限を超える?", "then": [{"call": "fail(f, BFM_E_PARAM) を呼ぶ"}, {"return": "BFM_INPROGRESS"}]},
+            {"if": "PSID を確かめない、かつ g_bfm_fw_allow_no_psid_check == 0 ?", "then": [{"call": "fail(f, BFM_E_NOTSUP) を呼ぶ"}, {"return": "BFM_INPROGRESS"}]},
+            {"do": "chunk = min(1 回の大きさ, 2048) を単位と 4 バイトに合わせて切り捨てる"},
+            {"if": "chunk == 0 ?", "then": [{"call": "fail(f, BFM_E_NOTSUP) を呼ぶ"}, {"return": "BFM_INPROGRESS"}]},
+            {"do": "step = 版を読めるなら F_VER_RUN、そうでなければ F_QUERY"},
+            {"return": "BFM_INPROGRESS"}
+          ]},
+          {"case": "F_VER_RUN, F_VER_NEW", "body": [
+            {"call": "access_reg(MCQI 版。F_VER_NEW なら read_pending_component = 1) を呼ぶ"},
+            {"if": "まだ?", "then": [{"return": "BFM_INPROGRESS"}]},
+            {"if": "読めた?", "then": [{"call": "show_version(d, 今の / 次の起動の) を呼ぶ"}]},
+            {"do": "step = F_VER_NEW なら F_DONE、そうでなければ F_QUERY"},
+            {"return": "BFM_INPROGRESS"}
+          ]},
+          {"case": "F_QUERY", "body": [
+            {"call": "access_reg(MCC 読み) を呼ぶ"},
+            {"if": "まだ・失敗?", "then": [{"do": "失敗なら fail(f, rc)"}, {"return": "BFM_INPROGRESS"}]},
+            {"if": "FSM の状態が IDLE でない?", "then": [{"call": "fail(f, BFM_E_BUSY) を呼ぶ"}, {"return": "BFM_INPROGRESS"}]},
+            {"do": "handle = 読んだ update_handle、step = F_LOCK"},
+            {"return": "BFM_INPROGRESS"}
+          ]},
+          {"case": "F_LOCK", "body": [
+            {"call": "mcc_set(LOCK) を呼ぶ"},
+            {"if": "まだ・失敗?", "then": [{"do": "失敗なら fail(f, rc)"}, {"return": "BFM_INPROGRESS"}]},
+            {"do": "locked = 1"},
+            {"call": "wait_state(f, LOCKED, F_UPDATE, F_WAIT_LOCK) を呼ぶ"},
+            {"return": "BFM_INPROGRESS"}
+          ]},
+          {"case": "F_WAIT_LOCK, F_WAIT_DL, F_WAIT_VERIFY, F_WAIT_ACT", "body": [
+            {"if": "まだ出しておらず、前の読みから 200ms たっていない?", "then": [{"return": "BFM_INPROGRESS"}]},
+            {"call": "access_reg(MCC 読み。update_handle = handle) を呼ぶ"},
+            {"if": "まだ・失敗?", "then": [{"do": "失敗なら fail(f, rc)"}, {"return": "BFM_INPROGRESS"}]},
+            {"do": "t_poll = 今の時刻"},
+            {"if": "error_code != 0 ?", "then": [{"do": "理由(fsm_err_str())を表示する"}, {"call": "fail(f, BFM_E_HW) を呼ぶ"}, {"return": "BFM_INPROGRESS"}]},
+            {"if": "状態 == want ?", "then": [{"do": "step = next"}, {"return": "BFM_INPROGRESS"}]},
+            {"if": "待ち始めて 30 秒を過ぎた?", "then": [{"call": "fail(f, BFM_E_TIMEOUT) を呼ぶ"}]},
+            {"return": "BFM_INPROGRESS"}
+          ]},
+          {"case": "F_UPDATE", "body": [
+            {"call": "mcc_set(UPDATE_COMPONENT, comp, len) を呼ぶ"},
+            {"if": "まだ・失敗?", "then": [{"do": "失敗なら fail(f, rc)"}, {"return": "BFM_INPROGRESS"}]},
+            {"do": "started = 1、off = 0、pct = 0"},
+            {"call": "wait_state(f, DOWNLOAD, F_DATA, F_WAIT_DL) を呼ぶ"},
+            {"return": "BFM_INPROGRESS"}
+          ]},
+          {"case": "F_DATA", "body": [
+            {"do": "n = min(len - off, chunk)"},
+            {"if": "まだ出していない?", "then": [
+              {"do": "MCDA に update_handle・offset = off・size = n を書く"},
+              {"call": "img_word(f, off + j) を呼ぶ"},
+              {"do": "像の off から n バイトを 4 バイトずつ、img_word() の値(ホスト順)をビッグエンディアンで写す"}
+            ]},
+            {"call": "access_reg(MCDA 書き) を呼ぶ"},
+            {"if": "まだ・失敗?", "then": [{"do": "失敗なら fail(f, rc)"}, {"return": "BFM_INPROGRESS"}]},
+            {"do": "off += n。10% を越えるごとに表示する"},
+            {"if": "off >= len ?", "then": [{"do": "step = F_VERIFY"}]},
+            {"return": "BFM_INPROGRESS"}
+          ]},
+          {"case": "F_VERIFY", "body": [
+            {"call": "mcc_set(VERIFY_COMPONENT, comp) を呼ぶ"},
+            {"if": "まだ・失敗?", "then": [{"do": "失敗なら fail(f, rc)"}, {"return": "BFM_INPROGRESS"}]},
+            {"call": "wait_state(f, LOCKED, F_ACTIVATE, F_WAIT_VERIFY) を呼ぶ"},
+            {"return": "BFM_INPROGRESS"}
+          ]},
+          {"case": "F_ACTIVATE", "body": [
+            {"if": "mode != BFM_FW_ACTIVATE ?", "then": [{"do": "step = F_CANCEL"}, {"return": "BFM_INPROGRESS"}]},
+            {"call": "mcc_set(ACTIVATE) を呼ぶ"},
+            {"if": "まだ・失敗?", "then": [{"do": "失敗なら fail(f, rc)"}, {"return": "BFM_INPROGRESS"}]},
+            {"do": "activated = 1"},
+            {"call": "wait_state(f, LOCKED, F_RELEASE, F_WAIT_ACT) を呼ぶ"},
+            {"return": "BFM_INPROGRESS"}
+          ]},
+          {"case": "F_CANCEL", "body": [
+            {"call": "mcc_set(CANCEL) を呼ぶ"},
+            {"if": "まだ?", "then": [{"return": "BFM_INPROGRESS"}]},
+            {"do": "失敗なら表示する。started = 0、step = F_RELEASE"},
+            {"return": "BFM_INPROGRESS"}
+          ]},
+          {"case": "F_RELEASE", "body": [
+            {"call": "mcc_set(RELEASE_UPDATE_HANDLE) を呼ぶ"},
+            {"if": "まだ?", "then": [{"return": "BFM_INPROGRESS"}]},
+            {"do": "失敗なら表示する。locked = 0"},
+            {"if": "成功して切り替えた?", "then": [{"do": "表示し、step = 版を読めるなら F_VER_NEW、そうでなければ F_DONE"}],
+             "else": [{"do": "成功なら「確かめが済んだ」を表示し、step = F_DONE"}]},
+            {"return": "BFM_INPROGRESS"}
+          ]},
+          {"default": true, "body": [
+            {"do": "step = F_DONE"},
+            {"return": "BFM_INPROGRESS"}
+          ]}
+        ]}
+      ]
+    },
+    {
+      "func": "bfm_fw_update",
+      "purpose": "アプリケーションが、ConnectX のフラッシュの FW を新しい版に書き換えるための関数。FW 自身に今の像とは別の置き場へ書かせて確かめさせるので、途中で止まっても前の FW で起動できる。確かめるだけ(切り替えない)の形もあり、本番の前に像が装置に合うかを試せる。待たずに少しずつ進めるので、終わるまで呼び続ける。",
+      "summary": "最初の呼び出し(手順が F_IDLE)なら、引数を確かめる: 像が NULL でなく、`mode` が `BFM_FW_VERIFY_ONLY` か `BFM_FW_ACTIVATE`、ポートが使われていて立ち上がっていること。状態を 0 で埋め、`img_parse()` で配布の .bin から FW に渡す部分(長さと、0xFF で消す欄)を決める(印・目次が正しくなければ `BFM_E_PARAM`)。F_MCAM から始める。\n\n`g_bfm_ctl_lock` を待たずに取ってみて、取れなければ `BFM_INPROGRESS` を返す。ポートが途中で使えなくなっていれば(コマンドを出していなければ)`BFM_E_STATE` で終わりにする。`fw_step()` で 1 つ進め、F_DONE になっていれば結果を返して F_IDLE に戻す。",
+      "args": {"port": "ポートの番号(0〜`BFM_MAX_PORT`-1)", "img": "書く FW の像。NVIDIA の配布の .bin(zip を展開したもの)をそのまま。終わるまで残しておく", "len": "像のファイルの長さ(バイト)", "mode": "`BFM_FW_VERIFY_ONLY`(確かめるだけ)か `BFM_FW_ACTIVATE`(次の起動から使う)"},
+      "ret": "`BFM_OK`: 済んだ(`mode` のとおり)。`BFM_INPROGRESS`: 途中(同じ引数で呼び続ける)。`BFM_E_PARAM`: 引数・像が正しくない、または像が大きすぎる。`BFM_E_STATE`: ポートが立ち上がっていない・途中で止まった・取り消した。`BFM_E_NOTSUP`: 装置が対応していない、または PSID を確かめない装置。`BFM_E_BUSY`: ほかの更新が進んでいる。`BFM_E_HW`: FW が断った(理由を表示する)・コマンドの失敗。`BFM_E_TIMEOUT`: FSM の状態が変わらない。",
+      "pre": "ポートが立ち上がっていること(`bfm_run()` が進めて使える状態)。同じポートについて、1 つのコアから呼ぶこと。同じカードのポートはフラッシュを共有するので、1 つのポートからだけ行う。",
+      "notes": "* 2 回目からは引数を見ない(最初の呼び出しで覚えた像を使う)。\n* 失敗・取り消しのときは、部品の更新を CANCEL し、手順を RELEASE してから結果を返す。次の起動の像は変わっていない。\n* 新しい FW は、装置の電源を入れ直したとき(またはリセットしたとき)に有効になる。bfmem はリセットをかけない。\n* `bfm_run()` はその間も呼び続けてよい(FW のコマンドの entry は `mlx5_cmd_run()` が順に使わせる)。\n* 途中で `bfm_shutdown()` すると、FW は手順の番号を放っておかれ、時間で手放す(今の像はそのまま)。",
+      "flow": [
+        {"if": "port >= BFM_MAX_PORT ?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"if": "手順が F_IDLE(最初の呼び出し)?", "then": [
+          {"if": "img が NULL、または mode が正しくない?", "then": [{"return": "BFM_E_PARAM"}]},
+          {"call": "bfm_dev_ready(d) を呼ぶ"},
+          {"if": "ポートを使わない、または立ち上がっていない?", "then": [{"return": "BFM_E_STATE"}]},
+          {"do": "状態を 0 で埋める"},
+          {"call": "img_parse(f, b, len) を呼ぶ"},
+          {"if": "像が正しくない?", "then": [{"return": "BFM_E_PARAM"}]},
+          {"do": "img・mode を覚え、rc = BFM_OK、step = F_MCAM。渡す長さを表示する"}
+        ]},
+        {"call": "bfm_trylock(&g_bfm_ctl_lock) を呼ぶ"},
+        {"if": "鍵を取れない?", "then": [{"return": "BFM_INPROGRESS"}]},
+        {"call": "bfm_dev_ready(d) を呼ぶ"},
+        {"if": "ポートが使えなくなっていて、コマンドを出しておらず、まだ終わっていない?", "then": [
+          {"do": "rc が BFM_OK なら BFM_E_STATE にし、step = F_DONE"}
+        ]},
+        {"if": "step != F_DONE ?", "then": [{"call": "fw_step(d, f) を呼ぶ"}]},
+        {"if": "step == F_DONE ?", "then": [{"do": "rc = f->rc、step = F_IDLE"}], "else": [{"do": "rc = BFM_INPROGRESS"}]},
+        {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
+        {"return": "rc"}
+      ]
+    },
+    {
+      "func": "bfm_fw_update_cancel",
+      "purpose": "アプリケーションが、進めている FW の更新をやめるための関数。頼んだ後も `bfm_fw_update()` を呼び続けると、取り消して手順を手放してから終わる。切り替えの後は取り消せない。",
+      "summary": "ポートの番号が範囲内で、更新を進めていれば(手順が F_IDLE でなければ)、取り消しの旗を立てる。",
+      "args": {"port": "ポートの番号"},
+      "ret": "なし",
+      "pre": "特になし。",
+      "notes": "取り消しは、次の `bfm_fw_update()` の呼び出しで、出しているコマンドが無いときに始まる(`fw_step()`)。結果は `BFM_E_STATE`。",
+      "flow": [
+        {"if": "port < BFM_MAX_PORT かつ更新を進めている?", "then": [{"do": "cancel = 1"}]}
+      ]
+    }
+  ]
+}

@@ -731,3 +731,49 @@ sudo build/bfmem_test -d 0000:b3:00.0 -i 192.168.101.21 -n 10000 bench 192.168.1
   NIC の DMA が DRAM へ行き、着地点と写し先が L3 に収まらないと書き戻しが増えて、相手の read に応える DMA の読みと取り合う。
 - 仕様書 20 章の「結果から読めること」の見立て(前は「両方向の応答が同じ線で混み合う」と推測)を、この結果に直した。
 - 終わった後、4 つとも mlx5_core に戻した。
+
+## FW の更新(`bfmem_test fw`)
+
+対象は Precision の PF0(`0000:b3:00.0`)。像は NVIDIA の配布元(ConnectX-4 Lx EN の FW のページ → Archive Versions →
+14.29.1016 → MCX4121A-ACAT → MT_2420110034)の `fw-ConnectX4Lx-rel-14_29_1016-MCX4121A-ACA_Ax-UEFI-14.22.14-FlexBoot-3.6.204.bin.zip`
+(SHA256 `327f311c…f577d` が配布元の値と一致)を展開した .bin。今動いている FW と同じ版にして、変わる点をいちばん少なくした。
+
+```bash
+# Precision。PF0 を vfio-pci にして、確かめるだけ(-A なし)で流し、mlx5_core に戻す
+sudo build/bfmem_test -d 0000:b3:00.0 -i 192.168.101.21 -v fw 192.168.101.11 /var/tmp/cx4lx_14_29_1016.bin
+devlink dev info pci/0000:b3:00.0        # running / stored の版
+```
+
+記録(2026-11-14):
+- 1 回目は `BFM_E_PARAM` で何もせずに終わった。FW の部品の上限が 7,340,032 バイトで、.bin(16,744,768 バイト)を
+  そのまま渡そうとしていた。配布の .bin はフラッシュ全体の像で、MCC で渡すのは mstflint の `FwExtract4MBImage()` と同じ
+  部分(ITOC の相対番地の部分の終わりまで。先頭の印と device_data の欄は 0xFF)だと分かり、`img_parse()` を足した。
+  切り出した結果は、mstflint と同じ手順の Python の結果とバイト単位で同じ。
+- 2 回目: **合格。** 部品 0 番、上限 7MB・MCDA 1 回 128 バイト・PSID を確かめる。4,840,404 バイトを渡し、VERIFY が通り、
+  切り替えずに CANCEL・RELEASE した(44.6 秒)。mlx5_core に戻した後、running / stored とも 14.29.1016、両ポートのリンク UP。
+- 取り消した直後は、mlx5_core に戻すときの FW の立ち上げ(vfio-pci のリセットから mlx5_core の「firmware version」まで)が
+  約 46 秒かかった(1 回目の後は約 1.4 秒)。その間カーネルのログは何も出ていない。FW が取り消しの後片付けをしていたと
+  見ているが、確かめていない。
+- 切り替え(`-A`)は試していない。
+
+### 切り替え(`-A`)と、再起動なしのリセット(MFRL level 3)
+
+記録(2026-11-14):
+- 最新の 14.32.1912(2026-03-01 公開。`fw-ConnectX4Lx-rel-14_32_1912-MCX4121A-ACA_Ax-UEFI-14.25.17-FlexBoot-3.6.502.bin.zip`、
+  SHA256 `fff3992c…be1a11` が配布元と一致)を `-A` で書いた。5,041,108 バイト、46.1 秒。FW が読み返した次の起動の版は
+  14.32.1912、`devlink dev info` の stored も 14.32.1912(running は 14.29.1016 のまま)。
+- Linux の `devlink dev reload pci/0000:b3:00.0 action fw_activate` は「FW activate is unsupported for this function」で断られた。
+  14.29.1016 の FW は MCAM に MFRL(register 40。MCAM の byte 18 bit0)を載せておらず、mlx5_core は FW のリセットの仕組みを用意しない。
+- MFRL(0x9028)そのものは読めた: `00 00 00 00 00 00 01 c8`。reset_level 0xc8 = level 3(ドライバの立ち上げ直しと PCI のリセット)・
+  level 4(warm reboot)・bit 7(mstflint の表に無い)、reset_type 0x01 = カード全体だけ、pci_reset_req_method 0 = リンクの切断。
+- level 3 で、ホストを再起動せずに新しい FW を動かした(作業用の版の bfmem_test で MFRL を書き、あとは Linux で操作):
+  1. PF1 の mlx5_core を外し、PF0 を vfio-pci にする
+  2. bfmem から MFRL に reset_level = 0x08(LEVEL3)を書く(同期 `pci_sync_for_fw_update_start` は使わない)。bfmem を止める
+  3. PF0 を vfio-pci から外し、2 つの機能を `remove`
+  4. ルートポート `0000:b2:00.0` の Link Control の Link Disable(`setpci -s b2:00.0 CAP_EXP+10.w=0010:0010`)を 0.5 秒立てて戻し、
+     Link Status の DLLLA(`CAP_EXP+12.w` の 0x2000)を待つ(すぐ立った)
+  5. 2 秒待って `/sys/bus/pci/rescan`。mlx5_core が付き、両方の PF とも running 14.32.1912、リンク UP。PCIe の誤り(AER)は出ていない
+     (rescan で VMD の下の橋の I/O の窓の「can't assign」が出るが、カードとは関係ない)
+- 14.32.1912 の上で bfmem のポート 0 が立ち上がった(FW 14.32.1912 cmdif_rev=5、準備完了)。**14.32.1912 は MCAM に MFRL を
+  載せている**(mfrl = 1)ので、この版からは Linux の `devlink … fw_activate` も使えるはず(試していない)。
+- OptiPlex(14.29.1016 のまま)との `run` はまだ流していない。

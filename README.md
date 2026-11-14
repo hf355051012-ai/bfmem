@@ -31,6 +31,7 @@ WQE を UAR の BlueFlame の窓へ MMIO で書き込んで送る。相手の CP
 | `src/bfm_ops.c` | データ経路(BlueFlame で WQE を送る、完了を拾う)|
 | `src/bfm_dif.c` | T10-DIF の読み書き(CPU で行う SW と、NIC の署名オフロードを使う HW)|
 | `src/bfm_mem.c` | DMA 領域からの静的な切り出し |
+| `src/bfm_fw.c` | FW の更新(フラッシュの FW を FW 自身に書かせる。MCC / MCDA レジスタ)|
 | `port/linux_vfio/port_linux.c` | 移植層: Linux + VFIO(試験環境)|
 | `port/vxworks/port_vxworks.c` | 移植層: VxWorks(**未検証**。VxWorks 固有の関数は使わない)|
 | `port/x86/bfm_x86_asm.S` | x86-64 の命令の関数(`rdtsc`・`cpuid`・`rdmsr`・`wrmsr`・`pause`)。アセンブラ |
@@ -386,6 +387,53 @@ PI は guard(データの CRC16、多項式 0x8BB7)・app tag・ref tag(ブロ�
 - スループット(同じ、300 ブロックずつ、データ 512 バイト分で数える): SW の write INSERT 1,666MB/s・write CHECK 1,689MB/s・
   read CHECK 1,597MB/s・read CHECK_DELETE 1,609MB/s。出しておく分を 1 つにすると約 1,180MB/s で、2 面を交互に使って約 4 割速い。
 
+### FW の更新(`src/bfm_fw.c`。確かめるだけを実機で確認、切り替えは未確認)
+
+`bfm_fw_update(port, img, len, mode)` で、ConnectX のフラッシュの FW を書き換える。`BFM_INPROGRESS` 以外が返るまで
+呼び続ける(待たない。`bfm_run()` もその間呼び続けてよい)。方式は Linux の `devlink dev flash` と同じで、
+**FW 自身に書かせる**(MCC / MCDA レジスタで FW の中の更新の手順を進める。フラッシュを直接は触らない)。
+
+```c
+/* 確かめるだけ: 書いて FW に確かめさせ、切り替えずに取り消す(次の起動の FW は変わらない)*/
+while ((rc = bfm_fw_update(0, img, len, BFM_FW_VERIFY_ONLY)) == BFM_INPROGRESS) bfm_run();
+/* 切り替える: 確かめた後、次の起動からこの像を使う(電源を入れ直すと有効になる)*/
+while ((rc = bfm_fw_update(0, img, len, BFM_FW_ACTIVATE)) == BFM_INPROGRESS) bfm_run();
+```
+
+起動しなくなる危険を小さくするためにしていること:
+
+| 危険 | 対策 |
+|---|---|
+| 書き込みの途中で止まる(電源断・取り消し・誤り)| FW が今動いている像とは別の置き場に書き、確かめてから切り替える。切り替え(ACTIVATE)は FW の確かめ(VERIFY)が通った後にしか出さない。途中で失敗・取り消したら CANCEL と RELEASE を出し、次の起動の像は変えない |
+| 別のボード用の像(PSID の違い)| FW が PSID の一致を確かめる装置(MCQI の `match_psid`)でだけ書く。確かめない装置は `g_bfm_fw_allow_no_psid_check` を 1 にしたときだけ |
+| 像でないもの・壊れた像 | 先頭の印(`MTFW` の 16 バイト)・像の目次(ITOC)の印と CRC が合わないもの、FW が受けられる大きさを超えるものは書かない。中身は FW が VERIFY で確かめる(ハッシュ・署名が合わなければ断る)|
+| ボードごとの情報を消す | 配布の .bin のうち、FW の像の部分(ITOC の相対番地の部分)だけを渡す。ボードごとの情報(MAC・GUID・VPD など。ITOC の device_data の欄)は渡さず、それを指す目次の欄は 0xFF にして渡す(mstflint と同じ)|
+| ほかの更新とぶつかる | FW の更新の手順が空き(IDLE)でなければ何もしない(同じカードのもう一方のポート・mstflint などが更新中)|
+| 対応していない FW | MCAM で MCQS・MCQI・MCC・MCDA の対応を確かめ、無ければ何もしない |
+| リセットでの失敗 | 装置のリセットはかけない。新しい FW は、電源を入れ直したときに有効になる |
+
+- 渡すのは、そのボード(PSID)用の **展開した .bin**(MFA2・zip は断る)。公式の配布元(NVIDIA の
+  [ConnectX-4 Lx EN の FW のページ](https://network.nvidia.com/support/firmware/connectx4lxen/)。古い版は Archive Versions)の
+  像を使い、配布元の SHA256 で確かめること。
+- **配布の .bin はフラッシュ全体の像(ConnectX-4 Lx で 16MB)で、そのまま MCDA で渡すと FW が受けない**(部品の上限は 7MB)。
+  mstflint の `FwExtract4MBImage()`(MFA2 を作るときと同じ)にならい、`img_parse()` が ITOC を読んで、先頭から相対番地の
+  部分の終わりまで(14.29.1016 で 4,840,404 バイト)を切り出す。先頭の 16 バイト(印)と、ボードの情報を指す ITOC の欄は
+  0xFF にして渡す。ConnectX-5 以降の形(FS4)の像は、目次の場所が違うので断る(まだ扱っていない)。
+- 同じカードのポートはフラッシュを共有するので、1 つのポートからだけ行う。
+- 最初は `BFM_FW_VERIFY_ONLY`(試験の `fw` の既定)で、像が装置に合うことを確かめてから切り替える。
+- MCDA で渡すデータは、Linux の `mlx5_reg_mcda_set()` と同じく、4 バイトずつホスト順の値をビッグエンディアンで書く。
+  バイト順を誤っても、FW の VERIFY で「ハッシュが合わない」になって取り消すだけで、次の起動の像は変わらない。
+- 実機(2026-11-14、Precision の ConnectX-4 Lx、FW 14.29.1016、PSID MT_2420110034)で、同じ版の像を確かめるだけ
+  (`BFM_FW_VERIFY_ONLY`)で流して通った(MCDA 1 回 128 バイト、44.6 秒)。mlx5_core に戻した後も running / stored とも
+  14.29.1016。**取り消した直後は、FW の立ち上げ(mlx5_core の probe)に約 46 秒かかった**(ふだんは約 1.4 秒)。
+- 同じ機械で、最新の 14.32.1912 を `BFM_FW_ACTIVATE` で書いて切り替えた(46.1 秒。次の起動の版 = 14.32.1912)。
+- **書いた FW が動き出すのは、カードがリセットされたとき**(ホストの再起動・電源の入れ直し、またはカードだけのリセット)。
+  bfmem はリセットをかけない。カードだけのリセットは FW のレジスタ MFRL(0x9028)で頼む。ConnectX-4 Lx(14.29.1016)の
+  MFRL は reset_level = 0xc8 で、**level 3(PCI のリセット)に対応している**。MFRL に level 3 を書き、ドライバを外して
+  上流のルートポートでリンクを切って繋ぎ直すと、ホストを再起動せずに 14.32.1912 で立ち上がった(手順は `TEST_PLAN.md`)。
+  - Linux の `devlink … action fw_activate` は、14.29.1016 では使えない(FW が MCAM に MFRL を載せていない)。14.32.1912 は載せている。
+  - bfmem には MFRL とリンクの切断はまだ無い(試験は作業用の版と Linux の `setpci` で行った)。
+
 ### ConnectX-7 への備え(実機では未確認)
 
 | 違い | 対応 |
@@ -434,6 +482,7 @@ PI は guard(データの CRC16、多項式 0x8BB7)・app tag・ref tag(ブロ�
 | `g_bfm_op_timeout_ms` | 1 回ずつ待つ操作の時間切れ(既定 5 秒)|
 | `g_bfm_cpu_awake` | CPU を深い省電力状態に入れない(相手からの read / atomic の遅延に効く。VxWorks では下の 6)|
 | `g_bfm_tsc_hz` | TSC の周波数(Hz)。0 なら CPUID / MSR から求める。求められない CPU では入れる |
+| `g_bfm_fw_allow_no_psid_check` | `bfm_fw_update()`: FW が像の PSID を確かめない装置でも書く(既定 0 = 書かない)|
 | `g_bfm_link_wait_ms` / `g_bfm_signal_every` / `g_bfm_verbose` | そのほか |
 
 `BFM_MAX_PORT`(ポートの数の上限。既定 2)と `BFM_MAX_PORT_CONN`(1 ポートの接続の数の上限。既定 16)は
@@ -525,6 +574,14 @@ sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -D 0000:01:00.0 -I 192.1
 6. 相手と足並みをそろえてから、模型の hash と自分の公開メモリの hash を出して止める。
 
 - `serve` は接続を張って保つだけ(`bench` の相手。`serve -c 1`)。`info` はポートを立ち上げて能力を表示する。
+- `fw` は FW の更新(`bfm_fw_update()`)。ポート 0 だけを立ち上げ(相手は動いていなくてよい)、ファイルの像を書いて
+  FW に確かめさせる。**既定は確かめるだけ**(切り替えずに取り消す)で、`-A` を付けたときだけ次の起動から使うよう
+  切り替える(電源を入れ直すと有効になる)。Ctrl-C で取り消す。
+
+  ```bash
+  sudo build/bfmem_test -d 0000:b3:00.0 -i 192.168.101.21 fw 192.168.101.11 fw-ConnectX4Lx-xxx.bin       # 確かめるだけ
+  sudo build/bfmem_test -A -d 0000:b3:00.0 -i 192.168.101.21 fw 192.168.101.11 fw-ConnectX4Lx-xxx.bin    # 切り替える
+  ```
 - `perf` は物理コア 1〜4 で、`bfm_write_post`・`bfm_read`・`bfm_read_async`・CAS・FAA・DIF の write / read(CHECK)の
   IOPS・MB/s・平均の遅延を長さごとに測る(両方の機械で動かす = 両方向。`-n` 秒(既定 2)ずつ)。結果は仕様書の 20 章
   (`doc/spec/perf.json`。ログから `python3 doc/spec/perf_import.py OptiPlex=<ログ> Precision=<ログ>` で作り直す)。
@@ -587,7 +644,7 @@ sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -D 0000:01:00.0 -I 192.1
   1・2・4・8・16・32・64 本、OptiPlex(4 スレッド)から Precision へ 1・4・64 本で流し、全部 OK(64 本が同時に接続・切断)。
   8 バイトの write / read の合計は CPU の数までほぼ本数に比例して伸び、16 本で write 10.9 Mops・read 8.5 Mops
   (1 本では 0.76 / 0.61 Mops)。FAA は 8 本以上で約 2.55 Mops で頭打ち(受け側の OptiPlex。原因は確かめていない)。
-- まだ: VxWorks、ConnectX-7、T10-DIF のオフロード(`BFM_DIF_HW`)。VxWorks の上で複数のコアから使うこと。`write_post` は BlueFlame なしのほうが速い
+- まだ: VxWorks、ConnectX-7、T10-DIF のオフロード(`BFM_DIF_HW`)、FW の更新の後のカードのリセット(MFRL level 3 とリンクの切断。bfmem には無い)。VxWorks の上で複数のコアから使うこと。`write_post` は BlueFlame なしのほうが速い
   (11.4 → 13.1 Mops)ので、続けて出すときの扱いは見直しの余地がある。
 - **2026-11-10: 代表 API `bfm_run()`・接続の表(ポート × 16)・2 ポート・両ノード同じプログラム(双方向)に作り直し、
   実機(OptiPlex ↔ Precision、2 ポートとも 25G で直結)で 2 ポート × 16 本 = 32 本を双方向に通した。** 4 本のスレッドから

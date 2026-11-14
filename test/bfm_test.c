@@ -94,7 +94,7 @@ static void usage(void)
            "                   run <相手のIP> [ポート1の相手のIP] | serve <相手のIP> [ポート1の相手のIP] |\n"
            "                   race <相手のIP> [ポート1の相手のIP] | wpost <相手のIP> [ポート1の相手のIP] |\n"
            "                   perf <相手のIP> [ポート1の相手のIP] | crc |\n"
-           "                   bench <相手のIP> | info <相手のIP>\n"
+           "                   bench <相手のIP> | info <相手のIP> | [-A] fw <相手のIP> <FW の像の .bin>\n"
            "  両方のノードで同じものを動かす。IP の小さいほうが掛け側になる(自動)。相手の MAC も自動で取る\n"
            "  run: -t 本(既定 4)のスレッドが bfm_run() を同時に呼んで全部の接続(-c 本 x ポート。既定 16)を張り、\n"
            "       両方向に一通りの操作を確かめ、全部の接続で同時に write / read / atomic / T10-DIF を確かめ、\n"
@@ -111,6 +111,9 @@ static void usage(void)
            "        IOPS・MB/s・平均の遅延を、長さごとに -n 秒(既定 2)ずつ測る(両方のノードで動かす = 両方向)\n"
            "  crc: T10-DIF の CRC16 だけを確かめる(相手も NIC も要らない)。PCLMULQDQ・表・1 ビットずつの値の一致と、\n"
            "       512 バイトあたりの速さ(表 / 使う方法)を -n 秒(既定 1)ずつ\n"
+           "  fw: ポート 0 の装置のフラッシュへ FW の像(.bin)を FW 自身に書かせ(bfm_fw_update())、確かめさせる。\n"
+           "      既定は確かめるだけ(切り替えずに取り消す。次の起動の FW は変わらない)。-A で次の起動から使うよう\n"
+           "      切り替える(電源を入れ直すと有効になる)。Ctrl-C で取り消す。相手は動いていなくてよい\n"
            "  bench: write / read を 4B〜256KiB、多重度 1・4・8・16 で -n 回(既定 100000)ずつ流し、\n"
            "         IOPS・MB/s・平均遅延を出す(接続 1 本。相手は serve -c 1)\n"
            "  -B  BlueFlame を使わない(8 バイトのドアベルだけ。比べるため)\n"
@@ -2455,12 +2458,68 @@ static int run_info(void)
     return 0;
 }
 
+/* ---------------------------------------------------------------------
+ * fw: FW の更新(bfm_fw_update())
+ * ------------------------------------------------------------------- */
+
+/* ポート 0 を立ち上げ、path の FW の像を bfm_fw_update() で書く。activate が 0 なら確かめるだけ
+ * (FW に書かせて確かめさせ、切り替えずに取り消す)。Ctrl-C で取り消す。 */
+static int run_fw(const char *path, int activate)
+{
+    FILE *fp = fopen(path, "rb");
+    if (fp == NULL) {
+        printf("fw: %s を開けない\n", path);
+        return 1;
+    }
+    uint8_t *img = NULL;
+    long len = 0;
+    if (fseek(fp, 0, SEEK_END) == 0) len = ftell(fp);
+    if (len > 0 && len < (64l << 20) && fseek(fp, 0, SEEK_SET) == 0) {
+        img = (uint8_t *)malloc((size_t)len);
+        if (img != NULL && fread(img, 1, (size_t)len, fp) != (size_t)len) {
+            free(img);
+            img = NULL;
+        }
+    }
+    fclose(fp);
+    if (img == NULL) {
+        printf("fw: %s を読めない (長さ %ld)\n", path, len);
+        return 1;
+    }
+    printf("fw: %s (%ld バイト) を%s\n", path, len, activate ? "書いて切り替える" : "書いて確かめるだけ(切り替えない)");
+
+    /* ポート 0 の立ち上げを待つ(接続はできなくてもよい)*/
+    const uint64_t t0 = now_ns();
+    while (!bfm_dev_ready(&g_bfm_dev[0])) {
+        const int rc = bfm_run();
+        if ((rc < 0 && rc != BFM_E_STATE) || g_stop || now_ns() - t0 > 180ull * 1000000000ull) {
+            printf("fw: ポート 0 が立ち上がらない\n");
+            free(img);
+            return 1;
+        }
+        idle();
+    }
+    const uint64_t t1 = now_ns();
+    int rc, cancelled = 0;
+    while ((rc = bfm_fw_update(0, img, (uint32_t)len, activate ? BFM_FW_ACTIVATE : BFM_FW_VERIFY_ONLY)) ==
+           BFM_INPROGRESS) {
+        if (g_stop && !cancelled) {
+            bfm_fw_update_cancel(0);
+            cancelled = 1;
+        }
+        (void)bfm_run();                 /* FW のページの要求などに答え続ける */
+    }
+    printf("fw: 結果 %d (%s)、%.1f 秒\n", rc, bfm_strerror(rc), (double)(now_ns() - t1) / 1e9);
+    free(img);
+    return rc == BFM_OK ? 0 : 1;
+}
+
 int main(int argc, char **argv)
 {
     uint32_t iters = 0, threads = 4, nconn = 0;
-    int oob = 0;
+    int oob = 0, fw_activate = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "d:i:D:I:c:p:m:M:n:t:Q:a:R:T:BSCxqPzLvh")) != -1) {
+    while ((opt = getopt(argc, argv, "d:i:D:I:c:p:m:M:n:t:Q:a:R:T:BSCxqPzLvAh")) != -1) {
         switch (opt) {
         case 'd': g_bfm_linux_pci_bdf[0] = optarg; break;
         case 'i': if (parse_ip(optarg, &g_bfm_local_ip[0]) != 0) { usage(); return 2; } break;
@@ -2485,6 +2544,7 @@ int main(int argc, char **argv)
         case 'a': g_bfm_ack_timeout = (uint8_t)atoi(optarg); break;
         case 'Q': g_bfm_qdepth = (uint32_t)atoi(optarg); break;
         case 'v': g_bfm_verbose = 1; break;
+        case 'A': fw_activate = 1; break;
         default: usage(); return 2;
         }
     }
@@ -2492,15 +2552,23 @@ int main(int argc, char **argv)
     if (optind + 1 >= argc) { usage(); return 2; }
     const char *mode = argv[optind];
     if (parse_ip(argv[optind + 1], &g_bfm_peer_ip[0]) != 0) { usage(); return 2; }
-    /* ポート 1 は、その相手の IP を書いたときだけ使う */
-    if (optind + 2 < argc) {
+    const int fw = (strcmp(mode, "fw") == 0);
+    const char *fw_path = NULL;
+    if (fw) {
+        /* fw <相手のIP> <像のファイル>: ポート 0 だけを立ち上げる(接続は 1 本。相手がいなくてもよい)*/
+        if (optind + 2 >= argc) { usage(); return 2; }
+        fw_path = argv[optind + 2];
+        g_bfm_port_conn[0] = 1;
+        g_bfm_port_conn[1] = 0;
+    } else if (optind + 2 < argc) {
+        /* ポート 1 は、その相手の IP を書いたときだけ使う */
         if (parse_ip(argv[optind + 2], &g_bfm_peer_ip[1]) != 0) { usage(); return 2; }
     } else {
         g_bfm_port_conn[1] = 0;
     }
     /* -c は使う全部のポートの本数。ポート 1 は、その相手の IP を書いたときだけ使う */
-    if (nconn != 0) g_bfm_port_conn[0] = nconn;
-    if (optind + 2 < argc) g_bfm_port_conn[1] = nconn ? nconn : (g_bfm_port_conn[1] ? g_bfm_port_conn[1] : g_bfm_port_conn[0]);
+    if (nconn != 0 && !fw) g_bfm_port_conn[0] = nconn;
+    if (optind + 2 < argc && !fw) g_bfm_port_conn[1] = nconn ? nconn : (g_bfm_port_conn[1] ? g_bfm_port_conn[1] : g_bfm_port_conn[0]);
 
     setvbuf(stdout, NULL, _IOLBF, 0);    /* ファイルへ出すときも 1 行ずつ出す(落ちたときに表示を失わない)*/
     signal(SIGINT, on_sig);
@@ -2522,7 +2590,7 @@ int main(int argc, char **argv)
         for (unsigned p = 0; p < BFM_MAX_PORT; p++)        /* 多重度の枠の中継バッファが大きいので、接続は使う分だけ */
             if (g_bfm_port_conn[p] != 0) g_bfm_port_conn[p] = PERF_CORES;
     }
-    if (strcmp(mode, "run") != 0 && !g_serve && !bench && !race && !wpost && !perf && strcmp(mode, "info") != 0) {
+    if (strcmp(mode, "run") != 0 && !g_serve && !bench && !race && !wpost && !perf && !fw && strcmp(mode, "info") != 0) {
         usage();
         return 2;
     }
@@ -2550,6 +2618,7 @@ int main(int argc, char **argv)
     else if (race) ret = run_race(threads, iters);
     else if (wpost) ret = run_wpost(iters);
     else if (perf) ret = run_perf(iters);
+    else if (fw) ret = run_fw(fw_path, fw_activate);
     else ret = run_all(threads, iters, oob);
     do_shutdown();
     if (g_steplog) {
