@@ -367,7 +367,8 @@ struct __attribute__((aligned(64))) bfm_conn {
     uint64_t afree;                  /* 空いている枠(bit n = 枠 n。1 = 空き)*/
     uint32_t aqd;                    /* 使う枠の数(g_bfm_qdepth を直したもの)*/
     uint32_t aseq;                   /* 次に出す操作の通し番号(tag の上位 26 ビット。張り直しをまたいで続ける)*/
-    uint32_t abase;                  /* 今の接続で最初の通し番号(これより前の tag は張り直しの前のもの)*/
+    uint32_t asince;                 /* 今の接続になってから進めた通し番号の数(SEQ_MASK で止める。これより前に出した tag は
+                                        張り直しの前のもの)*/
     uint32_t ainflight;              /* 仕掛かり中の数 */
     int      aerr;                   /* 非同期の操作で最初に見たエラー(0 = なし。張り直すまで残す)*/
     volatile uint8_t *abuf;          /* 枠ごとの中継バッファ(DMA 領域。枠 i は + i * abuf_slot)*/

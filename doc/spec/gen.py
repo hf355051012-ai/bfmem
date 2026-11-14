@@ -1514,8 +1514,155 @@ bfmem(ConnectX の BlueFlame でノード間のメモリへ write / read / atomi
                     f["name"], sl, f["name"]))
             out.append("\n.%s() のフロー図\nimage::flow_%s.drawio.svg[%s() のフロー図]\n" % (f["name"], sl, f["name"]))
             out.append("\n.%s() の関係図\nimage::call_%s.drawio.svg[%s() の関係図]\n" % (f["name"], sl, f["name"]))
+    out.append(perf_chapter())
     with open(os.path.join(SPEC, "bfmem_spec.adoc"), "w", encoding="utf-8") as fp:
         fp.write("".join(out))
+
+
+# ---------------------------------------------------------------------------
+# 性能の章(doc/spec/perf.json から。perf.json は doc/spec/perf_import.py が bfmem_test perf のログから作る)
+# ---------------------------------------------------------------------------
+
+PERF_JSON = os.path.join(SPEC, "perf.json")
+PERF_ITEMS = ["bfm_write_post", "bfm_read", "bfm_read_async", "bfm_cas", "bfm_faa", "bfm_dif_write", "bfm_dif_read"]
+PERF_COLORS = ["#4e79a7", "#f28e2b"]          # ノード 0 / 1 の棒の色
+
+
+def perf_load():
+    if not os.path.exists(PERF_JSON):
+        return None
+    with open(PERF_JSON, encoding="utf-8") as fp:
+        return json.load(fp)
+
+
+def perf_size_label(item, size):
+    if item.startswith("bfm_dif_"):
+        return "%d ブロック(%s)" % (size, perf_bytes(size * 512))
+    return perf_bytes(size)
+
+
+def perf_bytes(n):
+    return "%dkB" % (n // 1024) if n >= 1024 and n % 1024 == 0 else "%dB" % n
+
+
+def perf_rows(pd):
+    """(項目, 長さ) の並び(測った順。対象外も含む)と、(ノード, 項目, 長さ, コア) -> 結果 の辞書。"""
+    keys, res = [], {}
+    for ni, node in enumerate(pd["nodes"]):
+        for r in node["results"]:
+            k = (r["item"], r["size"])
+            if k not in keys:
+                keys.append(k)
+            res[(ni, r["item"], r["size"], r["cores"])] = r
+    keys.sort(key=lambda k: (PERF_ITEMS.index(k[0]) if k[0] in PERF_ITEMS else 99, k[1]))
+    return keys, res
+
+
+def perf_table(pd, title, field, fmt, unit_note):
+    keys, res = perf_rows(pd)
+    cores = pd["cores"]
+    n0, n1 = pd["nodes"][0]["name"], pd["nodes"][1]["name"]
+    cols = "3,2," + ",".join(["1"] * (2 * len(cores)))
+    head = "|項目 |長さ " + "".join("|%s %d コア " % (n0, c) for c in cores) + "".join("|%s %d コア " % (n1, c) for c in cores)
+    out = ['\n.%s(%s)\n[cols="%s",options="header"]\n|===\n%s\n' % (title, unit_note, cols, head)]
+    for item, size in keys:
+        cells = []
+        for ni in (0, 1):
+            for c in cores:
+                r = res.get((ni, item, size, c))
+                cells.append("—" if r is None or r.get("skip") else fmt(r[field]))
+        out.append("|`%s` |%s %s\n" % (item, perf_size_label(item, size), "".join("|%s " % x for x in cells)))
+    out.append("|===\n")
+    return "".join(out)
+
+
+def perf_chart_svg(pd, item):
+    """項目 item の MB/s の横棒グラフ(長さ x コアの行ごとに、ノード 0 / 1 の棒を 2 本)。"""
+    keys, res = perf_rows(pd)
+    sizes = [s for it, s in keys if it == item]
+    cores = pd["cores"]
+    names = [n["name"] for n in pd["nodes"]]
+    vmax = max([res[(ni, item, s, c)]["mbps"] for ni in (0, 1) for s in sizes for c in cores
+                if (ni, item, s, c) in res and not res[(ni, item, s, c)].get("skip")] or [1])
+    BW, BH, GAP, TOP = 520, 9, 6, 44
+    # 左のラベル(長さ・コアの数)が収まる幅(tw() は 12px の字の幅。ラベルは 11px)
+    LW = int(max(tw("%s %d コア" % (perf_size_label(item, s), c)) for s in sizes for c in cores) * 11 / 12) + 24
+    rows = []
+    y = TOP
+    for s in sizes:
+        for c in cores:
+            rows.append((s, c, y))
+            y += 2 * BH + GAP
+        y += 8
+    W, H = LW + BW + 110, y + 10
+    o = ['<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="%d" height="%d" viewBox="0 0 %d %d" '
+         'font-family="Noto Sans CJK JP, Meiryo, sans-serif">' % (W, H, W, H),
+         '<rect x="0" y="0" width="%d" height="%d" fill="#ffffff"/>' % (W, H),
+         '<text x="10" y="18" font-size="13" font-weight="bold">%s の MB/s(両方向に同時に打ったときの、各ノードが打った分)</text>'
+         % xesc(item)]
+    for ni, nm in enumerate(names):
+        lx = LW + ni * 200
+        o.append('<rect x="%d" y="26" width="12" height="10" fill="%s"/>' % (lx, PERF_COLORS[ni]))
+        o.append('<text x="%d" y="35" font-size="11">%s が打つ</text>' % (lx + 16, xesc(nm)))
+    prev = None
+    for s, c, yy in rows:
+        if s != prev:
+            o.append('<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#dddddd"/>' % (10, yy - 4, W - 10, yy - 4))
+            prev = s
+        o.append('<text x="%d" y="%d" font-size="11" text-anchor="end">%s %d コア</text>' % (
+            LW - 8, yy + BH + 4, xesc(perf_size_label(item, s)), c))
+        for ni in (0, 1):
+            r = res.get((ni, item, s, c))
+            by = yy + ni * BH
+            if r is None or r.get("skip"):
+                o.append('<text x="%d" y="%d" font-size="10" fill="#777777">対象外</text>' % (LW + 4, by + BH - 1))
+                continue
+            w = BW * r["mbps"] / vmax if vmax > 0 else 0
+            o.append('<rect x="%d" y="%d" width="%.1f" height="%d" fill="%s"/>' % (LW, by, max(w, 0.5), BH - 1,
+                                                                                  PERF_COLORS[ni]))
+            o.append('<text x="%.1f" y="%d" font-size="10" fill="#333333">%s</text>' % (
+                LW + max(w, 0.5) + 4, by + BH - 1, perf_mbps(r["mbps"])))
+    o.append('<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#333333"/>' % (LW, TOP - 4, LW, H - 10))
+    o.append("</svg>\n")
+    return "".join(o)
+
+
+def perf_mbps(v):
+    return "%.0f" % v if v >= 100 else "%.1f" % v if v >= 1 else "%.2f" % v
+
+
+def perf_charts(pd):
+    """横棒グラフを images/perf_*.svg に書く。戻り値: 書いた数。"""
+    for fn in os.listdir(IMG):
+        if fn.startswith("perf_") and fn.endswith(".svg"):
+            os.remove(os.path.join(IMG, fn))
+    keys, _ = perf_rows(pd)
+    items = [it for it in PERF_ITEMS if any(k[0] == it for k in keys)]
+    for it in items:
+        with open(os.path.join(IMG, "perf_%s.svg" % it), "w", encoding="utf-8") as fp:
+            fp.write(perf_chart_svg(pd, it))
+    return len(items)
+
+
+def perf_chapter():
+    pd = perf_load()
+    if pd is None:
+        return ""
+    keys, _ = perf_rows(pd)
+    items = [it for it in PERF_ITEMS if any(k[0] == it for k in keys)]
+    out = ["\n[[perf]]\n== 性能(実機の測定)\n\n%s\n" % pd["intro"].strip()]
+    out.append("\n=== 測定の条件\n\n%s\n" % pd["conditions"].strip())
+    out.append("\n=== IOPS\n\n各ノードが打った回数 / 秒(打ったスレッドの合計)。\n")
+    out.append(perf_table(pd, "IOPS", "iops", lambda v: "{:,.0f}".format(v), "回 / 秒"))
+    out.append("\n=== MB/s\n\n各ノードが運んだデータ(IOPS × 長さ。DIF はデータ 512 バイト × ブロックの数で、PI を数えない)。\n")
+    out.append(perf_table(pd, "MB/s", "mbps", perf_mbps, "10^6^ バイト / 秒"))
+    for it in items:
+        out.append("\n.%s の MB/s\nimage::perf_%s.svg[%s の MB/s]\n" % (it, it, it))
+    out.append("\n=== 平均レイテンシ\n\n%s\n" % pd["latency_note"].strip())
+    out.append(perf_table(pd, "平均レイテンシ", "lat_ns", lambda v: "%.2f" % (v / 1000.0), "µs"))
+    if pd.get("notes"):
+        out.append("\n=== 結果から読めること\n\n%s\n" % pd["notes"].strip())
+    return "".join(out)
 
 
 def main():
@@ -1571,6 +1718,10 @@ def main():
                          os.path.join(IMG, "call_%s.drawio.svg" % sl), "%s 関係" % f["name"])
     for name, (lay, title) in figs.items():
         write_drawio_svg(lay, os.path.join(IMG, "hw_%s.drawio.svg" % name), title)
+    pd = perf_load()
+    nperf = perf_charts(pd) if pd else 0
+    if nperf:
+        print("OK: 性能の章のグラフ %d 枚" % nperf)
     write_adoc(allf, descs)
     print("OK: %d 関数、図 %d 枚(状態遷移図 %d 枚、ConnectX の章 %d 枚)" % (
         len(allf), 2 * len(allf) + nstate + len(figs), nstate, len(figs)))

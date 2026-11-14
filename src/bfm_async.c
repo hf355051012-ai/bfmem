@@ -42,15 +42,15 @@ static uint64_t timeout_ns(void)
 }
 
 /* 接続ができたとき(張り直しを含む): 枠を全部空ける(枠の数と中継バッファは接続の枠を用意したときに
- * 決めてある)。通し番号は張り直しをまたいで続け、ここからの番号を abase に覚える(それより前の tag は、
- * 張り直しの前に出した操作で、結果はもう分からない)。 */
+ * 決めてある)。通し番号は張り直しをまたいで続け、ここから進めた数を asince に数える(tag が「何個前に
+ * 出したものか」が asince より大きければ、張り直しの前に出した操作で、結果はもう分からない)。 */
 void bfm_async_attach(struct bfm_conn *c)
 {
     memset(c->as, 0, sizeof(c->as));
     memset(c->wqe_slot, 0, sizeof(c->wqe_slot));
     c->afree = (c->aqd >= 64u) ? ~0ull : ((1ull << c->aqd) - 1u);
     if ((c->aseq & SEQ_MASK) == 0u) c->aseq++;          /* 通し番号 0 は使わない(as[] の空の印)*/
-    c->abase = c->aseq & SEQ_MASK;
+    c->asince = 0;
     c->ainflight = 0;
     c->aerr = 0;
 }
@@ -179,8 +179,11 @@ static void commit(struct bfm_conn *c, uint32_t k, uint32_t pc, uint8_t kind, vo
                    bfm_tag_t *tag)
 {
     struct bfm_aslot *s = &c->as[k];
+    const uint32_t before = c->aseq;
     s->seq = c->aseq++ & SEQ_MASK;
     if (s->seq == 0u) s->seq = c->aseq++ & SEQ_MASK;   /* 26 ビットで回ったとき、0 は飛ばす */
+    /* 今の接続になってから進めた数(SEQ_MASK で止める。止まった後は、張り直しの前の tag と見分けない)*/
+    c->asince = (c->asince + (c->aseq - before) >= SEQ_MASK) ? SEQ_MASK : c->asince + (c->aseq - before);
     s->busy = 1;
     s->kind = kind;
     s->rc = BFM_INPROGRESS;
@@ -269,9 +272,11 @@ int bfm_test(bfm_conn_t *c, bfm_tag_t tag)
     const uint32_t k = tag & ((1u << TAG_SLOT) - 1u), seq = tag >> TAG_SLOT;
     const struct bfm_aslot *s = &c->as[k];
     if (seq == 0u) return BFM_E_PARAM;
-    /* 張り直しより前に出した操作(通し番号が abase より前。26 ビットで回るので、差の半分より後ろを前とみなす):
-     * その結果はもう分からない */
-    if (((seq - c->abase) & SEQ_MASK) > SEQ_MASK / 2u) return BFM_E_STATE;
+    /* 張り直しより前に出した操作(何個前に出したか = 次の通し番号との差が、今の接続になってから進めた数より大きい):
+     * その結果はもう分からない。前は「接続ができたときの番号との差が 26 ビットの半分を超えたら前」と見ていたため、
+     * 1 本の接続で約 3,355 万個(2^25)出すと、それ以降の正しい tag まで BFM_E_STATE になっていた */
+    const uint32_t age = (c->aseq - seq) & SEQ_MASK;
+    if (age == 0u || age > c->asince) return BFM_E_STATE;
     if (s->seq != seq) return BFM_OK;   /* 済んで、枠は次の操作に使われた(= 成功した)*/
     if (!s->busy) return s->rc;
     if (c->state != BFM_CS_UP) return c->aerr ? c->aerr : BFM_E_STATE;   /* 別の操作のエラー・切断 */

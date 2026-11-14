@@ -45,6 +45,7 @@ static int g_serve;                  /* serve のときだけ SIGQUIT で hash �
 static int g_quiet;                  /* -q: こちらからは転送せず、相手からの転送を受けるだけ(片方向の速さを測るため)*/
 static int g_perf;                   /* -P: run で一通りの検査を飛ばし、mt(全部の接続での転送と速さ)だけを行う */
 static int g_steplog;                /* -L: 最後(止めた後)に全部の接続の状態遷移の記録を表示する */
+static unsigned g_wp_rot;            /* -R: wpost でコア k に割り当てる接続を、k + R 番目のものにずらす(偏りの元を切り分ける)*/
 static int g_silent;                 /* -z: [10] 無応答の試験(両方のノードに付ける。IP の小さいほうが試し、大きいほうが黙る)*/
 static uint8_t g_model[DATA_BYTES];  /* 相手のデータ領域にあるはずの中身(模型)*/
 
@@ -88,9 +89,11 @@ static void usage(void)
 {
     printf("使い方: bfmem_test [-d BDF] [-i 自分のIP] [-D ポート1のBDF] [-I ポート1の自分のIP] [-c 接続数/ポート]\n"
            "                   [-t スレッド数] [-p 接続の番号] [-m 経路MTU 1-5] [-M ポートのMTU] [-n 回数]\n"
-           "                   [-Q 多重度 1-64] [-a ack timeout] [-B] [-S] [-C] [-x] [-q] [-P] [-z] [-L] [-v]\n"
+           "                   [-Q 多重度 1-64] [-a ack timeout] [-R ずらし] [-B] [-S] [-C] [-x] [-q] [-P] [-z] [-L] [-v]\n"
            "                   run <相手のIP> [ポート1の相手のIP] | serve <相手のIP> [ポート1の相手のIP] |\n"
-           "                   race <相手のIP> [ポート1の相手のIP] | bench <相手のIP> | info <相手のIP>\n"
+           "                   race <相手のIP> [ポート1の相手のIP] | wpost <相手のIP> [ポート1の相手のIP] |\n"
+           "                   perf <相手のIP> [ポート1の相手のIP] |\n"
+           "                   bench <相手のIP> | info <相手のIP>\n"
            "  両方のノードで同じものを動かす。IP の小さいほうが掛け側になる(自動)。相手の MAC も自動で取る\n"
            "  run: -t 本(既定 4)のスレッドが bfm_run() を同時に呼んで全部の接続(-c 本 x ポート。既定 16)を張り、\n"
            "       両方向に一通りの操作を確かめ、全部の接続で同時に write / read / atomic / T10-DIF を確かめ、\n"
@@ -101,6 +104,10 @@ static void usage(void)
            "  race: 競合の試験(両方のノードで動かす)。-t 本が bfm_run() を休まず呼ぶ間、各ポートの前半の接続で転送を\n"
            "        確かめ続け、後半の接続で張り直しを繰り返す(-n 秒。既定 30)。続けて bfm_run() を回したまま\n"
            "        bfm_shutdown() し、回しているスレッドに立ち上げ直させる\n"
+           "  wpost: 全部のコアに 1 本ずつスレッドを固定し、コアごとに接続 1 本で 8 バイトの bfm_write_post() を\n"
+           "         -n 秒(既定 5)x 3 回、同時に打つ(両方のノードで動かす = 両方向)。コアごとの速さと偏りを出す\n"
+           "  perf: コアの数 1〜4 で、write_post・read・read_async・CAS・FAA・DIF の write / read(CHECK)の\n"
+           "        IOPS・MB/s・平均の遅延を、長さごとに -n 秒(既定 2)ずつ測る(両方のノードで動かす = 両方向)\n"
            "  bench: write / read を 4B〜256KiB、多重度 1・4・8・16 で -n 回(既定 100000)ずつ流し、\n"
            "         IOPS・MB/s・平均遅延を出す(接続 1 本。相手は serve -c 1)\n"
            "  -B  BlueFlame を使わない(8 バイトのドアベルだけ。比べるため)\n"
@@ -113,7 +120,8 @@ static void usage(void)
            "      小さいほうが ACK・応答の返らない状態で、資源の空き待ち・bfm_check()・bfm_wait() の時間切れと、\n"
            "      NIC の再送の間隔(bfm_write() が BFM_E_RETRY になるまでの時間)を確かめて張り直す\n"
            "  -a N  RC の ack timeout(g_bfm_ack_timeout。4.096us x 2^N。既定 12)\n"
-           "  -L  最後(止めた後)に、全部の接続の状態遷移の記録(移った時刻・とどまった時間)を表示する\n");
+           "  -L  最後(止めた後)に、全部の接続の状態遷移の記録(移った時刻・とどまった時間)を表示する\n"
+           "  -R N  wpost で、コア k に (k + N) 番目の接続を割り当てる(既定 0。遅さがコアと接続のどちらに付くかを見る)\n");
 }
 
 /* ---------------------------------------------------------------------
@@ -1917,6 +1925,415 @@ static int run_race(uint32_t nthreads, uint32_t secs)
     return g_ng ? 1 : 0;
 }
 
+/* ---------------------------------------------------------------------
+ * wpost: 全部のコアで同時に、8 バイトの bfm_write_post() の速さを測る(両方のノードで wpost を動かす = 両方向)
+ *
+ * そのノードの CPU に 1 本ずつスレッドを固定し、コア k は接続 (ポート k % ポートの数, k / ポートの数) を 1 本だけ使う。
+ * 各スレッドは相手の公開メモリの自分の区画へ、8 バイトの bfm_write_post() を -n 秒(既定 5)打ち続け、最後に
+ * bfm_flush() で全部の完了を待つ。これを WPOST_ROUNDS 回(回ごとに相手と足並みをそろえる)。コアごとの速さと、
+ * コアの間の偏り(最大 / 最小・変動係数)を出す。測る間は bfm_run() を回すスレッドを置かない(全部のコアを測る側に使う)。
+ * ------------------------------------------------------------------- */
+
+#define WPOST_ROUNDS 3u
+#define WPOST_CPU_MAX 256u
+
+struct wpost_arg {
+    pthread_t th;
+    unsigned cpu, port, i;               /* 固定するコアと、使う接続 */
+    bfm_conn_t *c;
+    uint64_t ops;                        /* 打った回数 */
+    uint64_t ns;                         /* 打ち始めてから bfm_flush() が済むまで */
+    int rc;                              /* 最初の誤り(BFM_OK = なし)*/
+    int cpu_ok;                          /* 1 = そのコアに固定できた */
+};
+
+static pthread_barrier_t g_wp_bar;
+static uint64_t g_wp_ns;                 /* 1 回の長さ(ns)*/
+
+static void *wpost_worker(void *p)
+{
+    struct wpost_arg *a = (struct wpost_arg *)p;
+    cpu_set_t cs;
+    CPU_ZERO(&cs);
+    CPU_SET((int)a->cpu, &cs);
+    a->cpu_ok = (pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs) == 0);
+    const uint64_t base = MT_OFF + (uint64_t)(a->port * BFM_MAX_PORT_CONN + a->i) * MT_SPAN;
+    uint64_t v = ((uint64_t)a->cpu << 48), k = 0;
+    a->rc = BFM_OK;
+    pthread_barrier_wait(&g_wp_bar);                      /* 全部のスレッドで同時に始める */
+    const uint64_t t0 = now_ns(), end = t0 + g_wp_ns;
+    for (;;) {
+        for (unsigned j = 0; j < 256u; j++, k++) {          /* 時刻は 256 回ごとに見る */
+            v = ((uint64_t)a->cpu << 48) | k;
+            const int rc = bfm_write_post(a->c, base + (k & 63u) * 8u, &v, 8);
+            if (rc != BFM_OK) { a->rc = rc; goto out; }
+        }
+        if (now_ns() >= end) break;
+    }
+out:;
+    const int rc = bfm_flush(a->c);
+    if (a->rc == BFM_OK && rc != BFM_OK) a->rc = rc;
+    a->ns = now_ns() - t0;
+    a->ops = k;
+    /* 最後に書いた値が相手のメモリに届いているか(k - 1 回目の値は base + ((k - 1) & 63) * 8)*/
+    if (a->rc == BFM_OK && k > 0) {
+        uint64_t r = 0;
+        const int rr = bfm_read(a->c, base + ((k - 1u) & 63u) * 8u, &r, 8);
+        if (rr != BFM_OK) a->rc = rr;
+        else if (r != v) a->rc = BFM_E_HW;
+    }
+    pthread_barrier_wait(&g_wp_bar);
+    return NULL;
+}
+
+/* 平方根(ニュートン法。libm を使わないため)。 */
+static double wp_sqrt(double x)
+{
+    if (x <= 0) return 0;
+    double y = x > 1 ? x : 1;
+    for (int i = 0; i < 60; i++) y = 0.5 * (y + x / y);
+    return y;
+}
+
+static int run_wpost(uint32_t secs)
+{
+    static struct wpost_arg args[WPOST_CPU_MAX];
+    static double mops[WPOST_ROUNDS][WPOST_CPU_MAX];
+    if (secs == 0) secs = 5;
+    g_wp_ns = (uint64_t)secs * 1000000000ull;
+    long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    if (ncpu < 1) ncpu = 1;
+    if (ncpu > (long)WPOST_CPU_MAX) ncpu = WPOST_CPU_MAX;
+    unsigned ports[BFM_MAX_PORT], np = 0;
+    for (unsigned p = 0; p < BFM_MAX_PORT; p++)
+        if (g_bfm_port_conn[p] != 0) ports[np++] = p;
+    g_ng = 0;
+    if (run_up(4) != BFM_OK) return 1;
+
+    /* コア k -> j = (k + -R) % CPU の数 番目の接続 = (ポート j % np, j / np) */
+    for (unsigned k = 0; k < (unsigned)ncpu; k++) {
+        struct wpost_arg *a = &args[k];
+        const unsigned j = (k + g_wp_rot) % (unsigned)ncpu;
+        memset(a, 0, sizeof(*a));
+        a->cpu = k;
+        a->port = ports[j % np];
+        a->i = j / np;
+        if (a->i >= g_bfm_port_conn[a->port] || (a->c = bfm_conn(a->port, a->i)) == NULL) {
+            printf("wpost: コア %u に使う接続 (ポート %u, %u) が無い。ポートの接続の数(-c)を増やすこと\n", k, a->port, a->i);
+            return 1;
+        }
+    }
+    printf("wpost: CPU %ld 個に 1 本ずつスレッドを固定し、コアごとに接続 1 本で 8 バイトの bfm_write_post() を %u 秒 x %u 回"
+           "(相手も同時に打つ = 両方向。ポート %u 個に交互に割り当て。inline %u バイトまで、BlueFlame %s)\n",
+           ncpu, secs, WPOST_ROUNDS, np, bfm_inline_max(), ((struct bfm_conn *)args[0].c)->bf ? "あり" : "なし");
+
+    for (unsigned r = 0; r < WPOST_ROUNDS && !g_stop; r++) {
+        snprintf(g_mt_msg, sizeof(g_mt_msg), "wpost の %u 回目", r + 1u);
+        if (sync_at(500u + r, g_mt_msg) != BFM_OK) return 1;
+        pthread_barrier_init(&g_wp_bar, NULL, (unsigned)ncpu);
+        for (unsigned k = 0; k < (unsigned)ncpu; k++) pthread_create(&args[k].th, NULL, wpost_worker, &args[k]);
+        for (unsigned k = 0; k < (unsigned)ncpu; k++) pthread_join(args[k].th, NULL);
+        pthread_barrier_destroy(&g_wp_bar);
+
+        double sum = 0, mn = 1e30, mx = 0, sq = 0;
+        unsigned bad = 0, kmin = 0, kmax = 0;
+        printf("wpost: [%u 回目] コア ポート 接続       回数     Mops  1 回 ns\n", r + 1u);
+        for (unsigned k = 0; k < (unsigned)ncpu; k++) {
+            const struct wpost_arg *a = &args[k];
+            const double m = (double)a->ops / ((double)a->ns / 1e9) / 1e6;
+            mops[r][k] = m;
+            sum += m;
+            sq += m * m;
+            if (m < mn) { mn = m; kmin = k; }
+            if (m > mx) { mx = m; kmax = k; }
+            if (a->rc != BFM_OK || !a->cpu_ok) bad++;
+            printf("wpost:            %4u %6u %4u %10llu %8.3f %8.1f%s%s\n", a->cpu, a->port, a->i,
+                   (unsigned long long)a->ops, m, (double)a->ns / (double)a->ops, a->cpu_ok ? "" : "  コアに固定できない",
+                   a->rc != BFM_OK ? "  誤り" : "");
+            if (a->rc != BFM_OK) printf("wpost:   コア %u: %s\n", a->cpu, bfm_strerror(a->rc));
+        }
+        const double avg = sum / (double)ncpu;
+        const double sd = wp_sqrt(sq / (double)ncpu - avg * avg);
+        printf("wpost: [%u 回目] 合計 %.2f Mops(%.1f MB/s)、1 コアあたり 平均 %.3f / 最小 %.3f(コア %u)/ 最大 %.3f(コア %u)Mops、"
+               "最大/最小 %.3f、変動係数 %.1f%%\n", r + 1u, sum, sum * 8.0, avg, mn, kmin, mx, kmax,
+               mn > 0 ? mx / mn : 0.0, avg > 0 ? sd / avg * 100.0 : 0.0);
+        snprintf(g_mt_msg, sizeof(g_mt_msg), "wpost: [%u 回目] 全部のコアで誤りなし(最後に書いた値が届いている)", r + 1u);
+        check(g_mt_msg, bad == 0);
+    }
+    if (sync_at(500u + WPOST_ROUNDS, "wpost の終わり") != BFM_OK) return 1;
+
+    /* 3 回の平均(コアごと)*/
+    printf("wpost: [%u 回の平均] コア ポート  Mops(回ごと)\n", WPOST_ROUNDS);
+    double sum = 0, mn = 1e30, mx = 0;
+    for (unsigned k = 0; k < (unsigned)ncpu; k++) {
+        double m = 0;
+        for (unsigned r = 0; r < WPOST_ROUNDS; r++) m += mops[r][k];
+        m /= WPOST_ROUNDS;
+        sum += m;
+        if (m < mn) mn = m;
+        if (m > mx) mx = m;
+        printf("wpost:              %4u %6u  %.3f(%.3f / %.3f / %.3f)\n", k, args[k].port, m, mops[0][k], mops[1][k], mops[2][k]);
+    }
+    printf("wpost: [%u 回の平均] 合計 %.2f Mops、1 コアあたり 平均 %.3f / 最小 %.3f / 最大 %.3f Mops、最大/最小 %.3f\n",
+           WPOST_ROUNDS, sum, sum / (double)ncpu, mn, mx, mn > 0 ? mx / mn : 0.0);
+    printf("wpost: 結果 %s(NG %d 件)\n", g_ng ? "NG" : "OK", g_ng);
+    return g_ng ? 1 : 0;
+}
+
+/* ---------------------------------------------------------------------
+ * perf: 物理コアの数 1〜4 で、操作と長さごとの IOPS・MB/s・平均の遅延を測る(両方のノードで perf を動かす = 両方向)
+ *
+ * N 本(N = 1〜PERF_CORES)のスレッドを CPU 0〜N-1 に固定し(Precision の HT の相方は CPU k+8 なので、どれも別の
+ * 物理コア)、スレッド k は接続 (ポート k % ポートの数, k / ポートの数) で、相手の公開メモリの自分の区画
+ * (PERF_OFF + k * PERF_SPAN)へ -n 秒(既定 2)打ち続ける。項目ごとに相手と足並みをそろえ、相手も同時に同じ項目を打つ。
+ * 平均の遅延: 1 回ずつ待つ操作は「かかった時間 / 回数」。bfm_read_async() は g_bfm_qdepth 個出しておき、1 個ずつ
+ * 出してから完了を見るまで。bfm_write_post() は完了を 1 個ずつ見られないので、1 回出すのにかかる時間。
+ * 結果は「perf|」で始まる 1 行ずつ出す(仕様書の 20 章の表とグラフは、この行から作る)。
+ * ------------------------------------------------------------------- */
+
+#define PERF_CORES  4u
+#define PERF_OFF    (64u * 1024u * 1024u)
+#define PERF_SPAN   (1024u * 1024u)
+#define PERF_BIG    32768u
+#define PERF_DIF_MAX 512u
+
+enum { PF_WPOST = 0, PF_READ, PF_RASYNC, PF_CAS, PF_FAA, PF_DIFW, PF_DIFR };
+static const char *const g_pf_name[] = {"bfm_write_post", "bfm_read", "bfm_read_async", "bfm_cas", "bfm_faa",
+                                        "bfm_dif_write", "bfm_dif_read"};
+
+struct perf_arg {
+    pthread_t th;
+    unsigned cpu;
+    bfm_conn_t *c;
+    int kind;
+    uint32_t size;                       /* 長さ(バイト。DIF はブロックの数)*/
+    uint64_t ops, ns, lat_ns;            /* 回数・かかった時間・遅延の合計(read_async だけ)*/
+    int rc;
+};
+
+static pthread_barrier_t g_pf_bar;
+static uint64_t g_pf_ns;
+/* スレッド(CPU)ごとの read_async の着地点と DIF の元 / 着地点。一度だけ取り、解放しない(read_async の応答は、
+ * 完了を刈り取ったときに写される。誤りで止めたときに仕掛かり中のものが残っていると、後で別の関数(足並みを
+ * そろえる bfm_write() など)が刈り取って写すので、着地点を手放してはいけない)。 */
+static uint8_t *g_pf_abuf[PERF_CORES], *g_pf_dbuf[PERF_CORES];
+
+/* n ブロックの 520 バイトおきのデータを、正しい PI つきで作る(app tag 0x1234、ref tag 0x1000 から)。 */
+static void perf_dif_make(uint8_t *out, uint32_t n, unsigned seed)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        uint8_t *b = out + i * (BFM_DIF_BLOCK + BFM_DIF_PI);
+        for (uint32_t j = 0; j < BFM_DIF_BLOCK; j++) b[j] = (uint8_t)(seed * 31u + i * 7u + j);
+        const uint16_t g = crc16_bitwise(b, BFM_DIF_BLOCK);
+        const uint32_t r = 0x1000u + i;
+        b[512] = (uint8_t)(g >> 8); b[513] = (uint8_t)g;
+        b[514] = 0x12; b[515] = 0x34;
+        b[516] = (uint8_t)(r >> 24); b[517] = (uint8_t)(r >> 16); b[518] = (uint8_t)(r >> 8); b[519] = (uint8_t)r;
+    }
+}
+
+static void *perf_worker(void *p)
+{
+    struct perf_arg *a = (struct perf_arg *)p;
+    cpu_set_t cs;
+    CPU_ZERO(&cs);
+    CPU_SET((int)a->cpu, &cs);
+    (void)pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
+    const uint64_t base = PERF_OFF + (uint64_t)a->cpu * PERF_SPAN;
+    const uint32_t qd = ((struct bfm_conn *)a->c)->aqd;
+    static __thread uint8_t src[PERF_BIG], dst[PERF_BIG];
+    if (g_pf_abuf[a->cpu] == NULL) g_pf_abuf[a->cpu] = malloc((size_t)BFM_QD_MAX * PERF_BIG);
+    if (g_pf_dbuf[a->cpu] == NULL) g_pf_dbuf[a->cpu] = malloc((size_t)PERF_DIF_MAX * (BFM_DIF_BLOCK + BFM_DIF_PI));
+    uint8_t *abuf = g_pf_abuf[a->cpu];   /* read_async の着地点(qd 個)*/
+    uint8_t *dbuf = g_pf_dbuf[a->cpu];   /* DIF の 520 バイトおきの元 / 着地点 */
+    bfm_dif_t d;
+    bfm_dif_err_t e;
+    memset(&d, 0, sizeof(d));
+    d.op = BFM_DIF_CHECK;
+    d.mode = BFM_DIF_SW;
+    d.check = BFM_DIF_CHK_ALL;
+    d.app_tag = 0x1234;
+    d.ref_tag = 0x1000;
+    for (uint32_t j = 0; j < sizeof(src); j++) src[j] = (uint8_t)(a->cpu + j);
+    a->rc = BFM_OK;
+    if (abuf == NULL || dbuf == NULL) a->rc = BFM_E_NOMEM;
+    else if (a->kind == PF_DIFW || a->kind == PF_DIFR) {
+        {
+            perf_dif_make(dbuf, a->size, a->cpu);
+            /* read のために、相手のメモリへ正しい PI つきのデータを置いておく */
+            if (a->kind == PF_DIFR) a->rc = bfm_dif_write(a->c, base, dbuf, a->size, &d, &e);
+        }
+    }
+    pthread_barrier_wait(&g_pf_bar);                      /* 全部のスレッドで同時に始める */
+    const uint64_t t0 = now_ns(), end = t0 + g_pf_ns;
+    uint64_t k = 0, lat = 0;
+    int rc = a->rc;
+    if (rc == BFM_OK) {
+        switch (a->kind) {
+        case PF_WPOST:
+            for (;;) {
+                for (unsigned j = 0; j < 256u && rc == BFM_OK; j++, k++)
+                    rc = bfm_write_post(a->c, base + (k & 63u) * 64u, src, a->size);
+                if (rc != BFM_OK || now_ns() >= end) break;
+            }
+            if (rc == BFM_OK) rc = bfm_flush(a->c);
+            break;
+        case PF_READ:
+            while (rc == BFM_OK && now_ns() < end) {
+                rc = bfm_read(a->c, base, dst, a->size);
+                k++;
+            }
+            break;
+        case PF_RASYNC: {
+            /* qd 個出しておき、古い順に待つ(出してから完了を見るまでを遅延として足す)*/
+            bfm_tag_t tag[BFM_QD_MAX];
+            uint64_t tp[BFM_QD_MAX];
+            uint32_t head = 0, n = 0;
+            int stop = 0;
+            while (rc == BFM_OK && (n > 0 || !stop)) {
+                if (!stop && n < qd) {
+                    const uint32_t s = (head + n) % qd;
+                    tp[s] = now_ns();
+                    rc = bfm_read_async(a->c, base, abuf + (size_t)s * a->size, a->size, &tag[s]);
+                    n++;
+                    if (tp[s] >= end) stop = 1;
+                    continue;
+                }
+                rc = bfm_wait(a->c, tag[head]);
+                lat += now_ns() - tp[head];
+                k++;
+                head = (head + 1u) % qd;
+                n--;
+            }
+            break;
+        }
+        case PF_CAS:
+            while (rc == BFM_OK && now_ns() < end) {
+                if (a->size == 4) { uint32_t o; rc = bfm_cas32(a->c, base + 8192u, (uint32_t)k, (uint32_t)k + 1u, &o); }
+                else { uint64_t o; rc = bfm_cas(a->c, base + 8192u, k, k + 1u, &o); }
+                k++;
+            }
+            break;
+        case PF_FAA:
+            while (rc == BFM_OK && now_ns() < end) {
+                if (a->size == 4) { uint32_t o; rc = bfm_faa32(a->c, base + 8192u, 1, &o); }
+                else { uint64_t o; rc = bfm_faa(a->c, base + 8192u, 1, &o); }
+                k++;
+            }
+            break;
+        case PF_DIFW:
+            while (rc == BFM_OK && now_ns() < end) {
+                rc = bfm_dif_write(a->c, base, dbuf, a->size, &d, &e);
+                k++;
+            }
+            break;
+        default:   /* PF_DIFR */
+            while (rc == BFM_OK && now_ns() < end) {
+                rc = bfm_dif_read(a->c, base, dbuf, a->size, &d, &e);
+                k++;
+            }
+            break;
+        }
+    }
+    a->ns = now_ns() - t0;
+    a->ops = k;
+    a->lat_ns = lat;
+    a->rc = rc;
+    pthread_barrier_wait(&g_pf_bar);
+    return NULL;
+}
+
+static int run_perf(uint32_t secs)
+{
+    static struct perf_arg args[PERF_CORES];
+    static const struct { int kind; uint32_t size; } items[] = {
+        {PF_WPOST, 4}, {PF_WPOST, 64}, {PF_WPOST, 256}, {PF_WPOST, PERF_BIG},
+        {PF_READ, 4}, {PF_READ, 64}, {PF_READ, 256}, {PF_READ, PERF_BIG},
+        {PF_RASYNC, 4}, {PF_RASYNC, 64}, {PF_RASYNC, 256}, {PF_RASYNC, PERF_BIG},
+        {PF_CAS, 4}, {PF_CAS, 8}, {PF_FAA, 4}, {PF_FAA, 8},
+        {PF_DIFW, 16}, {PF_DIFW, 64}, {PF_DIFW, PERF_DIF_MAX},
+        {PF_DIFR, 16}, {PF_DIFR, 64}, {PF_DIFR, PERF_DIF_MAX},
+    };
+    if (secs == 0) secs = 2;
+    g_pf_ns = (uint64_t)secs * 1000000000ull;
+    unsigned ports[BFM_MAX_PORT], np = 0;
+    for (unsigned p = 0; p < BFM_MAX_PORT; p++)
+        if (g_bfm_port_conn[p] != 0) ports[np++] = p;
+    g_ng = 0;
+    if (run_up(4) != BFM_OK) return 1;
+    const long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    if (ncpu < (long)PERF_CORES) {
+        printf("perf: CPU が %ld 個しかない(%u 個要る)\n", ncpu, PERF_CORES);
+        return 1;
+    }
+    for (unsigned k = 0; k < PERF_CORES; k++) {
+        const unsigned port = ports[k % np], i = k / np;
+        if ((args[k].c = bfm_conn(port, i)) == NULL) {
+            printf("perf: スレッド %u に使う接続 (ポート %u, %u) が使えない\n", k, port, i);
+            return 1;
+        }
+    }
+    printf("perf: スレッドを CPU 0〜N-1 に固定し(N = 1〜%u)、スレッドごとに接続 1 本(ポート %u 個に交互)で %u 秒ずつ。"
+           "相手も同時に同じ項目を打つ(両方向)。inline %u バイトまで、read_async の多重度 %u・1 回の上限 %u バイト、"
+           "DIF は SW の CHECK\n", PERF_CORES, np, secs, bfm_inline_max(), ((struct bfm_conn *)args[0].c)->aqd,
+           g_bfm_async_buf_size);
+    printf("perf|項目|長さ|コア|IOPS|MB/s|平均の遅延 ns|誤り\n");
+    uint64_t stage = 600;
+    for (unsigned it = 0; it < sizeof(items) / sizeof(items[0]) && !g_stop; it++) {
+        const int kind = items[it].kind;
+        const uint32_t size = items[it].size;
+        if (kind == PF_WPOST && size > bfm_inline_max()) {
+            printf("perf|%s|%u|-|対象外(bfm_write_post() は bfm_inline_max() = %u バイトまで)\n", g_pf_name[kind], size,
+                   bfm_inline_max());
+            continue;
+        }
+        const uint32_t bytes = (kind == PF_DIFW || kind == PF_DIFR) ? size * BFM_DIF_BLOCK : size;
+        for (unsigned n = 1; n <= PERF_CORES && !g_stop; n++) {
+            /* 前の測定の誤りで切れた接続は張り直してから測る(使う接続が全部使えるまで。30 秒まで)*/
+            const uint64_t tw = now_ns();
+            for (;;) {
+                unsigned up = 0;
+                for (unsigned k = 0; k < PERF_CORES; k++) up += (bfm_conn(ports[k % np], k / np) != NULL);
+                if (up == PERF_CORES || now_ns() - tw > 30000000000ull) break;
+                (void)bfm_run();
+                reconnect_down();
+                usleep(1000);
+            }
+            snprintf(g_mt_msg, sizeof(g_mt_msg), "perf %s %u x%u", g_pf_name[kind], size, n);
+            if (sync_at(stage++, g_mt_msg) != BFM_OK) return 1;
+            pthread_barrier_init(&g_pf_bar, NULL, n);
+            for (unsigned k = 0; k < n; k++) {
+                args[k].cpu = k;
+                args[k].kind = kind;
+                args[k].size = size;
+                pthread_create(&args[k].th, NULL, perf_worker, &args[k]);
+            }
+            for (unsigned k = 0; k < n; k++) pthread_join(args[k].th, NULL);
+            pthread_barrier_destroy(&g_pf_bar);
+            double iops = 0, lat = 0;
+            uint64_t ops = 0, lat_sum = 0;
+            int bad = 0;
+            for (unsigned k = 0; k < n; k++) {
+                const struct perf_arg *a = &args[k];
+                if (a->rc != BFM_OK) {
+                    bad++;
+                    printf("perf: %s %u コア %u: %s\n", g_pf_name[kind], size, k, bfm_strerror(a->rc));
+                }
+                if (a->ops && a->ns) iops += (double)a->ops / ((double)a->ns / 1e9);
+                if (a->ops) lat += (double)a->ns / (double)a->ops;
+                ops += a->ops;
+                lat_sum += a->lat_ns;
+            }
+            lat = (kind == PF_RASYNC) ? (ops ? (double)lat_sum / (double)ops : 0) : lat / n;
+            printf("perf|%s|%u|%u|%.0f|%.2f|%.0f|%d\n", g_pf_name[kind], size, n, iops, iops * bytes / 1e6, lat, bad);
+            if (bad) g_ng++;
+        }
+    }
+    if (sync_at(stage, "perf の終わり") != BFM_OK) return 1;
+    printf("perf: 結果 %s(誤りのあった測定 %d 件)\n", g_ng ? "NG" : "OK", g_ng);
+    return g_ng ? 1 : 0;
+}
+
 /* info: ポートを立ち上げて能力を表示する(接続は待たない)。 */
 static int run_info(void)
 {
@@ -1948,7 +2365,7 @@ int main(int argc, char **argv)
     uint32_t iters = 0, threads = 4, nconn = 0;
     int oob = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "d:i:D:I:c:p:m:M:n:t:Q:a:BSCxqPzLvh")) != -1) {
+    while ((opt = getopt(argc, argv, "d:i:D:I:c:p:m:M:n:t:Q:a:R:BSCxqPzLvh")) != -1) {
         switch (opt) {
         case 'd': g_bfm_linux_pci_bdf[0] = optarg; break;
         case 'i': if (parse_ip(optarg, &g_bfm_local_ip[0]) != 0) { usage(); return 2; } break;
@@ -1967,6 +2384,7 @@ int main(int argc, char **argv)
         case 'q': g_quiet = 1; break;
         case 'P': g_perf = 1; break;
         case 'z': g_silent = 1; break;
+        case 'R': g_wp_rot = (unsigned)atoi(optarg); break;
         case 'L': g_steplog = 1; break;
         case 'a': g_bfm_ack_timeout = (uint8_t)atoi(optarg); break;
         case 'Q': g_bfm_qdepth = (uint32_t)atoi(optarg); break;
@@ -1987,6 +2405,7 @@ int main(int argc, char **argv)
     if (nconn != 0) g_bfm_port_conn[0] = nconn;
     if (optind + 2 < argc) g_bfm_port_conn[1] = nconn ? nconn : (g_bfm_port_conn[1] ? g_bfm_port_conn[1] : g_bfm_port_conn[0]);
 
+    setvbuf(stdout, NULL, _IOLBF, 0);    /* ファイルへ出すときも 1 行ずつ出す(落ちたときに表示を失わない)*/
     signal(SIGINT, on_sig);
     signal(SIGTERM, on_sig);
     signal(SIGQUIT, on_sig);
@@ -1999,7 +2418,14 @@ int main(int argc, char **argv)
         g_bfm_port_conn[1] = 0;
     }
     const int race = (strcmp(mode, "race") == 0);
-    if (strcmp(mode, "run") != 0 && !g_serve && !bench && !race && strcmp(mode, "info") != 0) {
+    const int wpost = (strcmp(mode, "wpost") == 0);
+    const int perf = (strcmp(mode, "perf") == 0);
+    if (perf) {
+        g_bfm_async_buf_size = PERF_BIG;                   /* bfm_read_async() の 32KiB を打てるように */
+        for (unsigned p = 0; p < BFM_MAX_PORT; p++)        /* 多重度の枠の中継バッファが大きいので、接続は使う分だけ */
+            if (g_bfm_port_conn[p] != 0) g_bfm_port_conn[p] = PERF_CORES;
+    }
+    if (strcmp(mode, "run") != 0 && !g_serve && !bench && !race && !wpost && !perf && strcmp(mode, "info") != 0) {
         usage();
         return 2;
     }
@@ -2025,6 +2451,8 @@ int main(int argc, char **argv)
     else if (bench) ret = run_bench(threads, iters ? iters : 100000u);
     else if (strcmp(mode, "info") == 0) ret = run_info();
     else if (race) ret = run_race(threads, iters);
+    else if (wpost) ret = run_wpost(iters);
+    else if (perf) ret = run_perf(iters);
     else ret = run_all(threads, iters, oob);
     do_shutdown();
     if (g_steplog) {

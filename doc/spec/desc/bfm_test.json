@@ -1993,6 +1993,182 @@
       ]
     },
     {
+      "func": "wpost_worker",
+      "summary": "wpost の 1 本のスレッド。自分のコア `a->cpu` に固定し、全部のスレッドとそろえて(`g_wp_bar`)始め、`g_wp_ns` の間、自分の接続で相手の公開メモリの区画(`MT_OFF + (port * BFM_MAX_PORT_CONN + i) * MT_SPAN` の 64 語を順に)へ 8 バイトの `bfm_write_post()` を打ち続ける。時刻は 256 回ごとに見る。終わったら `bfm_flush()` で全部の完了を待ち、打った回数とかかった時間を残し、最後に書いた値を `bfm_read()` で読み戻して確かめる。最後に全部のスレッドとそろえて終わる。",
+      "args": {"p": "このスレッドの記録(`struct wpost_arg`)"},
+      "ret": "NULL",
+      "pre": "`run_wpost()` が作る。`a->c` はこのスレッドだけが使う接続。",
+      "notes": "* 書く値はコアの番号と回の番号から作る(上位 16bit がコア)。\n* 誤りがあれば最初のものを `a->rc` に残す(`bfm_write_post()` の失敗で打つのをやめる。読み戻しが違えば `BFM_E_HW`)。\n* コアに固定できなかったら `a->cpu_ok = 0`(測りは続ける)。\n* かかった時間は `bfm_flush()` が済むまで(相手の NIC が全部受け取るまで)。",
+      "flow": [
+        {"do": "pthread_setaffinity_np() で a->cpu に固定し、できたかを a->cpu_ok に"},
+        {"do": "base = 自分の区画、k = 0、a->rc = BFM_OK"},
+        {"do": "pthread_barrier_wait(&g_wp_bar)(全部のスレッドで同時に始める)"},
+        {"call": "t0 = now_ns() を呼ぶ、end = t0 + g_wp_ns"},
+        {"loop": "時間になるまで", "body": [
+          {"while": "j < 256 ?(j は 0 から。1 回ごとに k++)", "body": [
+            {"do": "v = (a->cpu << 48) | k"},
+            {"call": "rc = bfm_write_post(a->c, base + (k & 63) * 8, &v, 8) を呼ぶ"},
+            {"if": "rc != BFM_OK ?", "then": [{"do": "a->rc = rc"}, {"goto": "out"}]}
+          ]},
+          {"if": "now_ns() >= end ?", "then": [{"break": true}]}
+        ]},
+        {"label": "out"},
+        {"call": "rc = bfm_flush(a->c) を呼ぶ"},
+        {"if": "a->rc == BFM_OK かつ rc != BFM_OK ?", "then": [{"do": "a->rc = rc"}]},
+        {"do": "a->ns = now_ns() - t0、a->ops = k"},
+        {"if": "a->rc == BFM_OK かつ k > 0 ?", "then": [
+          {"call": "rr = bfm_read(a->c, base + ((k - 1) & 63) * 8, &r, 8) を呼ぶ"},
+          {"if": "rr != BFM_OK ?", "then": [{"do": "a->rc = rr"}], "else": [
+            {"if": "r != v ?", "then": [{"do": "a->rc = BFM_E_HW"}]}
+          ]}
+        ]},
+        {"do": "pthread_barrier_wait(&g_wp_bar)"},
+        {"return": "NULL"}
+      ]
+    },
+    {
+      "func": "wp_sqrt",
+      "summary": "`x` の平方根をニュートン法(60 回)で求める。変動係数を出すのに使う(libm をリンクしないため)。",
+      "args": {"x": "値"},
+      "ret": "`x` の平方根。`x` が 0 以下なら 0。",
+      "pre": "特になし。",
+      "notes": "始めの値は `x` と 1 の大きいほう。",
+      "flow": [
+        {"if": "x <= 0 ?", "then": [{"return": "0"}]},
+        {"do": "y = x と 1 の大きいほう"},
+        {"while": "i < 60 ?(i は 0 から)", "body": [{"do": "y = (y + x / y) / 2"}]},
+        {"return": "y"}
+      ]
+    },
+    {
+      "func": "run_wpost",
+      "summary": "wpost の本体(全部のコアで同時に、8 バイトの `bfm_write_post()` の速さを測る。両方のノードで動かす = 両方向)。`run_up(4)` で全部の接続を張り、そのノードの CPU に 1 本ずつスレッドを置く。コア `k` には `j = (k + g_wp_rot) % CPU の数` 番目の接続(使うポートを交互に: ポート `j % ポートの数` の接続 `j / ポートの数`)を割り当てる。`WPOST_ROUNDS`(3)回、相手と足並みをそろえてから(段 500 + 回)全部のスレッド(`wpost_worker()`)を同時に `secs` 秒動かし、コアごとの回数・Mops・1 回の ns と、合計・1 コアあたりの平均 / 最小 / 最大・最大/最小・変動係数を表示し、全部のコアで誤りが無いことを確かめる。最後に相手とそろえ(段 503)、コアごとの 3 回の平均と、その最大/最小を表示する。",
+      "args": {"secs": "1 回の秒数(-n。0 なら 5)"},
+      "ret": "0: 全部 OK。1: 誤りがあった、張れなかった、割り当てる接続が足りない、または相手とそろえられなかった。",
+      "pre": "相手のノードも wpost を動かしていること。各ポートの接続の数(-c)が、CPU の数をポートの数で割った数以上であること。",
+      "notes": "* 測る間は `bfm_run()` を回すスレッドを置かない(全部のコアを測る側に使う)。データ経路は `bfm_run()` を要らない。\n* 結果は `check()` で表示し、`g_ng` に数える。\n* CPU の数は `WPOST_CPU_MAX`(256)まで。\n* `-R`(`g_wp_rot`)で割り当てをずらすと、遅さがコアと接続のどちらに付くかを切り分けられる。",
+      "flow": [
+        {"do": "secs が 0 なら 5、g_wp_ns = secs 秒、ncpu = CPU の数(1〜WPOST_CPU_MAX)、使うポートを並べる、g_ng = 0"},
+        {"call": "run_up(4) を呼ぶ"},
+        {"if": "BFM_OK でない?", "then": [{"return": "1"}]},
+        {"while": "k < ncpu ?(k は 0 から)", "body": [
+          {"do": "j = (k + g_wp_rot) % ncpu、a->cpu = k、a->port = ports[j % np]、a->i = j / np"},
+          {"call": "a->c = bfm_conn(a->port, a->i) を呼ぶ"},
+          {"if": "a->i が接続の数以上、または a->c == NULL ?", "then": [
+            {"do": "「コア k に使う接続が無い」を表示"},
+            {"return": "1"}
+          ]}
+        ]},
+        {"do": "測り方(CPU の数・秒数・回数・ポートの数・inline・BlueFlame)を表示"},
+        {"while": "r < WPOST_ROUNDS && !g_stop ?(r は 0 から)", "body": [
+          {"call": "sync_at(500 + r) を呼ぶ"},
+          {"if": "BFM_OK でない?", "then": [{"return": "1"}]},
+          {"do": "g_wp_bar を ncpu 本で作り、ncpu 本の wpost_worker を動かして終わりを待ち、g_wp_bar を壊す"},
+          {"do": "コアごとに Mops を求めて表示し、合計・最小・最大・二乗和・誤りの数を集める"},
+          {"call": "wp_sqrt() で標準偏差を求め、合計・平均・最小・最大・最大/最小・変動係数を表示"},
+          {"call": "check(「全部のコアで誤りなし」, 誤りの数 == 0) を呼ぶ"}
+        ]},
+        {"call": "sync_at(500 + WPOST_ROUNDS) を呼ぶ"},
+        {"if": "BFM_OK でない?", "then": [{"return": "1"}]},
+        {"do": "コアごとの 3 回の平均と回ごとの値、合計・平均・最小・最大・最大/最小を表示"},
+        {"do": "結果(OK / NG と NG の数)を表示"},
+        {"if": "g_ng ?", "then": [{"return": "1"}], "else": [{"return": "0"}]}
+      ]
+    },
+    {
+      "func": "perf_dif_make",
+      "summary": "`n` ブロックの 520 バイトおきのデータを、正しい PI つきで `out` に作る。データ 512 バイトは `seed` とブロックの番号から作り、guard はその CRC16(`crc16_bitwise()`)、app tag は 0x1234、ref tag は 0x1000 + ブロックの番号(どれもビッグエンディアン)。",
+      "args": {"out": "作る先(`n` × 520 バイト)", "n": "ブロックの数", "seed": "データを変えるための数(スレッドの CPU の番号)"},
+      "ret": "なし",
+      "pre": "`out` が `n` × 520 バイト以上あること。",
+      "notes": "perf の DIF の CHECK(PI を検査してそのまま渡す)の元のデータにする。`perf_worker()` の `bfm_dif_t` の app tag・ref tag と合わせてある。",
+      "flow": [
+        {"while": "i < n ?(i は 0 から)", "body": [
+          {"do": "b = out + i * 520。b[0..511] = seed * 31 + i * 7 + j(j はバイトの位置)"},
+          {"call": "g = crc16_bitwise(b, 512) を呼ぶ"},
+          {"do": "b[512..513] = g、b[514..515] = 0x1234、b[516..519] = 0x1000 + i(どれもビッグエンディアン)"}
+        ]}
+      ]
+    },
+    {
+      "func": "perf_worker",
+      "summary": "perf の 1 本のスレッド。自分の CPU `a->cpu` に固定し、着地点(read_async 用に 64 × 32KiB、DIF 用に 512 × 520 バイト。CPU ごとに一度だけ取る)を用意する。DIF なら元のデータを作り(`perf_dif_make()`)、DIF の read なら先に相手のメモリへ正しい PI つきのデータを `bfm_dif_write()` で置く。全部のスレッドとそろえて始め、`g_pf_ns` の間、相手の公開メモリの自分の区画(`PERF_OFF + cpu * PERF_SPAN`)へ、操作 `a->kind` を長さ `a->size` で打ち続ける。終わったら回数・かかった時間・(read_async は)遅延の合計を残し、全部のスレッドとそろえて終わる。",
+      "args": {"p": "このスレッドの記録(`struct perf_arg`)"},
+      "ret": "NULL",
+      "pre": "`run_perf()` が作る。`a->c` はこのスレッドだけが使う接続。",
+      "notes": "* `bfm_write_post()`: 256 回ごとに時刻を見て、終わりに `bfm_flush()`。区画の中の 64 か所(64 バイトおき)へ順に書く。\n* `bfm_read_async()`: 多重度(`aqd`)の数だけ出しておき、古い順に `bfm_wait()` で待つ。出してから完了を見るまでを遅延として足す。時間が来たら新しく出すのをやめ、残りを全部待つ。\n* CAS・FAA は 4 バイトなら `bfm_cas32()` / `bfm_faa32()`、8 バイトなら `bfm_cas()` / `bfm_faa()`(区画 + 8192 の語)。\n* DIF は SW の CHECK(全部を検査)。長さはブロックの数。\n* 着地点は解放しない(誤りで止めたときに仕掛かり中の read_async が残っていると、後で別の関数が刈り取って写すため)。\n* 最初の誤りを `a->rc` に残し、誤りが出たら打つのをやめる。",
+      "flow": [
+        {"do": "pthread_setaffinity_np() で a->cpu に固定する"},
+        {"do": "base = PERF_OFF + a->cpu * PERF_SPAN、qd = 接続の多重度"},
+        {"do": "CPU ごとの着地点が無ければ malloc() で取る(abuf・dbuf)"},
+        {"do": "d = DIF の設定(CHECK・SW・全部を検査・app tag 0x1234・ref tag 0x1000)、src を埋める、a->rc = BFM_OK"},
+        {"if": "abuf か dbuf が NULL ?", "then": [{"do": "a->rc = BFM_E_NOMEM"}], "else": [
+          {"if": "DIF の write か read ?", "then": [
+            {"call": "perf_dif_make(dbuf, a->size, a->cpu) を呼ぶ"},
+            {"if": "DIF の read ?", "then": [{"call": "a->rc = bfm_dif_write(a->c, base, dbuf, a->size, &d, &e) を呼ぶ"}]}
+          ]}
+        ]},
+        {"do": "pthread_barrier_wait(&g_pf_bar)(全部のスレッドで同時に始める)"},
+        {"call": "t0 = now_ns() を呼ぶ、end = t0 + g_pf_ns、k = 0、lat = 0、rc = a->rc"},
+        {"if": "rc == BFM_OK ?", "then": [
+          {"switch": "a->kind", "cases": [
+            {"case": "PF_WPOST", "body": [
+              {"do": "時間になるまで bfm_write_post(a->c, base + (k & 63) * 64, src, a->size) を 256 回ずつ出す(k++)"},
+              {"if": "rc == BFM_OK ?", "then": [{"call": "rc = bfm_flush(a->c) を呼ぶ"}]}
+            ]},
+            {"case": "PF_READ", "body": [{"do": "時間になるまで rc = bfm_read(a->c, base, dst, a->size)、k++"}]},
+            {"case": "PF_RASYNC", "body": [
+              {"do": "qd 個まで bfm_read_async() で出し(出した時刻を覚える)、いっぱいなら最も古いものを bfm_wait() で待って遅延を lat に足し k++。時間が来たら出すのをやめ、残りを全部待つ"}
+            ]},
+            {"case": "PF_CAS", "body": [{"do": "時間になるまで 4 バイトなら bfm_cas32()、8 バイトなら bfm_cas() を base + 8192 へ、k++"}]},
+            {"case": "PF_FAA", "body": [{"do": "時間になるまで 4 バイトなら bfm_faa32()、8 バイトなら bfm_faa() を base + 8192 へ、k++"}]},
+            {"case": "PF_DIFW", "body": [{"do": "時間になるまで rc = bfm_dif_write(a->c, base, dbuf, a->size, &d, &e)、k++"}]},
+            {"default": true, "body": [{"do": "時間になるまで rc = bfm_dif_read(a->c, base, dbuf, a->size, &d, &e)、k++"}]}
+          ]}
+        ]},
+        {"do": "a->ns = now_ns() - t0、a->ops = k、a->lat_ns = lat、a->rc = rc"},
+        {"do": "pthread_barrier_wait(&g_pf_bar)"},
+        {"return": "NULL"}
+      ]
+    },
+    {
+      "func": "run_perf",
+      "summary": "perf の本体(物理コアの数 1〜`PERF_CORES` で、操作と長さごとの IOPS・MB/s・平均の遅延を測る。両方のノードで動かす = 両方向)。`run_up(4)` で接続を張り、スレッド k に接続 (ポート k % ポートの数, k / ポートの数) を割り当てる。項目(`bfm_write_post` 4・64・256・32768 バイト、`bfm_read`・`bfm_read_async` 同、`bfm_cas`・`bfm_faa` 4・8 バイト、`bfm_dif_write`・`bfm_dif_read` 16・64・512 ブロック)ごと、コアの数 N ごとに、使う接続が全部使えるまで待ち(切れていれば張り直す。30 秒まで)、相手とそろえ(段 600 から 1 つずつ)、N 本の `perf_worker()` を CPU 0〜N-1 で同時に `secs` 秒動かす。結果を「perf|項目|長さ|コア|IOPS|MB/s|平均の遅延 ns|誤り」の 1 行で表示する。`bfm_write_post()` で `bfm_inline_max()` を超える長さは「対象外」の行を出して飛ばす。",
+      "args": {"secs": "1 回の秒数(-n。0 なら 2)"},
+      "ret": "0: 全部 OK。1: 誤りのあった測定がある、張れなかった、CPU が足りない、接続が使えない、または相手とそろえられなかった。",
+      "pre": "相手のノードも perf を動かしていること。CPU が `PERF_CORES` 個以上あること。`main()` が `g_bfm_async_buf_size` を 32KiB に、ポートの接続の数を `PERF_CORES` にしてあること。",
+      "notes": "* IOPS はスレッドごとの回数 / 時間の合計。MB/s は IOPS × 長さ(DIF はデータ 512 バイト × ブロックの数。PI は数えない)/ 10^6。\n* 平均の遅延は、1 回ずつ待つ操作はスレッドごとの「時間 / 回数」の平均。`bfm_read_async()` は遅延の合計 / 回数(出してから完了を見るまで)。`bfm_write_post()` は 1 回出すのにかかる時間(完了は 1 個ずつ見られない)。\n* 「perf|」の行は `doc/spec/perf_import.py` が読み、仕様書の 20 章の表とグラフ(`doc/spec/perf.json`)にする。\n* 誤りのあった測定は `g_ng` に数える。",
+      "flow": [
+        {"do": "secs が 0 なら 2、g_pf_ns = secs 秒、使うポートを並べる、g_ng = 0"},
+        {"call": "run_up(4) を呼ぶ"},
+        {"if": "BFM_OK でない?", "then": [{"return": "1"}]},
+        {"if": "CPU の数 < PERF_CORES ?", "then": [{"do": "「CPU が足りない」を表示"}, {"return": "1"}]},
+        {"while": "k < PERF_CORES ?(k は 0 から)", "body": [
+          {"call": "args[k].c = bfm_conn(ports[k % np], k / np) を呼ぶ"},
+          {"if": "NULL ?", "then": [{"do": "「使う接続が使えない」を表示"}, {"return": "1"}]}
+        ]},
+        {"do": "測り方と、結果の行の見出しを表示する。stage = 600"},
+        {"while": "項目が残っている && !g_stop ?", "body": [
+          {"if": "bfm_write_post で、長さ > bfm_inline_max() ?", "then": [
+            {"do": "「対象外」の行を表示"},
+            {"continue": true}
+          ]},
+          {"while": "n <= PERF_CORES && !g_stop ?(n は 1 から)", "body": [
+            {"do": "使う接続が全部使えるまで(30 秒まで)bfm_run() と reconnect_down() を回して待つ"},
+            {"call": "sync_at(stage++) を呼ぶ"},
+            {"if": "BFM_OK でない?", "then": [{"return": "1"}]},
+            {"do": "g_pf_bar を n 本で作り、n 本の perf_worker を CPU 0〜n-1 で動かして終わりを待ち、g_pf_bar を壊す"},
+            {"do": "IOPS・MB/s・平均の遅延を求め、誤りのあったスレッドを表示し、結果の行を表示する"},
+            {"if": "誤りがあった?", "then": [{"do": "g_ng++"}]}
+          ]}
+        ]},
+        {"call": "sync_at(stage) を呼ぶ"},
+        {"if": "BFM_OK でない?", "then": [{"return": "1"}]},
+        {"do": "結果(OK / NG と誤りのあった測定の数)を表示"},
+        {"if": "g_ng ?", "then": [{"return": "1"}], "else": [{"return": "0"}]}
+      ]
+    },
+    {
       "func": "run_info",
       "summary": "info の本体。使うポートの接続 0 がどれも立ち上げ中(`BFM_ST_INIT`)でなくなるまで(180 秒まで)`bfm_run()` を呼び、使うポートごとに装置の名前・BlueFlame・atomic・QP の能力・FW に渡したページの数・sho を表示し、T10-DIF のオフロードの有無を表示する。接続ができるのは待たない。",
       "args": {},
@@ -2024,9 +2200,9 @@
     },
     {
       "func": "main",
-      "summary": "オプションと引数を読んで設定の変数を決め、シグナルの受け口を登録し、最初の `bfm_run()` の後で自分の公開メモリを埋めて、引数の動き(run / serve / bench / race / info)を行い、最後に `do_shutdown()` で止める。`-L` なら、止めた後に全部の接続の状態遷移の記録を表示する(`bfm_conn_steplog()`)。\n\n* `-d BDF` / `-D BDF`: `g_bfm_linux_pci_bdf[0]` / `[1]`(ポート 0 / 1 の装置)\n* `-i IP` / `-I IP`: `g_bfm_local_ip[0]` / `[1]`(ポート 0 / 1 の自分の IP)\n* `-c 本数`: ポートごとの接続の数(`g_bfm_port_conn[]`。ポート 1 は使うときだけ)\n* `-t 本数`: `bfm_run()` を同時に呼ぶスレッドの数(既定 4)\n* `-p 番号`: `g_bfm_cm_port`(接続の番号の起点。両方のノードで同じ値にする)\n* `-m 経路MTU`: `g_bfm_path_mtu`\n* `-M ポートのMTU`: `g_bfm_port_mtu`\n* `-n 回数`: run の回数(0 なら一通りの検査の遅延の測定 20000、mt 100000)、bench の回数(既定 100000)、race の揺さぶる段の秒数(既定 30)\n* `-B` / `-S` / `-C`: `g_bfm_bf_enable` / `g_bfm_scatter_cqe` / `g_bfm_cpu_awake` を 0 にする\n* `-Q 多重度`: `g_bfm_qdepth`(多重度つきの write / read を出しておける数。1〜64)\n* `-a N`: `g_bfm_ack_timeout`(RC の ack timeout)\n* `-x`: run で [7](`run_oob()`)を行う\n* `-q` / `-P` / `-z`: `g_quiet` / `g_perf` / `g_silent` を 1 にする(run で、受けるだけ / mt だけ / [10] 無応答の試験 `run_silent()` も行う)\n* `-L`: `g_steplog` を 1 にする(止めた後に状態遷移の記録を表示する)\n* `-v`: `g_bfm_verbose` を 1 にする\n\n引数は `<動き> <相手のIP> [ポート1の相手のIP]`(`g_bfm_peer_ip[0]` / `[1]`)。",
+      "summary": "オプションと引数を読んで設定の変数を決め、シグナルの受け口を登録し、最初の `bfm_run()` の後で自分の公開メモリを埋めて、引数の動き(run / serve / bench / race / wpost / perf / info)を行い、最後に `do_shutdown()` で止める。`-L` なら、止めた後に全部の接続の状態遷移の記録を表示する(`bfm_conn_steplog()`)。\n\n* `-d BDF` / `-D BDF`: `g_bfm_linux_pci_bdf[0]` / `[1]`(ポート 0 / 1 の装置)\n* `-i IP` / `-I IP`: `g_bfm_local_ip[0]` / `[1]`(ポート 0 / 1 の自分の IP)\n* `-c 本数`: ポートごとの接続の数(`g_bfm_port_conn[]`。ポート 1 は使うときだけ)\n* `-t 本数`: `bfm_run()` を同時に呼ぶスレッドの数(既定 4)\n* `-p 番号`: `g_bfm_cm_port`(接続の番号の起点。両方のノードで同じ値にする)\n* `-m 経路MTU`: `g_bfm_path_mtu`\n* `-M ポートのMTU`: `g_bfm_port_mtu`\n* `-n 回数`: run の回数(0 なら一通りの検査の遅延の測定 20000、mt 100000)、bench の回数(既定 100000)、race の揺さぶる段の秒数(既定 30)、wpost の 1 回の秒数(既定 5)、perf の 1 項目の秒数(既定 2)\n* `-B` / `-S` / `-C`: `g_bfm_bf_enable` / `g_bfm_scatter_cqe` / `g_bfm_cpu_awake` を 0 にする\n* `-Q 多重度`: `g_bfm_qdepth`(多重度つきの write / read を出しておける数。1〜64)\n* `-a N`: `g_bfm_ack_timeout`(RC の ack timeout)\n* `-x`: run で [7](`run_oob()`)を行う\n* `-q` / `-P` / `-z`: `g_quiet` / `g_perf` / `g_silent` を 1 にする(run で、受けるだけ / mt だけ / [10] 無応答の試験 `run_silent()` も行う)\n* `-L`: `g_steplog` を 1 にする(止めた後に状態遷移の記録を表示する)\n* `-R N`: `g_wp_rot`(wpost でコア k に k + N 番目の接続を割り当てる)\n* `-v`: `g_bfm_verbose` を 1 にする\n\n引数は `<動き> <相手のIP> [ポート1の相手のIP]`(`g_bfm_peer_ip[0]` / `[1]`)。",
       "args": {"argc": "引数の数", "argv": "引数"},
-      "ret": "0: 成功。1: 最初の `bfm_run()` が失敗した、公開メモリが小さい、または run / bench / race / info が失敗を返した。2: 引数が正しくない。",
+      "ret": "0: 成功。1: 最初の `bfm_run()` が失敗した、公開メモリが小さい、または run / bench / race / wpost / perf / info が失敗を返した。2: 引数が正しくない。",
       "pre": "特になし。",
       "notes": "* 相手の IP はどの動きでも要る。ポート 1 の相手の IP を書いたときだけポート 1 を使う(書かなければ `g_bfm_port_conn[1] = 0`)。`-c` を書かずにポート 1 を使い、`g_bfm_port_conn[1]` の既定が 0 なら、ポート 0 と同じ数にする。\n* bench のときは中継バッファ `g_bfm_stage_size` を `BENCH_QD_MAX * BENCH_SIZE_MAX`(4MiB)にし、中継バッファが大きいので接続をポート 0 の 1 本だけにする。\n* `g_serve` は serve のときだけ 1(SIGQUIT で hash を出す。それ以外では SIGQUIT も止める合図。`on_sig()`)。\n* 最初の `bfm_run()` の直後、相手が繋いでくる前に自分の公開メモリを埋める(`fill_area()`)。最初の `bfm_run()` が失敗(`BFM_E_STATE` 以外の負)を返したときは、`do_shutdown()` を呼んで 1 を返す。\n* `-h` と知らないオプションは使い方を表示して 2 を返す。",
       "entry_note": "プログラムの開始点(OS から呼ばれる)",
@@ -2063,6 +2239,7 @@
             {"case": "'q'", "body": [{"do": "g_quiet = 1"}]},
             {"case": "'P'", "body": [{"do": "g_perf = 1"}]},
             {"case": "'z'", "body": [{"do": "g_silent = 1"}]},
+            {"case": "'R'", "body": [{"do": "g_wp_rot = atoi(optarg)"}]},
             {"case": "'L'", "body": [{"do": "g_steplog = 1"}]},
             {"case": "'a'", "body": [{"do": "g_bfm_ack_timeout = atoi(optarg)"}]},
             {"case": "'Q'", "body": [{"do": "g_bfm_qdepth = atoi(optarg)"}]},
@@ -2096,14 +2273,18 @@
         {"if": "optind + 2 < argc ?", "then": [
           {"do": "g_bfm_port_conn[1] = nconn があれば nconn、なければ g_bfm_port_conn[1](0 なら g_bfm_port_conn[0])"}
         ]},
+        {"do": "setvbuf() で標準出力を 1 行ずつ出す形にする(ファイルへ出すときも、落ちたときに表示を失わない)"},
         {"do": "signal() で SIGINT・SIGTERM・SIGQUIT の受け口を on_sig にする"},
         {"do": "bench = (mode が \"bench\")、g_serve = (mode が \"serve\")"},
         {"if": "bench ?", "then": [
           {"do": "g_bfm_stage_size = BENCH_QD_MAX * BENCH_SIZE_MAX"},
           {"do": "g_bfm_port_conn[0] = 1、g_bfm_port_conn[1] = 0"}
         ]},
-        {"do": "race = (mode が \"race\")"},
-        {"if": "mode が \"run\"・\"serve\"・\"bench\"・\"race\"・\"info\" のどれでもない?", "then": [
+        {"do": "race = (mode が \"race\")、wpost = (mode が \"wpost\")、perf = (mode が \"perf\")"},
+        {"if": "perf ?", "then": [
+          {"do": "g_bfm_async_buf_size = PERF_BIG(32KiB)、使うポートの接続の数 = PERF_CORES"}
+        ]},
+        {"if": "mode が \"run\"・\"serve\"・\"bench\"・\"race\"・\"wpost\"・\"perf\"・\"info\" のどれでもない?", "then": [
           {"call": "usage() を呼ぶ"},
           {"return": "2"}
         ]},
@@ -2131,7 +2312,15 @@
               {"if": "race ?", "then": [
                 {"call": "ret = run_race(threads, iters) を呼ぶ"}
               ], "else": [
-                {"call": "ret = run_all(threads, iters, oob) を呼ぶ"}
+                {"if": "wpost ?", "then": [
+                  {"call": "ret = run_wpost(iters) を呼ぶ"}
+                ], "else": [
+                  {"if": "perf ?", "then": [
+                    {"call": "ret = run_perf(iters) を呼ぶ"}
+                  ], "else": [
+                    {"call": "ret = run_all(threads, iters, oob) を呼ぶ"}
+                  ]}
+                ]}
               ]}
             ]}
           ]}
