@@ -2133,7 +2133,7 @@
     },
     {
       "func": "run_perf",
-      "summary": "perf の本体(物理コアの数 1〜`PERF_CORES` で、操作と長さごとの IOPS・MB/s・平均の遅延を測る。両方のノードで動かす = 両方向)。`run_up(4)` で接続を張り、スレッド k に接続 (ポート k % ポートの数, k / ポートの数) を割り当てる。項目(`bfm_write_post` 4・64・256・32768 バイト、`bfm_read`・`bfm_read_async` 同、`bfm_cas`・`bfm_faa` 4・8 バイト、`bfm_dif_write`・`bfm_dif_read` 16・64・512 ブロック)ごと、コアの数 N ごとに、使う接続が全部使えるまで待ち(切れていれば張り直す。30 秒まで)、相手とそろえ(段 600 から 1 つずつ)、N 本の `perf_worker()` を CPU 0〜N-1 で同時に `secs` 秒動かす。結果を「perf|項目|長さ|コア|IOPS|MB/s|平均の遅延 ns|誤り」の 1 行で表示する。`bfm_write_post()` で `bfm_inline_max()` を超える長さは「対象外」の行を出して飛ばす。",
+      "summary": "perf の本体(物理コアの数 1〜`PERF_CORES` で、操作と長さごとの IOPS・MB/s・平均の遅延を測る。両方のノードで動かす = 両方向)。`run_up(4)` で接続を張り、スレッド k に接続 (ポート k % ポートの数, k / ポートの数) を割り当てる。項目(`bfm_write_post` 4・64 バイト、`bfm_read`・`bfm_read_async` 4・64・256・32768 バイト、`bfm_cas`・`bfm_faa` 4・8 バイト、`bfm_dif_write`・`bfm_dif_read` 16・64・512 ブロック)ごと、コアの数 N ごとに、使う接続が全部使えるまで待ち(切れていれば張り直す。30 秒まで)、相手とそろえ(段 600 から 1 つずつ)、N 本の `perf_worker()` を CPU 0〜N-1 で同時に `secs` 秒動かす。結果を「perf|項目|長さ|コア|IOPS|MB/s|平均の遅延 ns|誤り」の 1 行で表示する。`bfm_write_post()` で `bfm_inline_max()` を超える長さは「対象外」の行を出して飛ばす(項目には入れていない。`bfm_inline_max()` が小さい装置の備え)。",
       "args": {"secs": "1 回の秒数(-n。0 なら 2)"},
       "ret": "0: 全部 OK。1: 誤りのあった測定がある、張れなかった、CPU が足りない、接続が使えない、または相手とそろえられなかった。",
       "pre": "相手のノードも perf を動かしていること。CPU が `PERF_CORES` 個以上あること。`main()` が `g_bfm_async_buf_size` を 32KiB に、ポートの接続の数を `PERF_CORES` にしてあること。",
@@ -2166,6 +2166,34 @@
         {"if": "BFM_OK でない?", "then": [{"return": "1"}]},
         {"do": "結果(OK / NG と誤りのあった測定の数)を表示"},
         {"if": "g_ng ?", "then": [{"return": "1"}], "else": [{"return": "0"}]}
+      ]
+    },
+    {
+      "func": "run_crc",
+      "summary": "crc の本体(T10-DIF の CRC16 だけを確かめる。相手も NIC も要らない)。1 MiB を乱数で埋め、使う方法(`bfm_dif_crc16()`。PCLMULQDQ があればそれ)・表だけ(`bfm_dif_crc16_table()`)・1 ビットずつ(`crc16_bitwise()`)の値が、長さ 0〜2100 バイト(位置は 16 バイトの境界からずらす)で一致し、さらに乱数の長さ(70,000 バイト未満)・位置(4096 未満)の 2 万通りで使う方法と表が一致することを確かめる。続けて、1 MiB の中を 512 バイトずつ、表だけ / 使う方法で `secs` 秒ずつ CRC を求め、512 バイトあたりの時間と GB/s を表示する。",
+      "args": {"secs": "速さを測る秒数(-n。0 なら 1)"},
+      "ret": "0: 全部一致した。1: 違いがあった。",
+      "pre": "特になし(`bfm_run()` を呼ぶ前に、`main()` が引数を読んだ直後に呼ぶ)。",
+      "notes": "* 違いは最初の 5 件まで表示する。\n* 速さの検算の値(XOR)は、最適化で計算が消えないようにするためのもの。\n* CPU を決めたいときは `taskset` で動かす。",
+      "flow": [
+        {"do": "buf(1 MiB)を xorshift の乱数で埋める"},
+        {"call": "bfm_dif_crc_clmul() を呼び、PCLMULQDQ の方法を使うかを表示"},
+        {"while": "len <= 2100 ?(len は 0 から)", "body": [
+          {"call": "a = bfm_dif_crc16()、b = bfm_dif_crc16_table()、c = crc16_bitwise() を、buf + (len * 7) % 64 の len バイトで呼ぶ"},
+          {"if": "a != b または b != c ?", "then": [{"do": "違いを数える(5 件まで表示)"}]}
+        ]},
+        {"while": "k < 20000 ?(k は 0 から)", "body": [
+          {"do": "乱数で len(70000 未満)と off(4096 未満)を決める"},
+          {"call": "a = bfm_dif_crc16(buf + off, len)、b = bfm_dif_crc16_table(buf + off, len) を呼ぶ"},
+          {"if": "a != b ?", "then": [{"do": "違いを数える(5 件まで表示)"}]}
+        ]},
+        {"do": "一致したか(通りの数と違いの数)を表示"},
+        {"do": "secs が 0 なら 1"},
+        {"while": "m < 2 ?(m は 0 から。0 = 表だけ、1 = 使う方法)", "body": [
+          {"do": "secs 秒の間、buf を 512 バイトずつ CRC にし(m で関数を選ぶ)、ブロックの数を数える"},
+          {"do": "512 バイトあたりの時間と GB/s を表示"}
+        ]},
+        {"if": "違いがあった?", "then": [{"return": "1"}], "else": [{"return": "0"}]}
       ]
     },
     {
@@ -2249,6 +2277,10 @@
               {"return": "2"}
             ]}
           ]}
+        ]},
+        {"if": "optind < argc かつ argv[optind] が \"crc\" ?", "then": [
+          {"call": "run_crc(iters) を呼ぶ(相手も NIC も要らない)"},
+          {"return": "run_crc() の値"}
         ]},
         {"if": "optind + 1 >= argc ?", "then": [
           {"call": "usage() を呼ぶ"},

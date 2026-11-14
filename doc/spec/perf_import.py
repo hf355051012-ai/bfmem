@@ -3,7 +3,7 @@
 
     python3 doc/spec/perf_import.py <名前0>=<ログ0> <名前1>=<ログ1>
 
-ログの「perf|項目|長さ|コア|IOPS|MB/s|平均の遅延 ns|誤り」の行と、「perf|項目|長さ|-|対象外…」の行を読む。
+ログの「perf|項目|長さ|コア|IOPS|MB/s|平均の遅延 ns|誤り」の行を読む(「perf|項目|長さ|-|対象外…」の行は載せない)。
 perf.json に前からある説明の文(intro・conditions・latency_note・notes)はそのまま残し、nodes・cores だけを置き換える。
 仕様書の 20 章(gen.py の perf_chapter())は perf.json から作る。
 """
@@ -42,17 +42,12 @@ def main():
     for arg in sys.argv[1:]:
         name, path = arg.split("=", 1)
         rs = read_log(path)
-        # 対象外の行は、表とグラフで全部のコアの欄に「—」を出せるよう、コアごとに広げる
+        # 対象外の行(測らなかった長さ)は載せない
         real = [r for r in rs if not r.get("skip")]
         cores |= {r["cores"] for r in real}
-        out = list(real)
-        for r in rs:
-            if r.get("skip"):
-                for c in sorted({x["cores"] for x in real}):
-                    out.append({"item": r["item"], "size": r["size"], "cores": c, "skip": r["skip"]})
         bad = sum(r["err"] for r in real)
-        print("%s: %d 件(対象外 %d 件、誤りのあった測定 %d 件)" % (name, len(real), len(out) - len(real), bad))
-        nodes.append({"name": name, "results": out})
+        print("%s: %d 件(載せない対象外 %d 件、誤りのあった測定 %d 件)" % (name, len(real), len(rs) - len(real), bad))
+        nodes.append({"name": name, "results": real})
     pd["nodes"] = nodes
     pd["cores"] = sorted(cores)
     for k in ("intro", "conditions", "latency_note", "notes"):

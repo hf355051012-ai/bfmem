@@ -1,6 +1,6 @@
 {
   "file": "src/bfm_dif.c",
-  "summary": "T10-DIF(512 + 8 バイトのブロック)をつけた転送。入る側の形のブロックを出る側の形に変えて運ぶ。write は自分のメモリが入る側・相手のメモリが出る側、read はその反対。\n\n起動(`bfm_dif_write_start()` / `bfm_dif_read_start()`)と完了確認(`bfm_dif_poll()` / `bfm_dif_wait()`)を分けてある。`bfm_dif_write()` / `bfm_dif_read()` は、起動して `bfm_dif_wait()` で待つもの。接続ごとに DIF 用の中継バッファ(`g_bfm_dif_buf_size`)を 2 面に分け、全体を 1 面に入るブロック数ずつの分に切って、分 i を面 i % 2 で運ぶ。2 つの分までを同時に出しておき、片方を NIC が運ぶ間に、もう片方を CPU が用意・検査する(`issue()` が出し、`finish()` が仕上げ、`progress()` がそれを回す)。転送が進むのは `bfm_dif_poll()` / `bfm_dif_wait()` の中だけ。1 つの接続で同時に動かせる DIF の転送は 1 本。\n\n* `BFM_DIF_SW`(オフロードなし): CPU が中継バッファの面で形を変える(CRC は 8 バイトずつ表を引く)。どの装置でも使える。\n* `BFM_DIF_HW`(オフロードあり): NIC の署名オフロード。Linux の `IB_WR_REG_MR_INTEGRITY` と同じ手順で、(前に使っていれば MKey を空きに戻す UMR)→ 署名つき MKey を張る UMR(KLM か 520 バイトおきの strided block と BSF)→ SET_PSV × 2 → 署名つき MKey を手元のバッファとした RDMA を出す。接続・面ごとの MKey と PSV は、ポートの立ち上げ(`bfm_dev_step()` の `D_DIF`)のときに `bfm_dif_init_step()` で作っておく(状態はポートごとの `s_di[]`。FW のコマンドの完了を待つところでは `BFM_INPROGRESS` を返す状態機械。`D_START` → `D_PSV` ⇄ `D_MKEY` → `D_DONE`)。検査の誤りは SIG_ERR の CQE で知り、CQE の MKey でどちらの面の誤りかを見分ける(`poll_one()` が面ごとに覚える)。署名の資源を用意できたかはポートごと(`s_hw[]`)に持ち、`BFM_DIF_HW` の転送はその接続のポートで用意できていれば使える。署名の資源の表と転送の状態は接続の表の番号(`c->index`)で引く。UMR・RDMA に使う lkey・PD・UMR の fence は、接続のポートの装置 `c->dev` のもの。**ConnectX-4 Lx には署名オフロード(`sho`)が無いので、実機では確かめていない**(ConnectX-7 を想定して Linux の作りに合わせた)。",
+  "summary": "T10-DIF(512 + 8 バイトのブロック)をつけた転送。入る側の形のブロックを出る側の形に変えて運ぶ。write は自分のメモリが入る側・相手のメモリが出る側、read はその反対。\n\n起動(`bfm_dif_write_start()` / `bfm_dif_read_start()`)と完了確認(`bfm_dif_poll()` / `bfm_dif_wait()`)を分けてある。`bfm_dif_write()` / `bfm_dif_read()` は、起動して `bfm_dif_wait()` で待つもの。接続ごとに DIF 用の中継バッファ(`g_bfm_dif_buf_size`)を 2 面に分け、全体を 1 面に入るブロック数ずつの分に切って、分 i を面 i % 2 で運ぶ。2 つの分までを同時に出しておき、片方を NIC が運ぶ間に、もう片方を CPU が用意・検査する(`issue()` が出し、`finish()` が仕上げ、`progress()` がそれを回す)。転送が進むのは `bfm_dif_poll()` / `bfm_dif_wait()` の中だけ。1 つの接続で同時に動かせる DIF の転送は 1 本。\n\n* `BFM_DIF_SW`(オフロードなし): CPU が中継バッファの面で形を変える。CRC は、CPU が PCLMULQDQ を持てば(`g_bfm_dif_clmul` が 1 のとき)キャリーなし乗算で 16 バイトずつ畳み込み、持たなければ 8 バイトずつ表を引く。どの装置でも使える。\n* `BFM_DIF_HW`(オフロードあり): NIC の署名オフロード。Linux の `IB_WR_REG_MR_INTEGRITY` と同じ手順で、(前に使っていれば MKey を空きに戻す UMR)→ 署名つき MKey を張る UMR(KLM か 520 バイトおきの strided block と BSF)→ SET_PSV × 2 → 署名つき MKey を手元のバッファとした RDMA を出す。接続・面ごとの MKey と PSV は、ポートの立ち上げ(`bfm_dev_step()` の `D_DIF`)のときに `bfm_dif_init_step()` で作っておく(状態はポートごとの `s_di[]`。FW のコマンドの完了を待つところでは `BFM_INPROGRESS` を返す状態機械。`D_START` → `D_PSV` ⇄ `D_MKEY` → `D_DONE`)。検査の誤りは SIG_ERR の CQE で知り、CQE の MKey でどちらの面の誤りかを見分ける(`poll_one()` が面ごとに覚える)。署名の資源を用意できたかはポートごと(`s_hw[]`)に持ち、`BFM_DIF_HW` の転送はその接続のポートで用意できていれば使える。署名の資源の表と転送の状態は接続の表の番号(`c->index`)で引く。UMR・RDMA に使う lkey・PD・UMR の fence は、接続のポートの装置 `c->dev` のもの。**ConnectX-4 Lx には署名オフロード(`sho`)が無いので、実機では確かめていない**(ConnectX-7 を想定して Linux の作りに合わせた)。",
   "functions": [
     {
       "func": "crc_table_init",
@@ -30,32 +30,62 @@
       ]
     },
     {
+      "func": "xpow_mod",
+      "summary": "x^n mod P(P = x^16 + 0x8BB7)を求める。1(x^0)から始めて n 回、1 ビット左へずらし、x^16 の項が立てば P を引く(0x18BB7 と XOR)。",
+      "args": {"n": "指数"},
+      "ret": "x^n mod P(16 ビット未満の多項式。ビット i が x^i の係数)。",
+      "pre": "特になし。",
+      "notes": "PCLMULQDQ の方法の畳み込みの定数(`s_crc_k[]`。n = 64〜576)を作るのに使う。最初に一度だけ呼ぶので、1 ビットずつで十分。",
+      "flow": [
+        {"do": "r = 1"},
+        {"while": "i < n ?(i は 0 から)", "body": [
+          {"do": "r <<= 1"},
+          {"if": "r の x^16 の項が立つ?", "then": [{"do": "r ^= 0x18bb7"}]}
+        ]},
+        {"return": "r"}
+      ]
+    },
+    {
+      "func": "cpu_has_clmul",
+      "summary": "CPU が PCLMULQDQ(CPUID 1 の ecx[1])と SSSE3(ecx[9])の両方を持つかを、コンパイラの `<cpuid.h>` の `__get_cpuid()` で確かめる。",
+      "args": {},
+      "ret": "1: 両方ある。0: どちらかが無いか、CPUID 1 が読めない。",
+      "pre": "特になし。",
+      "notes": "OS の機能は使わない(コンパイラが持つヘッダの CPUID 命令)。PCLMULQDQ は Westmere(2010 年)以降の Intel の CPU にある。",
+      "flow": [
+        {"if": "__get_cpuid(1, &a, &b, &c, &d) が 0 ?", "then": [{"return": "0"}]},
+        {"return": "c の bit_PCLMUL と bit_SSSE3 が両方立っていれば 1、そうでなければ 0"}
+      ]
+    },
+    {
       "func": "crc_ready",
-      "summary": "CRC の表(`s_crc_tab`)を一度だけ作る。作り終えた旗(`s_crc_ready`)を acquire で読み、立っていなければ鍵 `s_crc_lock` を取って、もう一度確かめてから `crc_table_init()` で作り、旗を release で立てる。",
+      "summary": "CRC の表(`s_crc_tab`)と畳み込みの定数(`s_crc_k[i]` = x^(64·i) mod P、i = 1〜9)を一度だけ作り、PCLMULQDQ の方法を使うか(`s_crc_use_clmul` = `g_bfm_dif_clmul` が 0 でなく、CPU が持つ)を決める。作り終えた旗(`s_crc_ready`)を acquire で読み、立っていなければ鍵 `s_crc_lock` を取って、もう一度確かめてから作り、旗を release で立てる。",
       "args": {},
       "ret": "なし",
       "pre": "特になし。",
-      "notes": "複数のコアが同時に初めて呼んでも、表を作るのは 1 つだけで、ほかは作り終わるまで待つ(作りかけの表を読まない)。`bfm_dif_init_step()` で先に作っておくので、普通は旗を読むだけ。",
+      "notes": "* 複数のコアが同時に初めて呼んでも、作るのは 1 つだけで、ほかは作り終わるまで待つ(作りかけの表を読まない)。`bfm_dif_init_step()` で先に作っておくので、普通は旗を読むだけ。\n* `g_bfm_dif_clmul` を読むのはこのときだけ(後で変えても効かない)。",
       "flow": [
         {"if": "s_crc_ready(acquire で読む)?", "then": [{"return": ""}]},
         {"call": "bfm_lock(&s_crc_lock) を呼ぶ"},
         {"if": "!s_crc_ready ?", "then": [
           {"call": "crc_table_init() を呼ぶ"},
+          {"while": "i < 10 ?(i は 1 から)", "body": [
+            {"call": "s_crc_k[i] = xpow_mod(i * 64) を呼ぶ"}
+          ]},
+          {"call": "s_crc_use_clmul = (g_bfm_dif_clmul != 0 かつ cpu_has_clmul()) を呼ぶ"},
           {"do": "s_crc_ready = 1(release で書く)"}
         ]},
         {"call": "bfm_unlock(&s_crc_lock) を呼ぶ"}
       ]
     },
     {
-      "func": "crc16",
-      "summary": "`p` の `len` バイトの CRC16(T10-DIF: 多項式 0x8BB7、初期値 0、反転なし)を求める。8 バイトずつ表を引き(slice-by-8)、残りを 1 バイトずつ処理する。",
-      "args": {"p": "データ", "len": "バイト数"},
-      "ret": "CRC16 の値。",
-      "pre": "特になし。",
-      "notes": "表は `crc_ready()` で一度だけ作る(複数のコアから同時に呼ばれてもよい)。",
+      "func": "crc16_tab_upd",
+      "summary": "表の方法で、CRC の途中の値 `crc` から続けて `p` の `len` バイトを進める。8 バイトずつ表を引き(slice-by-8)、残りを 1 バイトずつ処理する。",
+      "args": {"crc": "途中の CRC の値(最初は 0)", "p": "データ", "len": "バイト数"},
+      "ret": "進めた後の CRC の値。",
+      "pre": "`crc_ready()` 済みであること。",
+      "notes": "`crc` から続けられるので、PCLMULQDQ の方法の仕上げ(最後の 8 バイトと、16 で割った余りのバイト)にも使う。",
       "flow": [
-        {"do": "crc = 0"},
-        {"call": "crc_ready() を呼ぶ"},
         {"while": "len >= 8 ?", "body": [
           {"do": "crc = s_crc_tab[7][p[0] ^ (crc >> 8)] ^ s_crc_tab[6][p[1] ^ (crc & 0xff)] ^ s_crc_tab[5][p[2]] ^ … ^ s_crc_tab[0][p[7]]"},
           {"do": "len -= 8、p += 8"}
@@ -65,6 +95,96 @@
           {"do": "len--、p++"}
         ]},
         {"return": "crc"}
+      ]
+    },
+    {
+      "func": "crc_fold",
+      "summary": "128 ビットの多項式 `x` を D ビット先へ畳み込む: x·x^D ≡ xh·kh ⊕ xl·kl(mod P)。`kh` = `k` の上の 64 ビット(x^(D+64) mod P)、`kl` = 下の 64 ビット(x^D mod P)、`xh` / `xl` = `x` の上 / 下の 64 ビット。キャリーなし乗算(`_mm_clmulepi64_si128`)2 回と XOR。",
+      "args": {"x": "畳み込む値(128 ビット。ビット i が x^i の係数)", "k": "定数の組(上 = x^(D+64) mod P、下 = x^D mod P)"},
+      "ret": "畳み込んだ値(80 ビット未満なので 128 ビットに収まる)。",
+      "pre": "CPU が PCLMULQDQ を持つこと(`target(\"pclmul,ssse3\")` の関数からだけ呼ぶ)。",
+      "notes": "`_mm_clmulepi64_si128` は最下位ビットを x^0 とする普通の多項式の掛け算なので、ビットの並びを逆にしない(この CRC は反転なし)。",
+      "flow": [
+        {"return": "clmul(x の上, k の上) ^ clmul(x の下, k の下)"}
+      ]
+    },
+    {
+      "func": "crc16_clmul",
+      "summary": "PCLMULQDQ の方法で `p` の `len` バイト(64 以上)の CRC16 を求める。16 バイトずつバイト順を逆にして読み(先頭のバイトの最上位ビットが x^127)、最初の 64 バイトを 4 本の並び a0〜a3 にする。残りを 64 バイトずつ、4 本をそれぞれ 512 ビット先へ畳み込んで(`crc_fold()`、定数 x^576・x^512)次の 64 バイトを XOR する。a0·x^384 ⊕ a1·x^256 ⊕ a2·x^128 ⊕ a3 で 1 本にまとめ、残りの 16 バイトずつを 128 ビット先へ畳み込んで足す。最後に x^64 mod P との乗算 2 回で 64 ビットの Z まで縮め、Z の 8 バイト(上から)を表で進めて CRC(= Z·x^16 mod P)にし、16 で割った余りのバイトを表で続ける。",
+      "args": {"p": "データ(境界は揃っていなくてよい)", "len": "バイト数(64 以上)"},
+      "ret": "CRC16 の値(表の方法と同じ)。",
+      "pre": "`crc_ready()` 済みで、CPU が PCLMULQDQ と SSSE3 を持つこと(`crc16()` が `s_crc_use_clmul` を見てから呼ぶ)。",
+      "notes": "* `__attribute__((target(\"pclmul,ssse3\")))` でこの関数だけ命令を使う(ライブラリ全体のコンパイルの設定は変えない。VxWorks でも同じ)。\n* 4 本を並べるのは、乗算の遅延(数サイクル)を重ねて隠すため。512 バイトは 16 バイト × 32 = 4 本 × 8 回。\n* どの段の値も、ここまでのデータ(多項式)と mod P で等しい。CRC = (データ)·x^16 mod P なので、最後に 16 ビットずらす分を表で行う。\n* 結果は `bfmem_test crc` で表の方法・1 ビットずつの方法と比べて確かめた(長さ 0〜2100 バイトと、乱数の長さ・位置 2 万通り)。",
+      "flow": [
+        {"do": "bswap = バイト順を逆にする並べ替え、k512・k384・k256・k128・k64 = s_crc_k[] の組、n = len / 16"},
+        {"do": "a0〜a3 = p の最初の 64 バイト(16 バイトずつバイト順を逆にして読む)、p += 64、n -= 4"},
+        {"while": "n >= 4 ?", "body": [
+          {"call": "a0〜a3 = crc_fold(a0〜a3, k512) ^ p の次の 64 バイト を呼ぶ"},
+          {"do": "n -= 4、p += 64"}
+        ]},
+        {"call": "x = crc_fold(a0, k384) ^ crc_fold(a1, k256) ^ crc_fold(a2, k128) ^ a3 を呼ぶ"},
+        {"while": "n > 0 ?", "body": [
+          {"call": "x = crc_fold(x, k128) ^ p の次の 16 バイト を呼ぶ"},
+          {"do": "n--、p += 16"}
+        ]},
+        {"do": "t = clmul(x の上, x^64 mod P) ^ x の下、t = clmul(t の上, x^64 mod P) ^ t の下、z = t の下 64 ビット"},
+        {"do": "zb = z の 8 バイト(上から)"},
+        {"call": "crc16_tab_upd(crc16_tab_upd(0, zb, 8), p, len % 16) を呼ぶ"},
+        {"return": "その値"}
+      ]
+    },
+    {
+      "func": "crc16",
+      "summary": "`p` の `len` バイトの CRC16(T10-DIF: 多項式 0x8BB7、初期値 0、反転なし)を求める。PCLMULQDQ の方法を使う(`s_crc_use_clmul`)ときで、`len` が 64 以上なら `crc16_clmul()`、そうでなければ表の方法(`crc16_tab_upd()`)。",
+      "args": {"p": "データ", "len": "バイト数"},
+      "ret": "CRC16 の値(どちらの方法でも同じ)。",
+      "pre": "特になし。",
+      "notes": "* 表と定数は `crc_ready()` で一度だけ作る(複数のコアから同時に呼ばれてもよい)。\n* DIF では 1 ブロックのデータ 512 バイトに使う。512 バイトあたり、OptiPlex(i3-8100)で 183ns → 42ns、Precision(Xeon W-2245)で 146ns → 32ns(`bfmem_test crc`)。",
+      "flow": [
+        {"call": "crc_ready() を呼ぶ"},
+        {"if": "s_crc_use_clmul かつ len >= 64 ?", "then": [
+          {"call": "crc16_clmul(p, len) を呼ぶ"},
+          {"return": "その値"}
+        ]},
+        {"call": "crc16_tab_upd(0, p, len) を呼ぶ"},
+        {"return": "その値"}
+      ]
+    },
+    {
+      "func": "bfm_dif_crc16",
+      "summary": "試験用(`bfmem_test crc`): 使う方法(`crc16()`)で `p` の `len` バイトの CRC16 を返す。",
+      "args": {"p": "データ", "len": "バイト数"},
+      "ret": "CRC16 の値。",
+      "pre": "特になし。",
+      "notes": "内部の関数(`bfm_internal.h`)。アプリケーションは使わない。",
+      "flow": [
+        {"call": "crc16(p, len) を呼ぶ"},
+        {"return": "その値"}
+      ]
+    },
+    {
+      "func": "bfm_dif_crc16_table",
+      "summary": "試験用(`bfmem_test crc`): 表の方法だけで `p` の `len` バイトの CRC16 を返す(PCLMULQDQ の方法と比べるため)。",
+      "args": {"p": "データ", "len": "バイト数"},
+      "ret": "CRC16 の値。",
+      "pre": "特になし。",
+      "notes": "内部の関数(`bfm_internal.h`)。",
+      "flow": [
+        {"call": "crc_ready() を呼ぶ"},
+        {"call": "crc16_tab_upd(0, p, len) を呼ぶ"},
+        {"return": "その値"}
+      ]
+    },
+    {
+      "func": "bfm_dif_crc_clmul",
+      "summary": "試験用(`bfmem_test crc`): CRC16 に PCLMULQDQ の方法を使っているか(`s_crc_use_clmul`)を返す。",
+      "args": {},
+      "ret": "1: 使っている。0: 表の方法だけ。",
+      "pre": "特になし。",
+      "notes": "内部の関数(`bfm_internal.h`)。",
+      "flow": [
+        {"call": "crc_ready() を呼ぶ"},
+        {"return": "s_crc_use_clmul"}
       ]
     },
     {

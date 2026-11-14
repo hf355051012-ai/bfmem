@@ -505,6 +505,10 @@ void bfm_async_done(struct bfm_conn *c, uint32_t pc, const volatile uint8_t *cqe
 /* bfm_dif.c */
 void bfm_dif_init_reset(bfm_dev_t *d);
 int  bfm_dif_init_step(bfm_dev_t *d);
+/* T10-DIF の CRC16(試験用。bfmem_test crc が使う): 使う方法での値、表だけでの値、PCLMULQDQ を使っているか。 */
+uint16_t bfm_dif_crc16(const void *p, uint32_t len);
+uint16_t bfm_dif_crc16_table(const void *p, uint32_t len);
+int  bfm_dif_crc_clmul(void);
 void bfm_dif_attach(struct bfm_conn *c);   /* 接続ができたとき(bfm_ops_attach() から)*/
 
 #endif /* BFM_INTERNAL_H */

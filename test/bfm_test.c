@@ -92,7 +92,7 @@ static void usage(void)
            "                   [-Q 多重度 1-64] [-a ack timeout] [-R ずらし] [-B] [-S] [-C] [-x] [-q] [-P] [-z] [-L] [-v]\n"
            "                   run <相手のIP> [ポート1の相手のIP] | serve <相手のIP> [ポート1の相手のIP] |\n"
            "                   race <相手のIP> [ポート1の相手のIP] | wpost <相手のIP> [ポート1の相手のIP] |\n"
-           "                   perf <相手のIP> [ポート1の相手のIP] |\n"
+           "                   perf <相手のIP> [ポート1の相手のIP] | crc |\n"
            "                   bench <相手のIP> | info <相手のIP>\n"
            "  両方のノードで同じものを動かす。IP の小さいほうが掛け側になる(自動)。相手の MAC も自動で取る\n"
            "  run: -t 本(既定 4)のスレッドが bfm_run() を同時に呼んで全部の接続(-c 本 x ポート。既定 16)を張り、\n"
@@ -108,6 +108,8 @@ static void usage(void)
            "         -n 秒(既定 5)x 3 回、同時に打つ(両方のノードで動かす = 両方向)。コアごとの速さと偏りを出す\n"
            "  perf: コアの数 1〜4 で、write_post・read・read_async・CAS・FAA・DIF の write / read(CHECK)の\n"
            "        IOPS・MB/s・平均の遅延を、長さごとに -n 秒(既定 2)ずつ測る(両方のノードで動かす = 両方向)\n"
+           "  crc: T10-DIF の CRC16 だけを確かめる(相手も NIC も要らない)。PCLMULQDQ・表・1 ビットずつの値の一致と、\n"
+           "       512 バイトあたりの速さ(表 / 使う方法)を -n 秒(既定 1)ずつ\n"
            "  bench: write / read を 4B〜256KiB、多重度 1・4・8・16 で -n 回(既定 100000)ずつ流し、\n"
            "         IOPS・MB/s・平均遅延を出す(接続 1 本。相手は serve -c 1)\n"
            "  -B  BlueFlame を使わない(8 バイトのドアベルだけ。比べるため)\n"
@@ -2247,7 +2249,7 @@ static int run_perf(uint32_t secs)
 {
     static struct perf_arg args[PERF_CORES];
     static const struct { int kind; uint32_t size; } items[] = {
-        {PF_WPOST, 4}, {PF_WPOST, 64}, {PF_WPOST, 256}, {PF_WPOST, PERF_BIG},
+        {PF_WPOST, 4}, {PF_WPOST, 64},   /* bfm_write_post() は bfm_inline_max()(220 バイト)までなので 256 バイト以上は測らない */
         {PF_READ, 4}, {PF_READ, 64}, {PF_READ, 256}, {PF_READ, PERF_BIG},
         {PF_RASYNC, 4}, {PF_RASYNC, 64}, {PF_RASYNC, 256}, {PF_RASYNC, PERF_BIG},
         {PF_CAS, 4}, {PF_CAS, 8}, {PF_FAA, 4}, {PF_FAA, 8},
@@ -2334,6 +2336,59 @@ static int run_perf(uint32_t secs)
     return g_ng ? 1 : 0;
 }
 
+/* ---------------------------------------------------------------------
+ * crc: T10-DIF の CRC16 だけを確かめる(相手も NIC も要らない)。
+ *   1. 使う方法(PCLMULQDQ があればそれ)・表だけ・1 ビットずつ の 3 つの値が、長さ 0〜2100 バイトと、乱数の長さ・
+ *      位置(16 バイトの境界からずらす)で一致すること
+ *   2. 512 バイト(1 ブロック)ずつの速さ(表だけ / 使う方法)。-n 秒(既定 1)ずつ
+ * ------------------------------------------------------------------- */
+
+static int run_crc(uint32_t secs)
+{
+    static uint8_t buf[1u << 20];
+    uint64_t x = 0x9e3779b97f4a7c15ull;
+    for (uint32_t i = 0; i < sizeof(buf); i++) {
+        x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+        buf[i] = (uint8_t)x;
+    }
+    printf("crc: CPU が PCLMULQDQ の方法を使う: %s(g_bfm_dif_clmul = %u)\n", bfm_dif_crc_clmul() ? "はい" : "いいえ",
+           g_bfm_dif_clmul);
+    /* 1. 一致 */
+    uint32_t bad = 0, n = 0;
+    for (uint32_t len = 0; len <= 2100u; len++, n++) {
+        const uint8_t *p = buf + (len * 7u) % 64u;
+        const uint16_t a = bfm_dif_crc16(p, len), b = bfm_dif_crc16_table(p, len), c = crc16_bitwise(p, len);
+        if (a != b || b != c) {
+            if (bad++ < 5) printf("crc: 長さ %u で違う(使う方法 0x%04x / 表 0x%04x / 1 ビットずつ 0x%04x)\n", len, a, b, c);
+        }
+    }
+    for (uint32_t k = 0; k < 20000u; k++, n++) {
+        x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+        const uint32_t len = (uint32_t)(x % 70000u), off = (uint32_t)((x >> 32) % 4096u);
+        const uint16_t a = bfm_dif_crc16(buf + off, len), b = bfm_dif_crc16_table(buf + off, len);
+        if (a != b) {
+            if (bad++ < 5) printf("crc: 長さ %u・位置 %u で違う(使う方法 0x%04x / 表 0x%04x)\n", len, off, a, b);
+        }
+    }
+    printf("crc: [1] %u 通りで、使う方法・表・(2100 バイトまでは)1 ビットずつが一致: %s(違い %u)\n", n, bad ? "NG" : "OK", bad);
+    /* 2. 速さ(512 バイトずつ。1MiB の中を順に)*/
+    if (secs == 0) secs = 1;
+    for (int m = 0; m < 2; m++) {
+        const uint64_t t0 = now_ns(), end = t0 + (uint64_t)secs * 1000000000ull;
+        uint64_t blocks = 0;
+        uint32_t acc = 0;
+        while (now_ns() < end) {
+            for (uint32_t off = 0; off < sizeof(buf); off += BFM_DIF_BLOCK, blocks++)
+                acc ^= m ? bfm_dif_crc16(buf + off, BFM_DIF_BLOCK) : bfm_dif_crc16_table(buf + off, BFM_DIF_BLOCK);
+        }
+        const double ns = (double)(now_ns() - t0);
+        printf("crc: [2] %-18s 512 バイトあたり %6.1f ns、%6.2f GB/s(%llu ブロック、検算 %04x)\n",
+               m ? (bfm_dif_crc_clmul() ? "PCLMULQDQ" : "使う方法(表)") : "表(slice-by-8)", ns / (double)blocks,
+               (double)blocks * BFM_DIF_BLOCK / ns, (unsigned long long)blocks, acc);
+    }
+    return bad ? 1 : 0;
+}
+
 /* info: ポートを立ち上げて能力を表示する(接続は待たない)。 */
 static int run_info(void)
 {
@@ -2392,6 +2447,7 @@ int main(int argc, char **argv)
         default: usage(); return 2;
         }
     }
+    if (optind < argc && strcmp(argv[optind], "crc") == 0) return run_crc(iters);   /* 相手も NIC も要らない */
     if (optind + 1 >= argc) { usage(); return 2; }
     const char *mode = argv[optind];
     if (parse_ip(argv[optind + 1], &g_bfm_peer_ip[0]) != 0) { usage(); return 2; }

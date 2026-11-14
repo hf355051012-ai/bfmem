@@ -25,6 +25,8 @@
  * 転送が進むのは bfm_dif_poll() / bfm_dif_wait() の中だけ(割り込みは使わない)。 */
 #include "bfm_internal.h"
 
+#include <cpuid.h>
+#include <immintrin.h>
 #include <string.h>
 
 #define BLK    BFM_DIF_BLOCK
@@ -32,10 +34,21 @@
 #define BLK_PI (BFM_DIF_BLOCK + BFM_DIF_PI)
 
 /* ---------------------------------------------------------------------
- * CRC16(T10-DIF: 多項式 0x8BB7、初期値 0、反転なし)
+ * CRC16(T10-DIF: 多項式 P = x^16 + 0x8BB7、初期値 0、反転なし。CRC(M) = M(x)·x^16 mod P)
+ *
+ * 2 つの方法を持ち、CPU が PCLMULQDQ と SSSE3 を持っていれば(かつ g_bfm_dif_clmul が 1 なら)速いほうを使う。
+ *   表: 8 バイトずつ表を引く(slice-by-8)。どの x86-64 でも使える。
+ *   PCLMULQDQ: 16 バイトを 128 ビットの多項式として読み(バイト順を逆にして、先頭のバイトの最上位ビットを x^127 に)、
+ *     キャリーなし乗算で畳み込む(Intel の「Fast CRC Computation for Generic Polynomials Using PCLMULQDQ」、
+ *     Linux の crct10dif-pclmul と同じ考え)。X·x^D ≡ Xh·(x^(D+64) mod P) ⊕ Xl·(x^D mod P)(Xh・Xl は X の上下 64 ビット)
+ *     で、乗算 2 回で 128 ビットに戻る。4 本の並びを 64 バイトずつ同時に進め(D = 512)、最後に 1 本にまとめ、
+ *     64 ビットまで縮めてから表を 8 バイト分引いて CRC にする。64 バイトより短いもの・16 で割った余りは表で続ける。
  * ------------------------------------------------------------------- */
-/* 8 バイトずつ表を引く(slice-by-8)。s_crc_tab[k][n] = バイト n の後に 0 が k バイト続くときの CRC。 */
+/* 表: s_crc_tab[k][n] = バイト n の後に 0 が k バイト続くときの CRC。 */
 static uint16_t s_crc_tab[8][256];
+/* 畳み込みの定数(x^n mod P)。添字は n / 64(n = 64, 128, ..., 576)。 */
+static uint64_t s_crc_k[10];
+static int s_crc_use_clmul;                 /* 1 = PCLMULQDQ の方法を使う */
 
 static void crc_table_init(void)
 {
@@ -52,9 +65,28 @@ static void crc_table_init(void)
     }
 }
 
-/* 表を一度だけ作る(複数のコアから同時に呼ばれてもよいように、作り終えたことを旗で知らせる)。 */
-static uint32_t s_crc_ready;                /* 表を作り終えた(acquire / release で読み書きする)*/
-static bfm_lock_t s_crc_lock;               /* 表を作るのを 1 つのコアだけにする鍵 */
+/* x^n mod P(16 ビット未満の多項式)。 */
+static uint64_t xpow_mod(uint32_t n)
+{
+    uint32_t r = 1u;                        /* x^0 */
+    for (uint32_t i = 0; i < n; i++) {
+        r <<= 1;
+        if (r & 0x10000u) r ^= 0x18bb7u;
+    }
+    return r;
+}
+
+/* CPU が PCLMULQDQ(CPUID 1 の ecx[1])と SSSE3(ecx[9])を持つか。CPUID はコンパイラの <cpuid.h> で読む(OS は使わない)。 */
+static int cpu_has_clmul(void)
+{
+    unsigned a, b, c, d;
+    if (!__get_cpuid(1, &a, &b, &c, &d)) return 0;
+    return (c & bit_PCLMUL) && (c & bit_SSSE3);
+}
+
+/* 表と定数を一度だけ作り、方法を決める(複数のコアから同時に呼ばれてもよいように、作り終えたことを旗で知らせる)。 */
+static uint32_t s_crc_ready;                /* 作り終えた(acquire / release で読み書きする)*/
+static bfm_lock_t s_crc_lock;               /* 作るのを 1 つのコアだけにする鍵 */
 
 static void crc_ready(void)
 {
@@ -62,22 +94,91 @@ static void crc_ready(void)
     bfm_lock(&s_crc_lock);
     if (!s_crc_ready) {
         crc_table_init();
+        for (uint32_t i = 1; i < 10u; i++) s_crc_k[i] = xpow_mod(i * 64u);
+        s_crc_use_clmul = (g_bfm_dif_clmul != 0) && cpu_has_clmul();
         __atomic_store_n(&s_crc_ready, 1u, __ATOMIC_RELEASE);
     }
     bfm_unlock(&s_crc_lock);
 }
 
-static uint16_t crc16(const uint8_t *p, uint32_t len)
+/* 表: crc から続けて p の len バイトを進める。 */
+static uint32_t crc16_tab_upd(uint32_t crc, const uint8_t *p, uint32_t len)
 {
-    uint32_t crc = 0;
-    crc_ready();
     for (; len >= 8u; len -= 8u, p += 8) {
         crc = (uint32_t)s_crc_tab[7][p[0] ^ (crc >> 8)] ^ s_crc_tab[6][p[1] ^ (crc & 0xffu)] ^
               s_crc_tab[5][p[2]] ^ s_crc_tab[4][p[3]] ^ s_crc_tab[3][p[4]] ^ s_crc_tab[2][p[5]] ^
               s_crc_tab[1][p[6]] ^ s_crc_tab[0][p[7]];
     }
     for (; len > 0; len--, p++) crc = ((crc << 8) ^ s_crc_tab[0][((crc >> 8) ^ *p) & 0xffu]) & 0xffffu;
-    return (uint16_t)crc;
+    return crc;
+}
+
+/* X(128 ビット)を D ビット先へ畳み込む: X·x^D ≡ Xh·kh ⊕ Xl·kl(k の上の 64 ビット = x^(D+64) mod P、下 = x^D mod P)。 */
+__attribute__((target("pclmul,ssse3")))
+static inline __m128i crc_fold(__m128i x, __m128i k)
+{
+    return _mm_xor_si128(_mm_clmulepi64_si128(x, k, 0x11), _mm_clmulepi64_si128(x, k, 0x00));
+}
+
+/* PCLMULQDQ: p の len バイト(64 以上)の CRC。16 で割り切れる分を畳み込み、残りは表で続ける。 */
+__attribute__((target("pclmul,ssse3")))
+static uint16_t crc16_clmul(const uint8_t *p, uint32_t len)
+{
+    const __m128i bswap = _mm_set_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+#define CRC_LOAD(q) _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)(const void *)(q)), bswap)
+    const __m128i k512 = _mm_set_epi64x((long long)s_crc_k[9], (long long)s_crc_k[8]);   /* x^576, x^512 */
+    const __m128i k384 = _mm_set_epi64x((long long)s_crc_k[7], (long long)s_crc_k[6]);   /* x^448, x^384 */
+    const __m128i k256 = _mm_set_epi64x((long long)s_crc_k[5], (long long)s_crc_k[4]);   /* x^320, x^256 */
+    const __m128i k128 = _mm_set_epi64x((long long)s_crc_k[3], (long long)s_crc_k[2]);   /* x^192, x^128 */
+    const __m128i k64 = _mm_set_epi64x(0, (long long)s_crc_k[1]);                        /* x^64 */
+    uint32_t n = len / 16u;
+    __m128i a0 = CRC_LOAD(p), a1 = CRC_LOAD(p + 16), a2 = CRC_LOAD(p + 32), a3 = CRC_LOAD(p + 48);
+    p += 64;
+    n -= 4u;
+    for (; n >= 4u; n -= 4u, p += 64) {       /* 4 本を 64 バイトずつ進める */
+        a0 = _mm_xor_si128(crc_fold(a0, k512), CRC_LOAD(p));
+        a1 = _mm_xor_si128(crc_fold(a1, k512), CRC_LOAD(p + 16));
+        a2 = _mm_xor_si128(crc_fold(a2, k512), CRC_LOAD(p + 32));
+        a3 = _mm_xor_si128(crc_fold(a3, k512), CRC_LOAD(p + 48));
+    }
+    /* 1 本にまとめる: a0·x^384 ⊕ a1·x^256 ⊕ a2·x^128 ⊕ a3 */
+    __m128i x = _mm_xor_si128(_mm_xor_si128(crc_fold(a0, k384), crc_fold(a1, k256)),
+                              _mm_xor_si128(crc_fold(a2, k128), a3));
+    for (; n > 0u; n--, p += 16) x = _mm_xor_si128(crc_fold(x, k128), CRC_LOAD(p));   /* 残りの 16 バイトずつ */
+#undef CRC_LOAD
+    /* 128 ビット -> 80 ビット未満 -> 64 ビット(どれも X と mod P で等しい)*/
+    __m128i t = _mm_xor_si128(_mm_clmulepi64_si128(x, k64, 0x01), _mm_move_epi64(x));
+    t = _mm_xor_si128(_mm_clmulepi64_si128(t, k64, 0x01), _mm_move_epi64(t));
+    const uint64_t z = (uint64_t)_mm_cvtsi128_si64(t);
+    /* CRC = Z·x^16 mod P = Z の 8 バイト(上から)を表で進めたもの。続けて 16 で割った余りのバイトを進める */
+    uint8_t zb[8];
+    for (int i = 0; i < 8; i++) zb[i] = (uint8_t)(z >> (56 - 8 * i));
+    return (uint16_t)crc16_tab_upd(crc16_tab_upd(0, zb, 8u), p, len % 16u);
+}
+
+static uint16_t crc16(const uint8_t *p, uint32_t len)
+{
+    crc_ready();
+    if (s_crc_use_clmul && len >= 64u) return crc16_clmul(p, len);
+    return (uint16_t)crc16_tab_upd(0, p, len);
+}
+
+/* 試験用(bfmem_test crc): 使う方法での CRC、表だけでの CRC、PCLMULQDQ を使っているか。 */
+uint16_t bfm_dif_crc16(const void *p, uint32_t len)
+{
+    return crc16((const uint8_t *)p, len);
+}
+
+uint16_t bfm_dif_crc16_table(const void *p, uint32_t len)
+{
+    crc_ready();
+    return (uint16_t)crc16_tab_upd(0, (const uint8_t *)p, len);
+}
+
+int bfm_dif_crc_clmul(void)
+{
+    crc_ready();
+    return s_crc_use_clmul;
 }
 
 void bfm_dif_make_pi(const void *data, uint16_t app_tag, uint32_t ref_tag, uint8_t pi[8])

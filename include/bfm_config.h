@@ -137,6 +137,10 @@ extern uint32_t g_bfm_stage_size;
  * 普通の write / read の中継バッファとは別なので、DIF の転送の途中でも普通の操作を出せる。 */
 extern uint32_t g_bfm_dif_buf_size;
 
+/* T10-DIF(BFM_DIF_SW)の CRC16 の計算に PCLMULQDQ(キャリーなし乗算)を使うか。1 = CPU が PCLMULQDQ と SSSE3 を
+ * 持っていれば使う(既定)。0 = 表を 8 バイトずつ引く方法だけを使う(比べるとき)。最初に CRC を使う前に決めること。 */
+extern uint32_t g_bfm_dif_clmul;
+
 /* 多重度(1〜BFM_QD_MAX。0 か上限より大きければ BFM_QD_MAX)。1 本の接続で同時に仕掛かり中にできる
  * bfm_write_async() / bfm_read_async() の数。これを超えて出そうとすると、完了を刈り取って枠を空けてから出す。 */
 extern uint32_t g_bfm_qdepth;

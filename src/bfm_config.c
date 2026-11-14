@@ -64,6 +64,7 @@ uint64_t g_bfm_mr_size  = 0x40000000ull;            /* 公開メモリの大き�
 uint32_t g_bfm_fw_pages_max = 16384u;               /* FW に渡すページの上限(ポートごと)。64MiB */
 uint32_t g_bfm_stage_size   = 65536u;               /* 接続ごとの中継バッファの大きさ。64KiB */
 uint32_t g_bfm_dif_buf_size = 131072u;              /* 接続ごとの T10-DIF 用の中継バッファの大きさ。2 面 x 64KiB */
+uint32_t g_bfm_dif_clmul    = 1u;                   /* DIF の CRC16 に PCLMULQDQ を使う(CPU にあれば)*/
 uint32_t g_bfm_qdepth       = BFM_QD_MAX;           /* 多重度。64 */
 uint32_t g_bfm_async_buf_size   = 4096u;            /* 多重度の枠ごとの中継バッファ。4KiB(非同期の操作の長さの上限)*/
 uint32_t g_bfm_async_timeout_ms = 100u;             /* 非同期の操作の時間切れ。出してから 100ms */

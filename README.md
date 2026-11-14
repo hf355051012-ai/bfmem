@@ -359,6 +359,9 @@ PI は guard(データの CRC16、多項式 0x8BB7)・app tag・ref tag(ブロ�
   交互に使う。片方を NIC が運ぶ間に、もう片方を CPU が用意・検査する。普通の write / read の中継バッファとは別なので、
   DIF の転送の途中でも同じ接続で普通の操作を出してよい。
 - HW では面ごとに署名つき MKey と PSV を持ち、SIG_ERR の CQE に入っている MKey で、どちらの面の誤りかを見分ける。
+- SW の CRC16 は、CPU が PCLMULQDQ と SSSE3 を持てば、キャリーなし乗算で 16 バイトずつ畳み込む(Linux の crct10dif-pclmul と
+  同じ考え。4 本を並べて進める)。持たなければ 8 バイトずつ表を引く(slice-by-8)。512 バイトあたり、OptiPlex(i3-8100)で
+  183ns → 42ns、Precision(Xeon W-2245)で 146ns → 32ns(`bfmem_test crc`。相手も NIC も要らない)。`g_bfm_dif_clmul = 0` で表だけにできる。
 
 **モード(`mode`)**
 
@@ -413,6 +416,7 @@ PI は guard(データの CRC16、多項式 0x8BB7)・app tag・ref tag(ブロ�
 | `g_bfm_fw_pages_max` | FW に渡すページの上限(ポートごと)|
 | `g_bfm_stage_size` | 接続ごとの中継バッファ |
 | `g_bfm_dif_buf_size` | 接続ごとの T10-DIF 用の中継バッファ(2 面に分けて交互に使う。既定 128KiB)|
+| `g_bfm_dif_clmul` | DIF の CRC16 に PCLMULQDQ を使う(既定 1 = CPU にあれば使う。0 = 表だけ)|
 | `g_bfm_qdepth` | 多重度(1〜`BFM_QD_MAX` = 64、既定 64。完了を待たずに出しておける `bfm_*_async()` の数)|
 | `g_bfm_async_buf_size` | 多重度の枠ごとの中継バッファ(既定 4KiB = 非同期の操作の長さの上限。接続 1 本で 64 倍使う)|
 | `g_bfm_async_timeout_ms` | 非同期の操作の時間切れ(既定 100ms。枠の空き待ち・`bfm_test()`・`bfm_check()`)|
