@@ -136,7 +136,7 @@ Precision `b3:00.1`、ポート 1 は 192.168.102.11 / .21)ので、2 ポート�
 - **書いた FW を動かすにはカードのリセットが要る。** Precision の ConnectX-4 Lx は MFRL の level 3(PCI のリセット)に対応して
   いて、MFRL に level 3 を書いてルートポート `0000:b2:00.0` でリンクを切って繋ぎ直せば、ホストを再起動せずに切り替わる
   (`TEST_PLAN.md`)。14.29.1016 は MCAM に MFRL を載せていないので、Linux の `devlink … fw_activate` は断られる。
-  **Precision の ConnectX は 2026-11-14 から FW 14.32.1912**(OptiPlex は 14.29.1016 のまま)。
+  **Precision の ConnectX は 2026-11-14 から FW 14.32.1912**(OptiPlex は 14.32.1900)。
 
 ## vfio_nvme から引き継ぐ落とし穴
 

@@ -776,4 +776,6 @@ devlink dev info pci/0000:b3:00.0        # running / stored の版
      (rescan で VMD の下の橋の I/O の窓の「can't assign」が出るが、カードとは関係ない)
 - 14.32.1912 の上で bfmem のポート 0 が立ち上がった(FW 14.32.1912 cmdif_rev=5、準備完了)。**14.32.1912 は MCAM に MFRL を
   載せている**(mfrl = 1)ので、この版からは Linux の `devlink … fw_activate` も使えるはず(試していない)。
-- OptiPlex(14.29.1016 のまま)との `run` はまだ流していない。
+- OptiPlex(FW 14.32.1900。前から 14.29.1016 ではなかった)と、両方で同じ `run` を流した: **合格。** 両方とも検査 49 件が OK・NG 0、
+  mt も NG 0、「模型の hash」と相手の「自分の公開メモリの hash」が両方の向きで `e92cdeb4e6b0c81d`。Precision(受け側)は
+  7.82 秒、OptiPlex(掛け側)は 0.40 秒で全部の接続が使えた。終わった後、3 つとも mlx5_core に戻した。
