@@ -295,65 +295,68 @@ LADDER_BOOT = [
     ("msg", "cpu", "nic", "設定空間の書き込み: Command の Bus Master を落とす"),
 ]
 
-LADDER_DATA = [
-    ("phase", "write(220 バイトまで。データを WQE に埋め込む。BlueFlame)"),
-    ("msg", "cpu", "mem", "書く: WQE(ctrl 16 + raddr 16 + 埋め込みのデータ)を SQ へ、doorbell record[1] = sq_pc"),
-    ("msg", "cpu", "nic", "MMIO 書き(WC): BlueFlame の窓(UAR + 0x800)へ WQE 全体 → sfence"),
-    ("act", "nic", "WQE を実行する(リングもデータも読みに行かない)"),
-    ("msg", "nic", "peer", "RoCE v2: RDMA WRITE Only(データは WQE の中。1 パケット)"),
-    ("act", "peer", "相手の公開メモリへ DMA 書き"),
-    ("msg", "peer", "nic", "RoCE v2: ACK", "ret"),
-    ("msg", "nic", "mem", "DMA 書き: CQE(通知を求めた WQE)"),
-    ("msg", "cpu", "mem", "読む: CQE の owner を見て完了を知る。CQ の doorbell record を進める"),
-    ("phase", "write(221 バイト以上。中継バッファから。1 回に 64KiB まで、超える分は完了を待って繰り返す)"),
-    ("msg", "cpu", "mem", "書く: 送るデータを呼び出し側から中継バッファへ写す"),
-    ("msg", "cpu", "mem", "書く: WQE(ctrl 16 + raddr 16 + data セグメント 16 = 中継バッファの物理アドレス・lkey・長さ)を SQ へ、"
-                          "doorbell record[1] = sq_pc"),
-    ("msg", "cpu", "nic", "MMIO 書き(WC): BlueFlame の窓へ WQE 全体(64 バイト)→ sfence"),
-    ("act", "nic", "WQE を実行する(リングは読みに行かない)"),
-    ("msg", "nic", "mem", "DMA 読み: 中継バッファから送るデータ"),
-    ("msg", "nic", "peer", "RoCE v2: RDMA WRITE First(最初の 1024 バイト。経路 MTU ごとに分ける)"),
-    ("act", "peer", "相手の公開メモリへ DMA 書き"),
-    ("msg", "nic", "peer", "RoCE v2: RDMA WRITE Middle(1024 バイトずつ、残りが 1024 バイトを超える間)"),
-    ("act", "peer", "相手の公開メモリへ DMA 書き"),
-    ("msg", "nic", "peer", "RoCE v2: RDMA WRITE Last(残り。全体が 1024 バイト以下なら Only の 1 パケット)"),
-    ("act", "peer", "相手の公開メモリへ DMA 書き"),
-    ("msg", "peer", "nic", "RoCE v2: ACK(最後のパケットまで受け取った。途中の ACK もある)", "ret"),
-    ("msg", "nic", "mem", "DMA 書き: CQE(通知を求めた WQE)"),
-    ("msg", "cpu", "mem", "読む: CQE の owner を見て完了を知る。CQ の doorbell record を進める"),
-    ("phase", "read(32 バイトまで。応答のデータを CQE に入れる = scatter to CQE。BlueFlame)"),
-    ("msg", "cpu", "mem", "書く: WQE(ctrl 16 + raddr 16 + data セグメント 16 = 中継バッファ)を SQ へ、doorbell record[1] = sq_pc"),
-    ("msg", "cpu", "nic", "MMIO 書き(WC): BlueFlame の窓へ WQE 全体(64 バイト)→ sfence"),
-    ("act", "nic", "WQE を実行する(リングは読みに行かない)"),
-    ("msg", "nic", "peer", "RoCE v2: RDMA READ の要求(相手の公開メモリの位置・rkey・長さ)"),
-    ("act", "peer", "相手の公開メモリから DMA 読み"),
-    ("msg", "peer", "nic", "RoCE v2: RDMA READ Response Only(データ)", "ret"),
-    ("msg", "nic", "mem", "DMA 書き: CQE(データも CQE の中。中継バッファには書かない)"),
-    ("msg", "cpu", "mem", "読む: CQE の owner を見て、CQE からデータを呼び出し側へ写す。CQ の doorbell record を進める"),
-    ("phase", "read(33 バイト以上。応答のデータを中継バッファへ。1 回に 64KiB まで、超える分は完了を待って繰り返す)"),
-    ("msg", "cpu", "mem", "書く: WQE(ctrl 16 + raddr 16 + data セグメント 16 = 中継バッファ)を SQ へ、doorbell record[1] = sq_pc"),
-    ("msg", "cpu", "nic", "MMIO 書き(WC): BlueFlame の窓へ WQE 全体(64 バイト)→ sfence"),
-    ("act", "nic", "WQE を実行する(リングは読みに行かない)"),
-    ("msg", "nic", "peer", "RoCE v2: RDMA READ の要求(長さ全体を 1 つの要求で)"),
-    ("act", "peer", "相手の公開メモリから DMA 読み"),
-    ("msg", "peer", "nic", "RoCE v2: RDMA READ Response First(最初の 1024 バイト)", "ret"),
-    ("msg", "nic", "mem", "DMA 書き: 中継バッファへ"),
-    ("msg", "peer", "nic", "RoCE v2: RDMA READ Response Middle(1024 バイトずつ、残りが 1024 バイトを超える間)", "ret"),
-    ("msg", "nic", "mem", "DMA 書き: 中継バッファへ"),
-    ("msg", "peer", "nic", "RoCE v2: RDMA READ Response Last(残り。全体が 1024 バイト以下なら Only の 1 パケット)", "ret"),
-    ("msg", "nic", "mem", "DMA 書き: 中継バッファへ"),
-    ("msg", "nic", "mem", "DMA 書き: CQE(通知を求めた WQE)"),
-    ("msg", "cpu", "mem", "読む: CQE の owner を見て、中継バッファから呼び出し側へ写す。CQ の doorbell record を進める"),
-    ("phase", "write(BlueFlame が無い・WQE が窓に収まらないとき。例: 220 バイトまでの埋め込みの write)"),
-    ("msg", "cpu", "mem", "書く: WQE(ctrl 16 + raddr 16 + 埋め込みのデータ)を SQ へ、doorbell record[1] = sq_pc"),
-    ("msg", "cpu", "nic", "MMIO 書き(UC): ドアベル(UAR + 0x800)へ WQE の先頭 8 バイト"),
-    ("msg", "nic", "mem", "DMA 読み: SQ のリングから WQE(data セグメントの WQE なら、続けて送るデータも)"),
-    ("act", "nic", "WQE を実行する"),
-    ("msg", "nic", "peer", "RoCE v2: RDMA WRITE Only(データは WQE の中)"),
-    ("act", "peer", "相手の公開メモリへ DMA 書き"),
-    ("msg", "peer", "nic", "RoCE v2: ACK", "ret"),
-    ("msg", "nic", "mem", "DMA 書き: CQE(通知を求めた WQE)"),
-    ("msg", "cpu", "mem", "読む: CQE の owner を見て完了を知る。CQ の doorbell record を進める"),
+def _ladder_post(bf, wqe):
+    """WQE を SQ に積んで NIC に渡すまで(bf: BlueFlame を使うか。wqe: WQE の中身の説明)。"""
+    st = [("msg", "cpu", "mem", "書く: WQE(" + wqe + ")を SQ へ、doorbell record[1] = sq_pc")]
+    if bf:
+        st += [("msg", "cpu", "nic", "MMIO 書き(WC): BlueFlame の窓(UAR + 0x800)へ WQE 全体 → sfence"),
+               ("act", "nic", "WQE を実行する(SQ のリングは読みに行かない)")]
+    else:
+        st += [("msg", "cpu", "nic", "MMIO 書き(UC): ドアベル(UAR + 0x800)へ WQE の先頭 8 バイト"),
+               ("msg", "nic", "mem", "DMA 読み: SQ のリングから WQE"),
+               ("act", "nic", "WQE を実行する")]
+    return st
+
+
+def _ladder_ops(bf):
+    """こちらから出す write / read の 4 段(bf: BlueFlame を使う / 使わない)。"""
+    done = ("msg", "cpu", "mem", "読む: CQE の owner を見て完了を知る。CQ の doorbell record を進める")
+    st = [("phase", "write(220 バイトまで。データを WQE に埋め込む)")]
+    st += _ladder_post(bf, "ctrl 16 + raddr 16 + 埋め込みのデータ")
+    st += [("msg", "nic", "peer", "RoCE v2: RDMA WRITE Only(データは WQE の中。1 パケット)"),
+           ("act", "peer", "相手の公開メモリへ DMA 書き"),
+           ("msg", "peer", "nic", "RoCE v2: ACK", "ret"),
+           ("msg", "nic", "mem", "DMA 書き: CQE(通知を求めた WQE)"),
+           done]
+    st += [("phase", "write(221 バイト以上。中継バッファから。1 回に 64KiB まで、超える分は完了を待って繰り返す)"),
+           ("msg", "cpu", "mem", "書く: 送るデータを呼び出し側から中継バッファへ写す")]
+    st += _ladder_post(bf, "ctrl 16 + raddr 16 + data セグメント 16 = 中継バッファの物理アドレス・lkey・長さ")
+    st += [("msg", "nic", "mem", "DMA 読み: 中継バッファから送るデータ"),
+           ("msg", "nic", "peer", "RoCE v2: RDMA WRITE First(最初の 1024 バイト。経路 MTU ごとに分ける)"),
+           ("act", "peer", "相手の公開メモリへ DMA 書き"),
+           ("msg", "nic", "peer", "RoCE v2: RDMA WRITE Middle(1024 バイトずつ、残りが 1024 バイトを超える間)"),
+           ("act", "peer", "相手の公開メモリへ DMA 書き"),
+           ("msg", "nic", "peer", "RoCE v2: RDMA WRITE Last(残り。全体が 1024 バイト以下なら Only の 1 パケット)"),
+           ("act", "peer", "相手の公開メモリへ DMA 書き"),
+           ("msg", "peer", "nic", "RoCE v2: ACK(最後のパケットまで受け取った。途中の ACK もある)", "ret"),
+           ("msg", "nic", "mem", "DMA 書き: CQE(通知を求めた WQE)"),
+           done]
+    st += [("phase", "read(32 バイトまで。応答のデータを CQE に入れる = scatter to CQE)")]
+    st += _ladder_post(bf, "ctrl 16 + raddr 16 + data セグメント 16 = 中継バッファ")
+    st += [("msg", "nic", "peer", "RoCE v2: RDMA READ の要求(相手の公開メモリの位置・rkey・長さ)"),
+           ("act", "peer", "相手の公開メモリから DMA 読み"),
+           ("msg", "peer", "nic", "RoCE v2: RDMA READ Response Only(データ)", "ret"),
+           ("msg", "nic", "mem", "DMA 書き: CQE(データも CQE の中。中継バッファには書かない)"),
+           ("msg", "cpu", "mem", "読む: CQE の owner を見て、CQE からデータを呼び出し側へ写す。CQ の doorbell record を進める")]
+    st += [("phase", "read(33 バイト以上。応答のデータを中継バッファへ。1 回に 64KiB まで、超える分は完了を待って繰り返す)")]
+    st += _ladder_post(bf, "ctrl 16 + raddr 16 + data セグメント 16 = 中継バッファ")
+    st += [("msg", "nic", "peer", "RoCE v2: RDMA READ の要求(長さ全体を 1 つの要求で)"),
+           ("act", "peer", "相手の公開メモリから DMA 読み"),
+           ("msg", "peer", "nic", "RoCE v2: RDMA READ Response First(最初の 1024 バイト)", "ret"),
+           ("msg", "nic", "mem", "DMA 書き: 中継バッファへ"),
+           ("msg", "peer", "nic", "RoCE v2: RDMA READ Response Middle(1024 バイトずつ、残りが 1024 バイトを超える間)", "ret"),
+           ("msg", "nic", "mem", "DMA 書き: 中継バッファへ"),
+           ("msg", "peer", "nic", "RoCE v2: RDMA READ Response Last(残り。全体が 1024 バイト以下なら Only の 1 パケット)", "ret"),
+           ("msg", "nic", "mem", "DMA 書き: 中継バッファへ"),
+           ("msg", "nic", "mem", "DMA 書き: CQE(通知を求めた WQE)"),
+           ("msg", "cpu", "mem", "読む: CQE の owner を見て、中継バッファから呼び出し側へ写す。CQ の doorbell record を進める")]
+    return st
+
+
+LADDER_DATA_BF = _ladder_ops(True)
+LADDER_DATA_NOBF = _ladder_ops(False)
+
+LADDER_DATA_PEER = [
     ("phase", "相手からの write(こちらの CPU は関わらない)"),
     ("msg", "peer", "nic", "RoCE v2: RDMA WRITE(rkey で公開メモリを指す。長ければ First / Middle / Last に分かれる)"),
     ("msg", "nic", "mem", "DMA 書き: 公開メモリへ(rkey の範囲を外れれば断る)"),
@@ -419,7 +422,9 @@ def build(g):
     return {
         "block": (block(g), "ConnectX ブロック図"),
         "ladder_boot": (ladder(g, LADDER_BOOT), "ラダーチャート(起動・コマンド・資源)"),
-        "ladder_data": (ladder(g, LADDER_DATA), "ラダーチャート(データの転送)"),
+        "ladder_data_bf": (ladder(g, LADDER_DATA_BF), "ラダーチャート(データの転送・BlueFlame 有効)"),
+        "ladder_data_nobf": (ladder(g, LADDER_DATA_NOBF), "ラダーチャート(データの転送・BlueFlame 無効)"),
+        "ladder_data_peer": (ladder(g, LADDER_DATA_PEER), "ラダーチャート(データの転送・共通)"),
         "mailbox": (mailbox(g), "コマンドとメールボックス"),
         "qp": (qp(g), "QP の持ち方"),
         "boot": (g.layout_flow("", BOOT, "開始: bfm_dev_step()(ポートごと)"), "立ち上げの手順"),
