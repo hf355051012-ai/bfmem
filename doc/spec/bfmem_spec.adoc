@@ -27,46 +27,46 @@ bfmem の関数のうち、外から使うもの。関数名を押すと、そ�
 |関数 |説明
 2+h|代表 API(立ち上げ・接続・公開をまとめて進める)
 |<<src_bfm_core-bfm_run,`bfm_run()`>> |全部を待たずに少しずつ進める(上の説明)。どのコアから何本同時に呼んでもよい。 戻り値: `BFM_OK` = 全部の接続が使える。`BFM_INPROGRESS` = 途中(呼び続ける)。 負 = 失敗した接続がある(`BFM_ST_FAILED`。理由は表示する)。`BFM_E_STATE` = 止めている途中か、 エラー・切断のままの接続がある(`BFM_ST_DOWN`)。どの値でも、呼び続けてよい(ほかの接続は進む)。
-|<<src_bfm_cm-bfm_conn,`bfm_conn()`>> |ポート port の接続 i。使える(`BFM_ST_UP`)ときだけ返し、それ以外は NULL。
-|<<src_bfm_cm-bfm_conn_state,`bfm_conn_state()`>> |ポート port の接続 i の状態(`BFM_ST_*`)。
-|<<src_bfm_cm-bfm_reconnect,`bfm_reconnect()`>> |ポート port の接続 i が、エラーになった・相手が切った(`BFM_ST_DOWN`)か使える(`BFM_ST_UP`)とき、張り直すよう 頼む(相手へ BYE を送って畳み、`bfm_run()` が確立からやり直す)。その接続で転送しているコアが無いときに 呼ぶこと。相手のノードでは、その接続が `BFM_ST_DOWN` になるので、相手も `bfm_reconnect()` を呼ぶこと。 戻り値: `BFM_OK` = 頼んだ。`BFM_E_STATE` = 確立の途中・失敗した接続。`BFM_E_PARAM` = 使わない接続。
-|<<src_bfm_cm-bfm_conn_steplog,`bfm_conn_steplog()`>> |ポート port の接続 i の状態遷移の記録(接続の表を作ってからの遷移を、最後の `BFM_STEPLOG_N` 回まで)を 表示する。1 行に 1 回の遷移で、移った時刻(接続の表を作った時から)・移したコア(`bfm_port_cpu_id()`。 Linux は CPU の番号、VxWorks は APIC ID)・移る前と後の手順・移った先にとどまった時間(最後の行は今までの時間)。記録は `bfm_shutdown()` の後も残り、次の `bfm_run()` が 表を作り直すときに消える。どのコアから呼んでもよい(鍵を短い間だけ回って取る)。 戻り値: `BFM_OK` = 表示した。`BFM_E_PARAM` = 範囲外か、使わない接続。
+|<<src_bfm_cm-bfm_conn,`bfm_conn(port, i)`>> |ポート port の接続 i。使える(`BFM_ST_UP`)ときだけ返し、それ以外は NULL。
+|<<src_bfm_cm-bfm_conn_state,`bfm_conn_state(port, i)`>> |ポート port の接続 i の状態(`BFM_ST_*`)。
+|<<src_bfm_cm-bfm_reconnect,`bfm_reconnect(port, i)`>> |ポート port の接続 i が、エラーになった・相手が切った(`BFM_ST_DOWN`)か使える(`BFM_ST_UP`)とき、張り直すよう 頼む(相手へ BYE を送って畳み、`bfm_run()` が確立からやり直す)。その接続で転送しているコアが無いときに 呼ぶこと。相手のノードでは、その接続が `BFM_ST_DOWN` になるので、相手も `bfm_reconnect()` を呼ぶこと。 戻り値: `BFM_OK` = 頼んだ。`BFM_E_STATE` = 確立の途中・失敗した接続。`BFM_E_PARAM` = 使わない接続。
+|<<src_bfm_cm-bfm_conn_steplog,`bfm_conn_steplog(port, i)`>> |ポート port の接続 i の状態遷移の記録(接続の表を作ってからの遷移を、最後の `BFM_STEPLOG_N` 回まで)を 表示する。1 行に 1 回の遷移で、移った時刻(接続の表を作った時から)・移したコア(`bfm_port_cpu_id()`。 Linux は CPU の番号、VxWorks は APIC ID)・移る前と後の手順・移った先にとどまった時間(最後の行は今までの時間)。記録は `bfm_shutdown()` の後も残り、次の `bfm_run()` が 表を作り直すときに消える。どのコアから呼んでもよい(鍵を短い間だけ回って取る)。 戻り値: `BFM_OK` = 表示した。`BFM_E_PARAM` = 範囲外か、使わない接続。
 |<<src_bfm_core-bfm_shutdown,`bfm_shutdown()`>> |全部の接続を畳み(相手へ BYE を送る)、FW を止め(`TEARDOWN_HCA`)、Bus Master を落とす。待つところで `BFM_INPROGRESS` を返すので、`BFM_OK` が返るまで呼び続ける。立ち上げの途中でも呼べる(そこで止める)。 止めた後に `bfm_run()` を呼ぶと、最初から立ち上げ直す。
-|<<src_bfm_ops-bfm_is_up,`bfm_is_up()`>> |1 = 使える。0 = エラーか相手から切断された(`bfm_reconnect()` で張り直すこと)。
-|<<src_bfm_ops-bfm_remote_size,`bfm_remote_size()`>> |相手の公開メモリの大きさ(off の上限)。
+|<<src_bfm_ops-bfm_is_up,`bfm_is_up(c)`>> |1 = 使える。0 = エラーか相手から切断された(`bfm_reconnect()` で張り直すこと)。
+|<<src_bfm_ops-bfm_remote_size,`bfm_remote_size(c)`>> |相手の公開メモリの大きさ(off の上限)。
 2+h|メモリ操作(相手の公開メモリ + off)
-|<<src_bfm_ops-bfm_write,`bfm_write()`>> |書いて、相手の NIC が受け取った(ACK が返った)ところで戻る。 `bfm_inline_max()` バイトまではデータを WQE に埋め込み、BlueFlame で 1 回の MMIO 書き込みにする。それより長いものは中継バッファから送る。
-|<<src_bfm_ops-bfm_write_post,`bfm_write_post()`>> |書いて、完了を待たずに戻る(len <= `bfm_inline_max()`)。送る順に相手のメモリへ届く(RC の順序保証)。 完了は 1 つずつは知らせない。後で `bfm_flush()` を呼ぶと、それまでに出した write が全部 相手に受け取られた(ACK が返った)ところで `BFM_OK` が返る。どれかが失敗していればエラーが返る (どれが失敗したかは分からない)。SQ が満杯のときは、空きができるまでこの中で待つ。
-|<<src_bfm_ops-bfm_flush,`bfm_flush()`>> |`bfm_write_post()` で出した write が全部相手に受け取られる(ACK が返る)まで待つ。 `BFM_OK` = 全部届いた。どれかが失敗していればエラーを返す(どれが失敗したかは分からない)。
-|<<src_bfm_ops-bfm_read,`bfm_read()`>> |読む。32 バイトまでは応答が CQE に入るので、dst へ CPU で写す。
-|<<src_bfm_ops-bfm_cas,`bfm_cas()`>> |8 バイトの compare-and-swap。off は 8 の倍数。`*old` に元の値が入る (`*old` == expect なら置き換わった)。
-|<<src_bfm_ops-bfm_faa,`bfm_faa()`>> |8 バイトの fetch-and-add。off は 8 の倍数。`*old` に足す前の値が入る。
-|<<src_bfm_ops-bfm_cas32,`bfm_cas32()`>> |4 バイトの compare-and-swap。off は 4 の倍数。`*old` に元の値が入る。
-|<<src_bfm_ops-bfm_faa32,`bfm_faa32()`>> |4 バイトの fetch-and-add。off は 4 の倍数。`*old` に足す前の値が入る。
+|<<src_bfm_ops-bfm_write,`bfm_write(c, off, src, len)`>> |書いて、相手の NIC が受け取った(ACK が返った)ところで戻る。 `bfm_inline_max()` バイトまではデータを WQE に埋め込み、BlueFlame で 1 回の MMIO 書き込みにする。それより長いものは中継バッファから送る。
+|<<src_bfm_ops-bfm_write_post,`bfm_write_post(c, off, src, len)`>> |書いて、完了を待たずに戻る(len <= `bfm_inline_max()`)。送る順に相手のメモリへ届く(RC の順序保証)。 完了は 1 つずつは知らせない。後で `bfm_flush()` を呼ぶと、それまでに出した write が全部 相手に受け取られた(ACK が返った)ところで `BFM_OK` が返る。どれかが失敗していればエラーが返る (どれが失敗したかは分からない)。SQ が満杯のときは、空きができるまでこの中で待つ。
+|<<src_bfm_ops-bfm_flush,`bfm_flush(c)`>> |`bfm_write_post()` で出した write が全部相手に受け取られる(ACK が返る)まで待つ。 `BFM_OK` = 全部届いた。どれかが失敗していればエラーを返す(どれが失敗したかは分からない)。
+|<<src_bfm_ops-bfm_read,`bfm_read(c, off, dst, len)`>> |相手のメモリを読み、引数のポインタが指すバッファへ入れる。読み終わるまで待つ。 読んだデータは、32 バイトまでは CQE の中に、それより長いものは中継バッファに届くので、 そこから引数のポインタが指すバッファへ CPU がコピーする。
+|<<src_bfm_ops-bfm_cas,`bfm_cas(c, off, expect, desired, old)`>> |8 バイトの compare-and-swap。off は 8 の倍数。`*old` に元の値が入る (`*old` == expect なら置き換わった)。
+|<<src_bfm_ops-bfm_faa,`bfm_faa(c, off, add, old)`>> |8 バイトの fetch-and-add。off は 8 の倍数。`*old` に足す前の値が入る。
+|<<src_bfm_ops-bfm_cas32,`bfm_cas32(c, off, expect, desired, old)`>> |4 バイトの compare-and-swap。off は 4 の倍数。`*old` に元の値が入る。
+|<<src_bfm_ops-bfm_faa32,`bfm_faa32(c, off, add, old)`>> |4 バイトの fetch-and-add。off は 4 の倍数。`*old` に足す前の値が入る。
 2+h|多重度つきの write / read / atomic(完了を待たずに出しておき、後で確かめる)
-|<<src_bfm_async-bfm_write_async,`bfm_write_async()`>> |相手の公開メモリ + off へ書く。完了を待たずに戻る(src は WQE か枠の中継バッファへ写すので、 戻った後に変えてよい)。ack = `BFM_ACK` なら `*tag` を返す(tag は NULL にしない)。 `BFM_NOACK` なら tag は見ない(NULL でよい)。 戻り値: `BFM_OK` = 出した。`BFM_E_PARAM`・`BFM_E_STATE`・`BFM_E_TIMEOUT`(枠が空かない)・エラー完了の値。
-|<<src_bfm_async-bfm_read_async,`bfm_read_async()`>> |相手の公開メモリ + off から読む。完了を待たずに戻り、`*tag` を返す。応答は、完了を刈り取ったときに dst へ写す(`bfm_test()` が `BFM_OK` を返すまで、dst を変えたり手放したりしないこと)。
-|<<src_bfm_async-bfm_cas_async,`bfm_cas_async()`>> |atomic(`bfm_cas()` / `bfm_faa()` / `bfm_cas32()` / `bfm_faa32()` の多重度つき)。完了を待たずに戻り、`*tag` を返す (tag は NULL にしない)。元の値は、完了を刈り取ったときに `*old` へ入れる(old は NULL でもよい。 `bfm_test()` が `BFM_OK` を返すまで、`*old` を変えたり手放したりしないこと)。off の境界は同期版と同じ (8 バイトは 8 の倍数、4 バイトは 4 の倍数)。4 バイトに対応していない装置では `BFM_E_NOTSUP`。 同じ接続で出した atomic は、相手の NIC が出した順に処理する(同じ語への FAA の元の値は出した順に並ぶ)。
-|<<src_bfm_async-bfm_faa_async,`bfm_faa_async()`>> |相手の公開メモリ + `off` の 8 バイトへの fetch-and-add(`add` を足す)を、完了を待たずに出して `*tag` を返す(`bfm_faa()` の多重度つき)。
-|<<src_bfm_async-bfm_cas32_async,`bfm_cas32_async()`>> |相手の公開メモリ + `off` の 4 バイトへの compare-and-swap(拡張 atomic)を、完了を待たずに出して `*tag` を返す(`bfm_cas32()` の多重度つき)。
-|<<src_bfm_async-bfm_faa32_async,`bfm_faa32_async()`>> |相手の公開メモリ + `off` の 4 バイトへの fetch-and-add(拡張 atomic)を、完了を待たずに出して `*tag` を返す(`bfm_faa32()` の多重度つき)。
-|<<src_bfm_async-bfm_test,`bfm_test()`>> |tag の操作が済んだか(待たない)。`BFM_OK` = 済んだ(write は相手が受け取った。read は dst に入った)。 `BFM_INPROGRESS` = まだ。負 = 失敗(出してから時間切れを過ぎた `BFM_E_TIMEOUT`、エラー完了の値)。
-|<<src_bfm_async-bfm_wait,`bfm_wait()`>> |tag の操作が済むまで待つ(戻り値は `bfm_test()` の `BFM_INPROGRESS` 以外。上限は時間切れ)。
-|<<src_bfm_async-bfm_check,`bfm_check()`>> |完了を刈り取り、仕掛かり中の数を `*inflight` に返す(NULL でもよい)。 戻り値: `BFM_OK`。`BFM_E_TIMEOUT` = 出してから時間切れを過ぎても ACK・応答の無い操作がある(表示して 接続をエラーにする)。そのほかの負 = エラー完了があった(ACK を確かめない write の失敗もここで分かる)。
+|<<src_bfm_async-bfm_write_async,`bfm_write_async(c, off, src, len, ack, tag)`>> |相手の公開メモリ + off へ書く。完了を待たずに戻る(src は WQE か枠の中継バッファへ写すので、 戻った後に変えてよい)。ack = `BFM_ACK` なら `*tag` を返す(tag は NULL にしない)。 `BFM_NOACK` なら tag は見ない(NULL でよい)。 戻り値: `BFM_OK` = 出した。`BFM_E_PARAM`・`BFM_E_STATE`・`BFM_E_TIMEOUT`(枠が空かない)・エラー完了の値。
+|<<src_bfm_async-bfm_read_async,`bfm_read_async(c, off, dst, len, tag)`>> |相手の公開メモリ + off から読む。完了を待たずに戻り、`*tag` を返す。応答は、完了を刈り取ったときに dst へ写す(`bfm_test()` が `BFM_OK` を返すまで、dst を変えたり手放したりしないこと)。
+|<<src_bfm_async-bfm_cas_async,`bfm_cas_async(c, off, expect, desired, old, tag)`>> |atomic(`bfm_cas()` / `bfm_faa()` / `bfm_cas32()` / `bfm_faa32()` の多重度つき)。完了を待たずに戻り、`*tag` を返す (tag は NULL にしない)。元の値は、完了を刈り取ったときに `*old` へ入れる(old は NULL でもよい。 `bfm_test()` が `BFM_OK` を返すまで、`*old` を変えたり手放したりしないこと)。off の境界は同期版と同じ (8 バイトは 8 の倍数、4 バイトは 4 の倍数)。4 バイトに対応していない装置では `BFM_E_NOTSUP`。 同じ接続で出した atomic は、相手の NIC が出した順に処理する(同じ語への FAA の元の値は出した順に並ぶ)。
+|<<src_bfm_async-bfm_faa_async,`bfm_faa_async(c, off, add, old, tag)`>> |相手の公開メモリ + `off` の 8 バイトへの fetch-and-add(`add` を足す)を、完了を待たずに出して `*tag` を返す(`bfm_faa()` の多重度つき)。
+|<<src_bfm_async-bfm_cas32_async,`bfm_cas32_async(c, off, expect, desired, old, tag)`>> |相手の公開メモリ + `off` の 4 バイトへの compare-and-swap(拡張 atomic)を、完了を待たずに出して `*tag` を返す(`bfm_cas32()` の多重度つき)。
+|<<src_bfm_async-bfm_faa32_async,`bfm_faa32_async(c, off, add, old, tag)`>> |相手の公開メモリ + `off` の 4 バイトへの fetch-and-add(拡張 atomic)を、完了を待たずに出して `*tag` を返す(`bfm_faa32()` の多重度つき)。
+|<<src_bfm_async-bfm_test,`bfm_test(c, tag)`>> |tag の操作が済んだか(待たない)。`BFM_OK` = 済んだ(write は相手が受け取った。read は dst に入った)。 `BFM_INPROGRESS` = まだ。負 = 失敗(出してから時間切れを過ぎた `BFM_E_TIMEOUT`、エラー完了の値)。
+|<<src_bfm_async-bfm_wait,`bfm_wait(c, tag)`>> |tag の操作が済むまで待つ(戻り値は `bfm_test()` の `BFM_INPROGRESS` 以外。上限は時間切れ)。
+|<<src_bfm_async-bfm_check,`bfm_check(c, inflight)`>> |完了を刈り取り、仕掛かり中の数を `*inflight` に返す(NULL でもよい)。 戻り値: `BFM_OK`。`BFM_E_TIMEOUT` = 出してから時間切れを過ぎても ACK・応答の無い操作がある(表示して 接続をエラーにする)。そのほかの負 = エラー完了があった(ACK を確かめない write の失敗もここで分かる)。
 2+h|T10-DIF(512 + 8 バイトのブロック)
-|<<src_bfm_dif-bfm_dif_write,`bfm_dif_write()`>> |src の nblocks ブロックを、形を変えて相手の公開メモリ + off へ書く(終わるまで待つ)。 src の形は入る側(CHECK・SWAP・DELETE は 520 バイトおき、INSERT は 512 バイトおき)。 err は NULL でもよい。
-|<<src_bfm_dif-bfm_dif_read,`bfm_dif_read()`>> |相手の公開メモリ + off から nblocks ブロックを読み、形を変えて dst に置く(終わるまで待つ)。 dst の形は出る側(CHECK・SWAP・INSERT は 520 バイトおき、DELETE は 512 バイトおき)。
-|<<src_bfm_dif-bfm_dif_write_start,`bfm_dif_write_start()`>> |`bfm_dif_write()` を起動だけして戻る。結果は `bfm_dif_poll()` / `bfm_dif_wait()` で受け取る。 戻り値は起動できたかどうかだけ(`BFM_OK`・`BFM_E_PARAM`・`BFM_E_STATE`・`BFM_E_NOTSUP`、 前の転送が終わっていなければ `BFM_E_BUSY`)。dif は戻った後に変えてよい。
-|<<src_bfm_dif-bfm_dif_read_start,`bfm_dif_read_start()`>> |`bfm_dif_read()` を起動だけして戻る。戻り値は `bfm_dif_write_start()` と同じ。
-|<<src_bfm_dif-bfm_dif_poll,`bfm_dif_poll()`>> |起動した転送を、待たずに進める。 戻り値: `BFM_DIF_INPROGRESS` = まだ途中。`BFM_OK` = 全部済んだ。負 = 失敗(`BFM_E_DIF` なら `*err` に 場所と中身)。結果を返すのは 1 回だけで、その後は次の転送を起動できる。 動いている転送が無ければ `BFM_OK`。err は NULL でもよい。
-|<<src_bfm_dif-bfm_dif_wait,`bfm_dif_wait()`>> |起動した転送が終わるまで進め、結果を返す(戻り値は `bfm_dif_poll()` の `BFM_DIF_INPROGRESS` 以外)。 `g_bfm_op_timeout_ms` の間まったく進まなければ `BFM_E_TIMEOUT`(接続はエラーにする)。
+|<<src_bfm_dif-bfm_dif_write,`bfm_dif_write(c, off, src, nblocks, dif, err)`>> |src の nblocks ブロックを、形を変えて相手の公開メモリ + off へ書く(終わるまで待つ)。 src の形は入る側(CHECK・SWAP・DELETE は 520 バイトおき、INSERT は 512 バイトおき)。 err は NULL でもよい。
+|<<src_bfm_dif-bfm_dif_read,`bfm_dif_read(c, off, dst, nblocks, dif, err)`>> |相手の公開メモリ + off から nblocks ブロックを読み、形を変えて dst に置く(終わるまで待つ)。 dst の形は出る側(CHECK・SWAP・INSERT は 520 バイトおき、DELETE は 512 バイトおき)。
+|<<src_bfm_dif-bfm_dif_write_start,`bfm_dif_write_start(c, off, src, nblocks, dif)`>> |`bfm_dif_write()` を起動だけして戻る。結果は `bfm_dif_poll()` / `bfm_dif_wait()` で受け取る。 戻り値は起動できたかどうかだけ(`BFM_OK`・`BFM_E_PARAM`・`BFM_E_STATE`・`BFM_E_NOTSUP`、 前の転送が終わっていなければ `BFM_E_BUSY`)。dif は戻った後に変えてよい。
+|<<src_bfm_dif-bfm_dif_read_start,`bfm_dif_read_start(c, off, dst, nblocks, dif)`>> |`bfm_dif_read()` を起動だけして戻る。戻り値は `bfm_dif_write_start()` と同じ。
+|<<src_bfm_dif-bfm_dif_poll,`bfm_dif_poll(c, err)`>> |起動した転送を、待たずに進める。 戻り値: `BFM_DIF_INPROGRESS` = まだ途中。`BFM_OK` = 全部済んだ。負 = 失敗(`BFM_E_DIF` なら `*err` に 場所と中身)。結果を返すのは 1 回だけで、その後は次の転送を起動できる。 動いている転送が無ければ `BFM_OK`。err は NULL でもよい。
+|<<src_bfm_dif-bfm_dif_wait,`bfm_dif_wait(c, err)`>> |起動した転送が終わるまで進め、結果を返す(戻り値は `bfm_dif_poll()` の `BFM_DIF_INPROGRESS` 以外)。 `g_bfm_op_timeout_ms` の間まったく進まなければ `BFM_E_TIMEOUT`(接続はエラーにする)。
 |<<src_bfm_dif-bfm_dif_hw_supported,`bfm_dif_hw_supported()`>> |1 = `BFM_DIF_HW` が使える(使う全部のポートに署名オフロード(sho)があり、資源を用意できた)。 ポートの立ち上げが済む前は 0。
-|<<src_bfm_dif-bfm_dif_make_pi,`bfm_dif_make_pi()`>> |データ 512 バイトの PI(8 バイト)を作る(アプリケーションが PI つきのデータを用意するため)。
+|<<src_bfm_dif-bfm_dif_make_pi,`bfm_dif_make_pi(data, app_tag, ref_tag, pi)`>> |データ 512 バイトの PI(8 バイト)を作る(アプリケーションが PI つきのデータを用意するため)。
 2+h|情報
 |<<src_bfm_ops-bfm_inline_max,`bfm_inline_max()`>> |WQE に埋め込める write の最大バイト数。
-|<<src_bfm_ops-bfm_bf_active,`bfm_bf_active()`>> |1 = BlueFlame で WQE を送っている(WC の窓が取れた)。
-|<<src_bfm_ops-bfm_last_syndrome,`bfm_last_syndrome()`>> |直前のエラー完了の syndrome(0 = なし)。
-|<<src_bfm_ops-bfm_strerror,`bfm_strerror()`>> |戻り値の説明。
+|<<src_bfm_ops-bfm_bf_active,`bfm_bf_active(c)`>> |1 = BlueFlame で WQE を送っている(WC の窓が取れた)。
+|<<src_bfm_ops-bfm_last_syndrome,`bfm_last_syndrome(c)`>> |直前のエラー完了の syndrome(0 = なし)。
+|<<src_bfm_ops-bfm_strerror,`bfm_strerror(rc)`>> |戻り値の説明。
 |===
 
 === 移植層が実装する関数(`include/bfm_port.h`)
@@ -78,16 +78,16 @@ bfmem の関数のうち、外から使うもの。関数名を押すと、そ�
 |関数 |Linux |VxWorks |説明
 |`bfm_port_init()` |<<port_linux_vfio_port_linux-bfm_port_init,節へ>> |<<port_vxworks_port_vxworks-bfm_port_init,節へ>> |`g_bfm_port_conn`[] が 0 でないポートの装置を使えるようにし(Linux: VFIO で掴む)、DMA 領域と 公開メモリ(`g_bfm_dma_*` / `g_bfm_mr_*`)を CPU と NIC の両方から同じアドレスで触れるようにする。 0 = 成功。
 |`bfm_port_fini()` |<<port_linux_vfio_port_linux-bfm_port_fini,節へ>> |<<port_vxworks_port_vxworks-bfm_port_fini,節へ>> |`bfm_port_init()` で取ったものを返す。呼ぶ前に全部のポートの Bus Master は落としてある。
-|`bfm_port_pci_read32()` |<<port_linux_vfio_port_linux-bfm_port_pci_read32,節へ>> |<<port_vxworks_port_vxworks-bfm_port_pci_read32,節へ>> |ポート port の PCIe の設定空間の 32bit 読み書き(off は 4 の倍数)。
-|`bfm_port_pci_write32()` |<<port_linux_vfio_port_linux-bfm_port_pci_write32,節へ>> |<<port_vxworks_port_vxworks-bfm_port_pci_write32,節へ>> |ポート `port` の PCIe の設定空間の `off` へ 32bit を書く。
-|`bfm_port_bar0_map()` |<<port_linux_vfio_port_linux-bfm_port_bar0_map,節へ>> |<<port_vxworks_port_vxworks-bfm_port_bar0_map,節へ>> |ポート port の BAR0 を UC(キャッシュしない)で CPU から触れるようにして先頭を返す。 `bar_phys` は設定空間から読んだ BAR0 の値(Linux では使わない)。NULL = 失敗。
-|`bfm_port_bar0_unmap()` |<<port_linux_vfio_port_linux-bfm_port_bar0_unmap,節へ>> |<<port_vxworks_port_vxworks-bfm_port_bar0_unmap,節へ>> |ポート `port` の BAR0 の窓を外し、UC の窓の mmap の一覧を空にする。
-|`bfm_port_bar0_wc()` |<<port_linux_vfio_port_linux-bfm_port_bar0_wc,節へ>> |<<port_vxworks_port_vxworks-bfm_port_bar0_wc,節へ>> |ポート port の BAR0 の [off, off+len)(UAR の 1 ページ)を write-combining で触れるようにして 先頭を返す。BlueFlame の書き込み先。NULL = WC は使えない(BlueFlame を使わない)。 Linux は UC の窓のそのページを同じ仮想アドレスのまま WC に張り替えるので、 返った後は `bfm_port_bar0_map()` の窓のそのページも WC になっている。
-|`bfm_port_bar0_wc_release()` |<<port_linux_vfio_port_linux-bfm_port_bar0_wc_release,節へ>> |<<port_vxworks_port_vxworks-bfm_port_bar0_wc_release,節へ>> |`bfm_port_bar0_wc()` で WC に張り替えたポート `port` の BAR0 の `[off, off+len)` を外し、同じ仮想アドレスに UC で張り直して、UC の mmap の一覧に足す。
+|`bfm_port_pci_read32(port, off)` |<<port_linux_vfio_port_linux-bfm_port_pci_read32,節へ>> |<<port_vxworks_port_vxworks-bfm_port_pci_read32,節へ>> |ポート port の PCIe の設定空間の 32bit 読み書き(off は 4 の倍数)。
+|`bfm_port_pci_write32(port, off, val)` |<<port_linux_vfio_port_linux-bfm_port_pci_write32,節へ>> |<<port_vxworks_port_vxworks-bfm_port_pci_write32,節へ>> |ポート `port` の PCIe の設定空間の `off` へ 32bit を書く。
+|`bfm_port_bar0_map(port, bar_phys, bar_size)` |<<port_linux_vfio_port_linux-bfm_port_bar0_map,節へ>> |<<port_vxworks_port_vxworks-bfm_port_bar0_map,節へ>> |ポート port の BAR0 を UC(キャッシュしない)で CPU から触れるようにして先頭を返す。 `bar_phys` は設定空間から読んだ BAR0 の値(Linux では使わない)。NULL = 失敗。
+|`bfm_port_bar0_unmap(port)` |<<port_linux_vfio_port_linux-bfm_port_bar0_unmap,節へ>> |<<port_vxworks_port_vxworks-bfm_port_bar0_unmap,節へ>> |ポート `port` の BAR0 の窓を外し、UC の窓の mmap の一覧を空にする。
+|`bfm_port_bar0_wc(port, off, len)` |<<port_linux_vfio_port_linux-bfm_port_bar0_wc,節へ>> |<<port_vxworks_port_vxworks-bfm_port_bar0_wc,節へ>> |ポート port の BAR0 の [off, off+len)(UAR の 1 ページ)を write-combining で触れるようにして 先頭を返す。BlueFlame の書き込み先。NULL = WC は使えない(BlueFlame を使わない)。 Linux は UC の窓のそのページを同じ仮想アドレスのまま WC に張り替えるので、 返った後は `bfm_port_bar0_map()` の窓のそのページも WC になっている。
+|`bfm_port_bar0_wc_release(port, off, len)` |<<port_linux_vfio_port_linux-bfm_port_bar0_wc_release,節へ>> |<<port_vxworks_port_vxworks-bfm_port_bar0_wc_release,節へ>> |`bfm_port_bar0_wc()` で WC に張り替えたポート `port` の BAR0 の `[off, off+len)` を外し、同じ仮想アドレスに UC で張り直して、UC の mmap の一覧に足す。
 |`bfm_port_time_ns()` |<<port_linux_vfio_port_linux-bfm_port_time_ns,節へ>> |<<port_vxworks_port_vxworks-bfm_port_time_ns,節へ>> |単調に増える時刻(ナノ秒)。分解能は粗くてよい(時間切れの判定に使う)。
-|`bfm_port_delay_us()` |<<port_linux_vfio_port_linux-bfm_port_delay_us,節へ>> |<<port_vxworks_port_vxworks-bfm_port_delay_us,節へ>> |待つ(マイクロ秒)。
+|`bfm_port_delay_us(us)` |<<port_linux_vfio_port_linux-bfm_port_delay_us,節へ>> |<<port_vxworks_port_vxworks-bfm_port_delay_us,節へ>> |待つ(マイクロ秒)。
 |`bfm_port_cpu_id()` |<<port_linux_vfio_port_linux-bfm_port_cpu_id,節へ>> |<<port_vxworks_port_vxworks-bfm_port_cpu_id,節へ>> |今動いているコアの番号(コアを見分けるため。状態遷移の記録に使う)。Linux は OS の CPU の番号、 VxWorks は APIC ID(OS の機能を使わずに CPUID で読む)。
-|`bfm_port_log()` |<<port_linux_vfio_port_linux-bfm_port_log,節へ>> |<<port_vxworks_port_vxworks-bfm_port_log,節へ>> |表示(printf と同じ書式)。
+|`bfm_port_log(fmt, ...)` |<<port_linux_vfio_port_linux-bfm_port_log,節へ>> |<<port_vxworks_port_vxworks-bfm_port_log,節へ>> |表示(printf と同じ書式)。
 |===
 
 == この文書の読み方
@@ -5173,7 +5173,7 @@ image::call_src_bfm_ops-bfm_flush.drawio.svg[bfm_flush() の関係図]
 |===
 |関数名 |`bfm_read`(`src/bfm_ops.c` 410 行目)
 |宣言 |`int bfm_read(bfm_conn_t *c, uint64_t off, void *dst, uint32_t len)`
-|処理内容 a|相手の公開メモリ + `off` から `len` バイト読む。中継バッファの大きさずつ RDMA read を出して完了を待ち、応答が CQE に入っていて 32 バイト以下ならその CQE から、そうでなければ中継バッファから `dst` へ写す。
+|処理内容 a|相手の公開メモリ + `off` から `len` バイト読む。中継バッファの大きさずつ RDMA read を出して完了を待ち、応答が CQE に入っていて 32 バイト以下ならその CQE から、そうでなければ中継バッファから、引数のポインタ `dst` が指すバッファへ CPU がコピーする。
 |引数 a|
 [cols="2,1,4"]
 !===

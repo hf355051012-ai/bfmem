@@ -128,7 +128,9 @@ int bfm_write_post(bfm_conn_t *c, uint64_t off, const void *src, uint32_t len);
  * BFM_OK = 全部届いた。どれかが失敗していればエラーを返す(どれが失敗したかは分からない)。 */
 int bfm_flush(bfm_conn_t *c);
 
-/* 読む。32 バイトまでは応答が CQE に入るので、dst へ CPU で写す。 */
+/* 相手のメモリを読み、引数のポインタが指すバッファへ入れる。読み終わるまで待つ。
+ * 読んだデータは、32 バイトまでは CQE の中に、それより長いものは中継バッファに届くので、
+ * そこから引数のポインタが指すバッファへ CPU がコピーする。 */
 int bfm_read(bfm_conn_t *c, uint64_t off, void *dst, uint32_t len);
 
 /* 8 バイトの compare-and-swap。off は 8 の倍数。*old に元の値が入る

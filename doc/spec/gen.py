@@ -1422,7 +1422,9 @@ def api_section(allf, descs):
         out.append("2+h|%s\n" % a_esc(title))
         for name, text in items:
             defs = [f for f in by.get(name, []) if f["file"].startswith("src/")]
-            link = "<<%s,`%s()`>>" % (fslug(defs[0]), name) if defs else "`%s()`" % name
+            # 関数名に引数の名前を添える
+            sig = "%s(%s)" % (name, ", ".join(p[1] for p in defs[0]["params"])) if defs else name + "()"
+            link = "<<%s,`%s`>>" % (fslug(defs[0]), sig) if defs else "`%s`" % sig
             if not text and defs:
                 text = first_sentence(summ.get((defs[0]["file"], name), ""))
             out.append("|%s |%s\n" % (link, api_text(text)))
@@ -1440,7 +1442,9 @@ def api_section(allf, descs):
                 impls.append("<<%s,節へ>>" % fslug(fs[0]) if fs else "-")
             if not text:
                 text = first_sentence(summ.get(("port/linux_vfio/port_linux.c", name), ""))
-            out.append("|`%s()` |%s |%s |%s\n" % (name, impls[0], impls[1], api_text(text)))
+            fs = [f for f in by.get(name, []) if f["file"] == "port/linux_vfio/port_linux.c"]
+            sig = "%s(%s)" % (name, ", ".join(p[1] for p in fs[0]["params"])) if fs else name + "()"
+            out.append("|`%s` |%s |%s |%s\n" % (sig, impls[0], impls[1], api_text(text)))
     out.append("|===\n")
     return "".join(out)
 
