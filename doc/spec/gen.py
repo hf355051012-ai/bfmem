@@ -1303,7 +1303,8 @@ def header_api(rel):
                 i += 1
                 buf.append(lines[i].strip())
             text = " ".join(x.strip("/* ").strip() for x in buf).strip()
-            m = re.match(r"^-{2,}\s*(.+?)\s*-{2,}$", text)
+            # 見出しは 1 行目の「---- 見出し ----」(続けて説明の行があってもよい)
+            m = re.match(r"^/\*\s*-{2,}\s*(.+?)\s*-{2,}", buf[0])
             if m:
                 groups.append((m.group(1), []))
                 comment = None

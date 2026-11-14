@@ -43,6 +43,7 @@ bfmem の関数のうち、外から使うもの。関数名を押すと、そ�
 |<<src_bfm_ops-bfm_faa,`bfm_faa()`>> |8 バイトの fetch-and-add。off は 8 の倍数。`*old` に足す前の値が入る。
 |<<src_bfm_ops-bfm_cas32,`bfm_cas32()`>> |4 バイトの compare-and-swap。off は 4 の倍数。`*old` に元の値が入る。
 |<<src_bfm_ops-bfm_faa32,`bfm_faa32()`>> |4 バイトの fetch-and-add。off は 4 の倍数。`*old` に足す前の値が入る。
+2+h|多重度つきの write / read / atomic(完了を待たずに出しておき、後で確かめる)
 |<<src_bfm_async-bfm_write_async,`bfm_write_async()`>> |相手の公開メモリ + off へ書く。完了を待たずに戻る(src は WQE か枠の中継バッファへ写すので、 戻った後に変えてよい)。ack = `BFM_ACK` なら `*tag` を返す(tag は NULL にしない)。 `BFM_NOACK` なら tag は見ない(NULL でよい)。 戻り値: `BFM_OK` = 出した。`BFM_E_PARAM`・`BFM_E_STATE`・`BFM_E_TIMEOUT`(枠が空かない)・エラー完了の値。
 |<<src_bfm_async-bfm_read_async,`bfm_read_async()`>> |相手の公開メモリ + off から読む。完了を待たずに戻り、`*tag` を返す。応答は、完了を刈り取ったときに dst へ写す(`bfm_test()` が `BFM_OK` を返すまで、dst を変えたり手放したりしないこと)。
 |<<src_bfm_async-bfm_cas_async,`bfm_cas_async()`>> |atomic(`bfm_cas()` / `bfm_faa()` / `bfm_cas32()` / `bfm_faa32()` の多重度つき)。完了を待たずに戻り、`*tag` を返す (tag は NULL にしない)。元の値は、完了を刈り取ったときに `*old` へ入れる(old は NULL でもよい。 `bfm_test()` が `BFM_OK` を返すまで、`*old` を変えたり手放したりしないこと)。off の境界は同期版と同じ (8 バイトは 8 の倍数、4 バイトは 4 の倍数)。4 バイトに対応していない装置では `BFM_E_NOTSUP`。 同じ接続で出した atomic は、相手の NIC が出した順に処理する(同じ語への FAA の元の値は出した順に並ぶ)。
@@ -52,6 +53,7 @@ bfmem の関数のうち、外から使うもの。関数名を押すと、そ�
 |<<src_bfm_async-bfm_test,`bfm_test()`>> |tag の操作が済んだか(待たない)。`BFM_OK` = 済んだ(write は相手が受け取った。read は dst に入った)。 `BFM_INPROGRESS` = まだ。負 = 失敗(出してから時間切れを過ぎた `BFM_E_TIMEOUT`、エラー完了の値)。
 |<<src_bfm_async-bfm_wait,`bfm_wait()`>> |tag の操作が済むまで待つ(戻り値は `bfm_test()` の `BFM_INPROGRESS` 以外。上限は時間切れ)。
 |<<src_bfm_async-bfm_check,`bfm_check()`>> |完了を刈り取り、仕掛かり中の数を `*inflight` に返す(NULL でもよい)。 戻り値: `BFM_OK`。`BFM_E_TIMEOUT` = 出してから時間切れを過ぎても ACK・応答の無い操作がある(表示して 接続をエラーにする)。そのほかの負 = エラー完了があった(ACK を確かめない write の失敗もここで分かる)。
+2+h|T10-DIF(512 + 8 バイトのブロック)
 |<<src_bfm_dif-bfm_dif_write,`bfm_dif_write()`>> |src の nblocks ブロックを、形を変えて相手の公開メモリ + off へ書く(終わるまで待つ)。 src の形は入る側(CHECK・SWAP・DELETE は 520 バイトおき、INSERT は 512 バイトおき)。 err は NULL でもよい。
 |<<src_bfm_dif-bfm_dif_read,`bfm_dif_read()`>> |相手の公開メモリ + off から nblocks ブロックを読み、形を変えて dst に置く(終わるまで待つ)。 dst の形は出る側(CHECK・SWAP・INSERT は 520 バイトおき、DELETE は 512 バイトおき)。
 |<<src_bfm_dif-bfm_dif_write_start,`bfm_dif_write_start()`>> |`bfm_dif_write()` を起動だけして戻る。結果は `bfm_dif_poll()` / `bfm_dif_wait()` で受け取る。 戻り値は起動できたかどうかだけ(`BFM_OK`・`BFM_E_PARAM`・`BFM_E_STATE`・`BFM_E_NOTSUP`、 前の転送が終わっていなければ `BFM_E_BUSY`)。dif は戻った後に変えてよい。
@@ -74,6 +76,18 @@ bfmem の関数のうち、外から使うもの。関数名を押すと、そ�
 [cols="3,1,1,6",options="header"]
 |===
 |関数 |Linux |VxWorks |説明
+|`bfm_port_init()` |<<port_linux_vfio_port_linux-bfm_port_init,節へ>> |<<port_vxworks_port_vxworks-bfm_port_init,節へ>> |`g_bfm_port_conn`[] が 0 でないポートの装置を使えるようにし(Linux: VFIO で掴む)、DMA 領域と 公開メモリ(`g_bfm_dma_*` / `g_bfm_mr_*`)を CPU と NIC の両方から同じアドレスで触れるようにする。 0 = 成功。
+|`bfm_port_fini()` |<<port_linux_vfio_port_linux-bfm_port_fini,節へ>> |<<port_vxworks_port_vxworks-bfm_port_fini,節へ>> |`bfm_port_init()` で取ったものを返す。呼ぶ前に全部のポートの Bus Master は落としてある。
+|`bfm_port_pci_read32()` |<<port_linux_vfio_port_linux-bfm_port_pci_read32,節へ>> |<<port_vxworks_port_vxworks-bfm_port_pci_read32,節へ>> |ポート port の PCIe の設定空間の 32bit 読み書き(off は 4 の倍数)。
+|`bfm_port_pci_write32()` |<<port_linux_vfio_port_linux-bfm_port_pci_write32,節へ>> |<<port_vxworks_port_vxworks-bfm_port_pci_write32,節へ>> |ポート `port` の PCIe の設定空間の `off` へ 32bit を書く。
+|`bfm_port_bar0_map()` |<<port_linux_vfio_port_linux-bfm_port_bar0_map,節へ>> |<<port_vxworks_port_vxworks-bfm_port_bar0_map,節へ>> |ポート port の BAR0 を UC(キャッシュしない)で CPU から触れるようにして先頭を返す。 `bar_phys` は設定空間から読んだ BAR0 の値(Linux では使わない)。NULL = 失敗。
+|`bfm_port_bar0_unmap()` |<<port_linux_vfio_port_linux-bfm_port_bar0_unmap,節へ>> |<<port_vxworks_port_vxworks-bfm_port_bar0_unmap,節へ>> |ポート `port` の BAR0 の窓を外し、UC の窓の mmap の一覧を空にする。
+|`bfm_port_bar0_wc()` |<<port_linux_vfio_port_linux-bfm_port_bar0_wc,節へ>> |<<port_vxworks_port_vxworks-bfm_port_bar0_wc,節へ>> |ポート port の BAR0 の [off, off+len)(UAR の 1 ページ)を write-combining で触れるようにして 先頭を返す。BlueFlame の書き込み先。NULL = WC は使えない(BlueFlame を使わない)。 Linux は UC の窓のそのページを同じ仮想アドレスのまま WC に張り替えるので、 返った後は `bfm_port_bar0_map()` の窓のそのページも WC になっている。
+|`bfm_port_bar0_wc_release()` |<<port_linux_vfio_port_linux-bfm_port_bar0_wc_release,節へ>> |<<port_vxworks_port_vxworks-bfm_port_bar0_wc_release,節へ>> |`bfm_port_bar0_wc()` で WC に張り替えたポート `port` の BAR0 の `[off, off+len)` を外し、同じ仮想アドレスに UC で張り直して、UC の mmap の一覧に足す。
+|`bfm_port_time_ns()` |<<port_linux_vfio_port_linux-bfm_port_time_ns,節へ>> |<<port_vxworks_port_vxworks-bfm_port_time_ns,節へ>> |単調に増える時刻(ナノ秒)。分解能は粗くてよい(時間切れの判定に使う)。
+|`bfm_port_delay_us()` |<<port_linux_vfio_port_linux-bfm_port_delay_us,節へ>> |<<port_vxworks_port_vxworks-bfm_port_delay_us,節へ>> |待つ(マイクロ秒)。
+|`bfm_port_cpu_id()` |<<port_linux_vfio_port_linux-bfm_port_cpu_id,節へ>> |<<port_vxworks_port_vxworks-bfm_port_cpu_id,節へ>> |今動いているコアの番号(コアを見分けるため。状態遷移の記録に使う)。Linux は OS の CPU の番号、 VxWorks は APIC ID(OS の機能を使わずに CPUID で読む)。
+|`bfm_port_log()` |<<port_linux_vfio_port_linux-bfm_port_log,節へ>> |<<port_vxworks_port_vxworks-bfm_port_log,節へ>> |表示(printf と同じ書式)。
 |===
 
 == この文書の読み方
@@ -115,6 +129,10 @@ ConnectX-4〜7 の違いへの備えは、この章の最後に書く。
   bfmem は `bfm_wr16be()` などのバイト順の関数で読み書きする。例外は atomic の元の値(<<cx-wqe,WQE と CQE>>)。
 * NIC に渡すアドレスは CPU のポインタの値そのもの(VxWorks は論理 = 物理、Linux は仮想 = IOVA に張る)。
 * 割り込みは使わない。EQ と CQ は arm せず、CPU が見に行く(ポーリング)。
+  *arm* は、「次に何か来たら知らせて」と NIC に頼む操作。CQ を arm すると、次の CQE を書いたときに NIC が EQ に完了の EQE を出す。
+  EQ を arm すると、次の EQE を書いたときに NIC が割り込み(MSI-X)を上げる。どちらも 1 回知らせるごとに頼み直す。
+  bfmem はどちらも頼まないので、CQE を書いても EQE は来ず、EQE を書いても割り込みは来ない。CPU が CQ と EQ のリングの owner を読んで、
+  新しい CQE・EQE を見つける。そのため EQ に来るのは、CQ の完了以外のイベント(エラー・リンクの変化・FW のページ要求)だけになる。
 * ConnectX のポート(PCIe の機能)ごとに装置 `bfm_dev_t`(`g_bfm_dev[BFM_MAX_PORT]`)を 1 つ持ち、この章に書く PCIe の設定・FW の起動・コマンド・EQ・GSI は、どれもポートごとに行う。
 
 [[cx-block]]
@@ -131,7 +149,9 @@ image::hw_block.drawio.svg[ConnectX とホストのブロック図]
 |① 設定空間 |装置の確認・FLR・BAR0 の割り当て・Memory Space / Bus Master・MRRS |`bfm_pci_setup_step()`(VxWorks は ECAM を直接、Linux は VFIO の設定空間)
 |② 初期化セグメント |FW の版の確認、FW の初期化の完了待ち、コマンドキューの登録、コマンドのドアベル |`mlx5_hca_init_step()`・`mlx5_cmd_init()`・`mlx5_cmd_run()`
 |③ UAR ページ |WQE のドアベル・BlueFlame(WQE そのものを MMIO で書く)、EQ のドアベル |`post()`・`gsi_send()`・`mlx5_eq_update_ci()`
-|④ DMA(DMA 領域) |NIC がコマンド・メールボックス・WQE・送るデータを読み、CQE・EQE・読んだデータ・コマンドの応答を書く。FW に渡したページも NIC が自分の作業域(ICM)として使う |`bfm_mem_alloc()` で切り出した領域
+|④ DMA(DMA 領域) |CPU が書いて NIC が読むもの: コマンドの入力・メールボックス、WQE(SQ・RQ)、送るデータ、doorbell record。 +
+NIC が書いて CPU が読む(刈り取る)もの: コマンドの出力、CQE、EQE、read で読んだデータ、GSI で受け取ったメッセージ。 +
+FW に渡したページは、NIC が自分の作業域(ICM)として読み書きする(CPU は触らない) |`bfm_mem_alloc()` で切り出した領域
 |⑤ DMA(公開メモリ) |相手の bfmem からの write / read / atomic を、NIC が CPU を通さずに処理する |MKey(rkey)で範囲を決めるだけ
 |===
 
@@ -149,18 +169,22 @@ ConnectX は「FW が管理する資源(QP・CQ・EQ・MKey・PD・UAR)」と「
 . *イベントを受ける*: エラー・リンクの変化・FW のページ要求は EQ に EQE が来る(<<cx-eq>>)。
 . *止める*: `TEARDOWN_HCA` の後は FW にコマンドを出さず、Bus Master を落とす。
 
-[cols="2,2,3",options="header"]
+リングは、書く側(作る側)が 1 つずつ積み、読む側が 1 つずつ刈り取る(読み終えたことを書く側に返す)。
+表の「書く側」「読む側」は、その中身を書くのはどちらで、読んで処理するのはどちらか。
+
+[cols="2,2,1,1,4",options="header"]
 |===
-|もの |置き場所 |ドライバがすること
-|初期化セグメント |BAR0 の先頭 |FW の版を読む、コマンドキューの物理アドレスを書く、コマンドのドアベルを書く
-|コマンドキュー・メールボックス |ホストのメモリ(DMA 領域) |コマンドを組んで持ち主を FW にし、完了を待つ
-|FW に渡すページ(ICM) |ホストのメモリ(DMA 領域) |`MANAGE_PAGES` で物理アドレスを渡す(返してもらわない)
-|EQ のリング |ホストのメモリ |EQE の owner を見て読み、EQ のドアベルで消費の数を知らせる
-|WQ(SQ・RQ)のリング |ホストのメモリ |WQE を書く
-|CQ のリング |ホストのメモリ |CQE の owner を見て読む
-|doorbell record |ホストのメモリ(QP・CQ ごとに 64 バイト) |SQ / RQ に積んだ数・CQ から読んだ数を書く(NIC が DMA で読む)
-|UAR ページ |BAR0 の中(4KiB ずつ) |ドアベル・BlueFlame の窓に MMIO で書く
-|QP・CQ・EQ・MKey のコンテキスト |NIC の中(ICM) |コマンドで作り、状態を変える。直接は触らない
+|もの |置き場所 |書く側 |読む(刈り取る)側 |やり取り
+|初期化セグメント |BAR0 の先頭 |両方 |両方 |FW が版と initializing を出し、CPU が読む。CPU がコマンドキューの物理アドレスとコマンドのドアベルを書き、FW が読む
+|コマンドキュー・メールボックス |ホストのメモリ(DMA 領域) |CPU → FW → CPU |FW → CPU |CPU が入力を書いて ownership = 1(持ち主を FW)にし、ドアベルを書く。FW が読んで処理し、出力を書いて ownership = 0 に戻す。CPU が出力を読む
+|FW に渡すページ(ICM) |ホストのメモリ(DMA 領域) |NIC |NIC |CPU は `MANAGE_PAGES` で物理アドレスを渡すだけ。中身は NIC が作業域として読み書きする(返してもらわない)
+|SQ のリング |ホストのメモリ |CPU |NIC |CPU が WQE を積み、doorbell record[1] とドアベル(または BlueFlame)で知らせる。NIC が WQE を読んで実行する(BlueFlame で受けた WQE はリングを読まない)。刈り取ったことは CQE で返る
+|RQ のリング(GSI だけ) |ホストのメモリ |CPU |NIC |CPU が受信の枠(WQE)を積み、doorbell record[0] で知らせる(MMIO のドアベルは無い)。NIC がメッセージを受けたときに WQE を読み、その枠へ書く。RC の QP の RQ は作るが使わない
+|CQ のリング |ホストのメモリ |NIC |CPU |NIC が SQ・RQ の完了の CQE を積む。CPU が owner を見て読み、CQ の doorbell record に読んだ数を書いて返す
+|EQ のリング |ホストのメモリ |NIC |CPU |NIC が EQE(イベント)を積む。CPU が owner を見て読み、EQ のドアベル(UAR + 0x048)に読んだ数を書いて返す
+|doorbell record |ホストのメモリ(QP・CQ ごとに 64 バイト) |CPU |NIC |SQ / RQ に積んだ数・CQ から読んだ数。NIC が DMA で読む
+|UAR ページ |BAR0 の中(4KiB ずつ) |CPU |NIC |ドアベル・BlueFlame の窓・EQ のドアベル。CPU が MMIO で書く
+|QP・CQ・EQ・MKey のコンテキスト |NIC の中(ICM) |NIC |NIC |CPU はコマンドで作り、状態を変えるだけ。直接は触らない
 |===
 
 ==== ラダーチャート
@@ -176,6 +200,13 @@ ConnectX は「FW が管理する資源(QP・CQ・EQ・MKey・PD・UAR)」と「
 
 .ラダーチャート(FW の起動・コマンド・ページの受け渡し・資源の作成・停止)
 image::hw_ladder_boot.drawio.svg[ラダーチャート(起動・コマンド・資源)]
+
+RQ を使うのは、接続の確立のメッセージ(REQ / REP / BYE)をやり取りする GSI(QP1、UD)だけ。GSI の送受信を次の図に描く
+(掛け側が REQ を送って REP を受ける向き。受け側は REQ を受けて REP を送る、の逆向きで、手順は同じ)。
+GSI の送信は BlueFlame を使わない(UC のドアベル)。
+
+.ラダーチャート(接続の確立・GSI の送受信)
+image::hw_ladder_gsi.drawio.svg[ラダーチャート(接続の確立・GSI の送受信)]
 
 データの転送は、こちらから出す write / read を BlueFlame 有効と BlueFlame 無効の 2 つの図に、相手から来る
 write / read / atomic(BlueFlame に関わらず同じ)を共通の図に分けて描く。BlueFlame 有効と無効の違いは、WQE を NIC に渡すところだけ。

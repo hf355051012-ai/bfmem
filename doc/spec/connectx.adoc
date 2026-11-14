@@ -9,6 +9,10 @@ ConnectX-4〜7 の違いへの備えは、この章の最後に書く。
   bfmem は `bfm_wr16be()` などのバイト順の関数で読み書きする。例外は atomic の元の値(<<cx-wqe,WQE と CQE>>)。
 * NIC に渡すアドレスは CPU のポインタの値そのもの(VxWorks は論理 = 物理、Linux は仮想 = IOVA に張る)。
 * 割り込みは使わない。EQ と CQ は arm せず、CPU が見に行く(ポーリング)。
+  *arm* は、「次に何か来たら知らせて」と NIC に頼む操作。CQ を arm すると、次の CQE を書いたときに NIC が EQ に完了の EQE を出す。
+  EQ を arm すると、次の EQE を書いたときに NIC が割り込み(MSI-X)を上げる。どちらも 1 回知らせるごとに頼み直す。
+  bfmem はどちらも頼まないので、CQE を書いても EQE は来ず、EQE を書いても割り込みは来ない。CPU が CQ と EQ のリングの owner を読んで、
+  新しい CQE・EQE を見つける。そのため EQ に来るのは、CQ の完了以外のイベント(エラー・リンクの変化・FW のページ要求)だけになる。
 * ConnectX のポート(PCIe の機能)ごとに装置 `bfm_dev_t`(`g_bfm_dev[BFM_MAX_PORT]`)を 1 つ持ち、この章に書く PCIe の設定・FW の起動・コマンド・EQ・GSI は、どれもポートごとに行う。
 
 [[cx-block]]
@@ -25,7 +29,9 @@ image::hw_block.drawio.svg[ConnectX とホストのブロック図]
 |① 設定空間 |装置の確認・FLR・BAR0 の割り当て・Memory Space / Bus Master・MRRS |`bfm_pci_setup_step()`(VxWorks は ECAM を直接、Linux は VFIO の設定空間)
 |② 初期化セグメント |FW の版の確認、FW の初期化の完了待ち、コマンドキューの登録、コマンドのドアベル |`mlx5_hca_init_step()`・`mlx5_cmd_init()`・`mlx5_cmd_run()`
 |③ UAR ページ |WQE のドアベル・BlueFlame(WQE そのものを MMIO で書く)、EQ のドアベル |`post()`・`gsi_send()`・`mlx5_eq_update_ci()`
-|④ DMA(DMA 領域) |NIC がコマンド・メールボックス・WQE・送るデータを読み、CQE・EQE・読んだデータ・コマンドの応答を書く。FW に渡したページも NIC が自分の作業域(ICM)として使う |`bfm_mem_alloc()` で切り出した領域
+|④ DMA(DMA 領域) |CPU が書いて NIC が読むもの: コマンドの入力・メールボックス、WQE(SQ・RQ)、送るデータ、doorbell record。 +
+NIC が書いて CPU が読む(刈り取る)もの: コマンドの出力、CQE、EQE、read で読んだデータ、GSI で受け取ったメッセージ。 +
+FW に渡したページは、NIC が自分の作業域(ICM)として読み書きする(CPU は触らない) |`bfm_mem_alloc()` で切り出した領域
 |⑤ DMA(公開メモリ) |相手の bfmem からの write / read / atomic を、NIC が CPU を通さずに処理する |MKey(rkey)で範囲を決めるだけ
 |===
 
@@ -43,18 +49,22 @@ ConnectX は「FW が管理する資源(QP・CQ・EQ・MKey・PD・UAR)」と「
 . *イベントを受ける*: エラー・リンクの変化・FW のページ要求は EQ に EQE が来る(<<cx-eq>>)。
 . *止める*: `TEARDOWN_HCA` の後は FW にコマンドを出さず、Bus Master を落とす。
 
-[cols="2,2,3",options="header"]
+リングは、書く側(作る側)が 1 つずつ積み、読む側が 1 つずつ刈り取る(読み終えたことを書く側に返す)。
+表の「書く側」「読む側」は、その中身を書くのはどちらで、読んで処理するのはどちらか。
+
+[cols="2,2,1,1,4",options="header"]
 |===
-|もの |置き場所 |ドライバがすること
-|初期化セグメント |BAR0 の先頭 |FW の版を読む、コマンドキューの物理アドレスを書く、コマンドのドアベルを書く
-|コマンドキュー・メールボックス |ホストのメモリ(DMA 領域) |コマンドを組んで持ち主を FW にし、完了を待つ
-|FW に渡すページ(ICM) |ホストのメモリ(DMA 領域) |`MANAGE_PAGES` で物理アドレスを渡す(返してもらわない)
-|EQ のリング |ホストのメモリ |EQE の owner を見て読み、EQ のドアベルで消費の数を知らせる
-|WQ(SQ・RQ)のリング |ホストのメモリ |WQE を書く
-|CQ のリング |ホストのメモリ |CQE の owner を見て読む
-|doorbell record |ホストのメモリ(QP・CQ ごとに 64 バイト) |SQ / RQ に積んだ数・CQ から読んだ数を書く(NIC が DMA で読む)
-|UAR ページ |BAR0 の中(4KiB ずつ) |ドアベル・BlueFlame の窓に MMIO で書く
-|QP・CQ・EQ・MKey のコンテキスト |NIC の中(ICM) |コマンドで作り、状態を変える。直接は触らない
+|もの |置き場所 |書く側 |読む(刈り取る)側 |やり取り
+|初期化セグメント |BAR0 の先頭 |両方 |両方 |FW が版と initializing を出し、CPU が読む。CPU がコマンドキューの物理アドレスとコマンドのドアベルを書き、FW が読む
+|コマンドキュー・メールボックス |ホストのメモリ(DMA 領域) |CPU → FW → CPU |FW → CPU |CPU が入力を書いて ownership = 1(持ち主を FW)にし、ドアベルを書く。FW が読んで処理し、出力を書いて ownership = 0 に戻す。CPU が出力を読む
+|FW に渡すページ(ICM) |ホストのメモリ(DMA 領域) |NIC |NIC |CPU は `MANAGE_PAGES` で物理アドレスを渡すだけ。中身は NIC が作業域として読み書きする(返してもらわない)
+|SQ のリング |ホストのメモリ |CPU |NIC |CPU が WQE を積み、doorbell record[1] とドアベル(または BlueFlame)で知らせる。NIC が WQE を読んで実行する(BlueFlame で受けた WQE はリングを読まない)。刈り取ったことは CQE で返る
+|RQ のリング(GSI だけ) |ホストのメモリ |CPU |NIC |CPU が受信の枠(WQE)を積み、doorbell record[0] で知らせる(MMIO のドアベルは無い)。NIC がメッセージを受けたときに WQE を読み、その枠へ書く。RC の QP の RQ は作るが使わない
+|CQ のリング |ホストのメモリ |NIC |CPU |NIC が SQ・RQ の完了の CQE を積む。CPU が owner を見て読み、CQ の doorbell record に読んだ数を書いて返す
+|EQ のリング |ホストのメモリ |NIC |CPU |NIC が EQE(イベント)を積む。CPU が owner を見て読み、EQ のドアベル(UAR + 0x048)に読んだ数を書いて返す
+|doorbell record |ホストのメモリ(QP・CQ ごとに 64 バイト) |CPU |NIC |SQ / RQ に積んだ数・CQ から読んだ数。NIC が DMA で読む
+|UAR ページ |BAR0 の中(4KiB ずつ) |CPU |NIC |ドアベル・BlueFlame の窓・EQ のドアベル。CPU が MMIO で書く
+|QP・CQ・EQ・MKey のコンテキスト |NIC の中(ICM) |NIC |NIC |CPU はコマンドで作り、状態を変えるだけ。直接は触らない
 |===
 
 ==== ラダーチャート
@@ -70,6 +80,13 @@ ConnectX は「FW が管理する資源(QP・CQ・EQ・MKey・PD・UAR)」と「
 
 .ラダーチャート(FW の起動・コマンド・ページの受け渡し・資源の作成・停止)
 image::hw_ladder_boot.drawio.svg[ラダーチャート(起動・コマンド・資源)]
+
+RQ を使うのは、接続の確立のメッセージ(REQ / REP / BYE)をやり取りする GSI(QP1、UD)だけ。GSI の送受信を次の図に描く
+(掛け側が REQ を送って REP を受ける向き。受け側は REQ を受けて REP を送る、の逆向きで、手順は同じ)。
+GSI の送信は BlueFlame を使わない(UC のドアベル)。
+
+.ラダーチャート(接続の確立・GSI の送受信)
+image::hw_ladder_gsi.drawio.svg[ラダーチャート(接続の確立・GSI の送受信)]
 
 データの転送は、こちらから出す write / read を BlueFlame 有効と BlueFlame 無効の 2 つの図に、相手から来る
 write / read / atomic(BlueFlame に関わらず同じ)を共通の図に分けて描く。BlueFlame 有効と無効の違いは、WQE を NIC に渡すところだけ。

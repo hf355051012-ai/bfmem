@@ -373,6 +373,32 @@ LADDER_DATA_PEER = [
     ("msg", "nic", "peer", "RoCE v2: ATOMIC ACKNOWLEDGE(元の値)", "ret"),
 ]
 
+# GSI(QP1、UD)の送受信。RQ を使うのはこの QP だけ。掛け側の REQ → REP で描く(受け側は REQ を受けて REP を送る、の逆向き)。
+LADDER_GSI = [
+    ("phase", "受信の枠を RQ に投稿しておく(GSI を作ったときに 128 個。受け取るたびに 1 個出し直す)"),
+    ("msg", "cpu", "mem", "書く: RQ の WQE(16 バイト = 受信の枠の物理アドレス・lkey・長さ 128)を RQ へ"),
+    ("msg", "cpu", "mem", "書く: doorbell record[0] = rq_pc(RQ は MMIO のドアベルを叩かない。NIC は doorbell record を読んで枠の数を知る)"),
+    ("phase", "掛け側: REQ を送る(SQ。UD なので ACK は無い。REP が来なければ送り直す)"),
+    ("msg", "cpu", "mem", "書く: REQ(64 バイト)を送信の置き場へ"),
+    ("msg", "cpu", "mem", "書く: SEND の WQE(ctrl 16 + datagram 48 = 宛先の MAC・GID・QP1 + data 16 = 送信の置き場)を SQ へ、"
+                          "doorbell record[1] = sq_pc"),
+    ("msg", "cpu", "nic", "MMIO 書き(UC): GSI の UAR のドアベル(UAR + 0x800)へ WQE の先頭 8 バイト"),
+    ("msg", "nic", "mem", "DMA 読み: SQ のリングから WQE(2 WQEBB)"),
+    ("msg", "nic", "mem", "DMA 読み: 送信の置き場から REQ"),
+    ("msg", "nic", "peer", "RoCE v2: UD SEND(宛先 QP1。GRH + REQ)"),
+    ("msg", "nic", "mem", "DMA 書き: GSI の CQ へ CQE(送信の完了 = REQ)"),
+    ("msg", "cpu", "mem", "読む: CQE の owner を見て、送信の置き場を空ける。CQ の doorbell record を進める"),
+    ("act", "peer", "相手の bfmem が REQ を受け取り(下の段と同じ手順)、RC の QP を作って REP を UD SEND で返す"),
+    ("phase", "掛け側: REP を受け取る(RQ)"),
+    ("msg", "peer", "nic", "RoCE v2: UD SEND(宛先 QP1。GRH + REP)"),
+    ("msg", "nic", "mem", "DMA 読み: RQ のリングから、次の受信の WQE(受信の枠の位置)"),
+    ("msg", "nic", "mem", "DMA 書き: 受信の枠へ GRH 40 バイト + REP 64 バイト"),
+    ("msg", "nic", "mem", "DMA 書き: GSI の CQ へ CQE(受信の完了 = RESP_SEND。wqe_counter で枠を指す)"),
+    ("msg", "cpu", "mem", "読む: CQE の owner を見て、受信の枠から REP を写す。CQ の doorbell record を進める"),
+    ("msg", "cpu", "mem", "書く: 使った枠を RQ の WQE として出し直し、doorbell record[0] = rq_pc"),
+    ("msg", "cpu", "nic", "コマンド INIT2RTR → RTR2RTS(REP の相手の QPN・PSN で RC の QP を使えるようにする)"),
+]
+
 
 # ---------------------------------------------------------------------------
 # 手順の図(フロー図の配置を使う)
@@ -425,6 +451,7 @@ def build(g):
         "ladder_data_bf": (ladder(g, LADDER_DATA_BF), "ラダーチャート(データの転送・BlueFlame 有効)"),
         "ladder_data_nobf": (ladder(g, LADDER_DATA_NOBF), "ラダーチャート(データの転送・BlueFlame 無効)"),
         "ladder_data_peer": (ladder(g, LADDER_DATA_PEER), "ラダーチャート(データの転送・共通)"),
+        "ladder_gsi": (ladder(g, LADDER_GSI), "ラダーチャート(接続の確立・GSI の送受信)"),
         "mailbox": (mailbox(g), "コマンドとメールボックス"),
         "qp": (qp(g), "QP の持ち方"),
         "boot": (g.layout_flow("", BOOT, "開始: bfm_dev_step()(ポートごと)"), "立ち上げの手順"),
