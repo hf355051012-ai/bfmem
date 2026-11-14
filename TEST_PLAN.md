@@ -779,3 +779,29 @@ devlink dev info pci/0000:b3:00.0        # running / stored の版
 - OptiPlex(FW 14.32.1900。前から 14.29.1016 ではなかった)と、両方で同じ `run` を流した: **合格。** 両方とも検査 49 件が OK・NG 0、
   mt も NG 0、「模型の hash」と相手の「自分の公開メモリの hash」が両方の向きで `e92cdeb4e6b0c81d`。Precision(受け側)は
   7.82 秒、OptiPlex(掛け側)は 0.40 秒で全部の接続が使えた。終わった後、3 つとも mlx5_core に戻した。
+
+### カードのリセット(`bfm_fw_reset()`。`bfmem_test reset` / `fw -X`)
+
+カードの全部の PF を vfio-pci にしておく(カード全体がリセットされるので、mlx5_core に残すと壊れる)。
+
+```bash
+# Precision。2 つの PF を vfio-pci にして(上の手順を b3:00.0 と b3:00.1 の両方に)、リセットして立ち上げ直す
+sudo build/bfmem_test -v -d 0000:b3:00.0 -i 192.168.101.21 -D 0000:b3:00.1 -I 192.168.102.21 \
+    reset 192.168.101.11 192.168.102.11 < /dev/null
+# FW を書いて切り替えてから、リセットで有効にする(fw はポート 0 だけなので、reset を別に流す)
+sudo build/bfmem_test -A -d 0000:b3:00.0 -i 192.168.101.21 fw 192.168.101.11 /var/tmp/cx4lx_14_29_1016.bin < /dev/null
+sudo build/bfmem_test -d 0000:b3:00.0 -i 192.168.101.21 -D 0000:b3:00.1 -I 192.168.102.21 \
+    reset 192.168.101.11 192.168.102.11 < /dev/null
+# 終わったら 2 つとも mlx5_core に戻し、devlink dev info の running と dmesg の AER を見る
+```
+
+記録(2026-11-14、Precision の ConnectX-4 Lx。相手のノードは動かしていない):
+- 14.32.1912 のまま `reset`: MFRL は reset_level 0xc8・落とし方 0(Link Disable)。level 3 を書き、2 つのポートを止め、
+  ルートポート `0000:b2:00.0` で Link Disable を 500ms。**リンクは 43ms で上がり、リンクを戻してから 144ms で 2 つの PF の
+  設定空間を戻した**(BAR0 `0x3800c0000000` / `0x3800c2000000`、Command 0x0502)。`bfm_fw_reset()` は 3.3 秒。bfmem は 6.4 秒で
+  立ち上げ直した。立ち上げ直しでは物理ポートのリンクが一度落ちて ACTIVE に戻り(カードがリセットされた印)、
+  FW がページの返却を申し出た。mlx5_core に戻した後、Max Payload Size 256・リンク UP、AER なし。
+- **`fw -A` で 14.29.1016 を書き(46.5 秒)、`reset` すると、立ち上げ直しの表示が `FW 14.29.1016` になった**(FW のページは
+  7,841 に戻る)。mlx5_core に戻した後も running / stored とも 14.29.1016。電源を入れ直さずに FW が切り替わった。
+- 同じ手順で 14.32.1912 に戻した(`fw -A` 46.1 秒、`reset` 2.0 秒、立ち上げ直し 6.4 秒で `FW 14.32.1912`)。mlx5_core に
+  戻した後、running / stored とも 14.32.1912、2 つのポートともリンク UP、AER なし。

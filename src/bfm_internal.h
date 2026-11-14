@@ -125,6 +125,7 @@ extern bfm_lock_t g_bfm_ctl_lock;
 #define MLX5_REG_MCC             0x9062u   /* 更新の手順(FSM)を進める命令と状態 */
 #define MLX5_REG_MCDA            0x9063u   /* 部品のデータを渡す */
 #define MLX5_REG_MCAM            0x907fu   /* どのレジスタに対応しているか */
+#define MLX5_REG_MFRL            0x9028u   /* 装置のリセットの種類と、次のリセットの範囲(level)*/
 
 #define MLX5_CAP_GENERAL 0u
 #define MLX5_CAP_ATOMIC  3u
@@ -439,6 +440,15 @@ int  bfm_dev_ready(const bfm_dev_t *d);    /* ポートの立ち上げが済ん�
 void bfm_pci_setup_reset(bfm_dev_t *d);
 int  bfm_pci_setup_step(bfm_dev_t *d);
 void bfm_pci_bus_master(bfm_dev_t *d, int on);
+/* カードのリセット(MFRL level 3 の後に上流のポートでリンクを落とす)。method は MFRL の pci_reset_req_method */
+#define BFM_RESET_LINK_DISABLE 0   /* Link Disable で落とす */
+#define BFM_RESET_HOT_RESET    1   /* Secondary Bus Reset で落とす */
+int  bfm_pci_reset_check(bfm_dev_t *d);
+void bfm_pci_reset_begin(bfm_dev_t *d, int method);
+int  bfm_pci_reset_step(bfm_dev_t *d);
+
+/* bfm_fw.c */
+int  bfm_fw_mfrl_step(bfm_dev_t *d, int *method);   /* MFRL を読んで level 3 に対応しているか確かめ、level 3 を書く */
 
 /* mlx5_cmd.c */
 int  mlx5_cmd_init(bfm_dev_t *d);

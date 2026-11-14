@@ -11,7 +11,9 @@
  * 最初の手順を処理し、次の手順も、そのとき鍵を取ったコアが処理する)。
  *   ポートの立ち上げ: D_IDLE -> D_PCI -> D_MAP -> D_HCA -> D_DIF -> D_CM -> D_READY
  *   失敗:            D_STOP(S_CM -> S_CMD -> S_TEARDOWN -> S_BUS)-> D_FAILED
- *   停止:            D_STOP -> D_IDLE(bfm_shutdown())
+ *   停止:            D_STOP -> D_IDLE(bfm_shutdown()、bfm_fw_reset())
+ * bfm_fw_reset()(カードのリセット)は、MFRL に level 3 を書き(bfm_fw.c)、全部のポートを止め、上流のポートで
+ * PCIe のリンクを落として繋ぎ直し(bfm_pci.c)、ポート層を閉じる。次の bfm_run() で最初から立ち上げる。
  * 待つところでは BFM_INPROGRESS を返し、回って待たない(bfm_shutdown() の鍵だけは回って取る)。 */
 #include "bfm_internal.h"
 
@@ -305,10 +307,13 @@ int bfm_run(void)
     }
 }
 
-int bfm_shutdown(void)
+/*=================================================================
+ * 全部のポートを止める手順を、待つところまで進める(bfm_shutdown() と bfm_fw_reset() から。s_run を
+ * R_STOP にしてから呼ぶ)。止め終えたポートは D_IDLE にする。ポート層は閉じない。
+ * 戻り値: BFM_INPROGRESS = 途中。BFM_OK = 全部止めた。
+ * ===============================================================*/
+static int stop_all_step(void)
 {
-    if (__atomic_load_n(&s_run, __ATOMIC_ACQUIRE) == R_IDLE) return BFM_OK;
-    __atomic_store_n(&s_run, R_STOP, __ATOMIC_RELEASE);   /* bfm_run() は表を進めなくなる */
     int busy = 0;
     bfm_lock(&g_bfm_ctl_lock);
     for (unsigned p = 0; p < BFM_MAX_PORT; p++) {
@@ -319,7 +324,75 @@ int bfm_shutdown(void)
         else d->phase = D_IDLE;
     }
     bfm_unlock(&g_bfm_ctl_lock);
-    if (busy) return BFM_INPROGRESS;
+    return busy ? BFM_INPROGRESS : BFM_OK;
+}
+
+/* カードのリセットの手順(s_xr.step)。 */
+enum {
+    X_IDLE = 0,       /* していない */
+    X_ARM,            /* MFRL に level 3 を書く(ポートは動いたまま)*/
+    X_STOP,           /* 全部のポートを止める(接続を畳み、TEARDOWN_HCA、Bus Master を落とす)*/
+    X_LINK            /* 上流のポートでリンクを落とし、繋ぎ直して設定空間を戻す */
+};
+
+static struct {
+    int step;                        /* 今の手順(X_*)*/
+    unsigned port;                   /* リセットを頼まれたポート */
+    int method;                      /* リンクの落とし方(MFRL の pci_reset_req_method)*/
+} s_xr;
+
+int bfm_fw_reset(unsigned port)
+{
+    if (port >= BFM_MAX_PORT) return BFM_E_PARAM;
+    bfm_dev_t *d = &g_bfm_dev[port];
+    int rc;
+    switch (s_xr.step) {
+    case X_IDLE:
+        if (__atomic_load_n(&s_run, __ATOMIC_ACQUIRE) != R_RUN || !d->used || !bfm_dev_ready(d)) return BFM_E_STATE;
+        if ((rc = bfm_pci_reset_check(d)) != BFM_OK) return rc;
+        BFM_LOG("bfm: ポート %u: カードをリセットする (MFRL level 3)\n", port);
+        s_xr.port = port;
+        s_xr.method = BFM_RESET_LINK_DISABLE;
+        s_xr.step = X_ARM;
+        return BFM_INPROGRESS;
+    case X_ARM:
+        if (port != s_xr.port) return BFM_E_BUSY;
+        if (!bfm_trylock(&g_bfm_ctl_lock)) return BFM_INPROGRESS;
+        rc = bfm_dev_ready(d) ? bfm_fw_mfrl_step(d, &s_xr.method) : BFM_E_STATE;
+        bfm_unlock(&g_bfm_ctl_lock);
+        if (rc == BFM_INPROGRESS) return BFM_INPROGRESS;
+        if (rc != BFM_OK) {
+            s_xr.step = X_IDLE;                 /* まだ何も止めていない(bfmem は動いたまま)*/
+            return rc;
+        }
+        __atomic_store_n(&s_run, R_STOP, __ATOMIC_RELEASE);   /* bfm_run() は表を進めなくなる */
+        s_xr.step = X_STOP;
+        return BFM_INPROGRESS;
+    case X_STOP:
+        if (port != s_xr.port) return BFM_E_BUSY;
+        if (stop_all_step() == BFM_INPROGRESS) return BFM_INPROGRESS;
+        bfm_pci_reset_begin(d, s_xr.method);
+        s_xr.step = X_LINK;
+        return BFM_INPROGRESS;
+    default:   /* X_LINK */
+        if (port != s_xr.port) return BFM_E_BUSY;
+        if ((rc = bfm_pci_reset_step(d)) == BFM_INPROGRESS) return BFM_INPROGRESS;
+        bfm_port_fini();
+        s_xr.step = X_IDLE;
+        __atomic_store_n(&s_run, R_IDLE, __ATOMIC_RELEASE);
+        BFM_LOG("bfm: 止めた (カードのリセット: %s)\n", bfm_strerror(rc));
+        return rc;
+    }
+}
+
+int bfm_shutdown(void)
+{
+    /* カードのリセットの途中: リセットも全部を止めるところまで進むので、それを済ませる
+     * (MFRL を書く前に失敗したときは、動いたままなので、この下でふつうに止める)*/
+    if (s_xr.step != X_IDLE && bfm_fw_reset(s_xr.port) == BFM_INPROGRESS) return BFM_INPROGRESS;
+    if (__atomic_load_n(&s_run, __ATOMIC_ACQUIRE) == R_IDLE) return BFM_OK;
+    __atomic_store_n(&s_run, R_STOP, __ATOMIC_RELEASE);   /* bfm_run() は表を進めなくなる */
+    if (stop_all_step() == BFM_INPROGRESS) return BFM_INPROGRESS;
     bfm_port_fini();
     __atomic_store_n(&s_run, R_IDLE, __ATOMIC_RELEASE);
     BFM_LOG("bfm: 止めた\n");

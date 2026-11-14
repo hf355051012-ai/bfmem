@@ -1,6 +1,6 @@
 {
   "file": "src/bfm_pci.c",
-  "summary": "PCIe の設定空間を自分で設定する(VxWorks では OS もドライバも設定しないため)。ConnectX はポートごとに別の PCIe の function なので、手順はポート(`bfm_dev_t`、`g_bfm_dev[port]`)ごとに進め、状態もポートごとの `s_pci[port]` に持つ。`bfm_pci_setup_step()` が次の順に行う。\n\n. 装置の確認(Mellanox の ConnectX-4〜7 の PF か。`pci_probe()`)\n. FLR(`g_bfm_pcie_flr`。前回の実行で動いたままの NIC を止める)\n. BAR0 の大きさを測り、`g_bfm_bar0_addr[port]` を書き込む(0 なら今の値を使う)\n. Memory Space / Bus Master を有効にし、INTx を止める(割り込みは使わない)\n. Max Read Request Size(`g_bfm_pcie_mrrs`)\n\n`bfm_pci_setup_step()` は状態機械(`s_pci[port].step`。`P_PROBE` → `P_TRPND` → `P_FLR_WAIT` → `P_PRESENT` → `P_BAR` → `P_DONE`)で、FLR の待ち(保留中の DMA、FLR から 100ms、設定空間が読めるまで)では待たずに `BFM_INPROGRESS` を返す。ポートの立ち上げ(`bfm_dev_step()` の `D_IDLE`)が `bfm_pci_setup_reset()` で状態を最初に戻し、`D_PCI` で `BFM_INPROGRESS` でなくなるまで呼び続ける。BAR0・MRRS・Command の設定は `pci_setup()` が行う。\n\n設定空間の読み書きは移植層(`bfm_port_pci_read32()` / `bfm_port_pci_write32()`。ポートの番号 `d->port` を渡す)を通す。Linux では VFIO の設定空間を通るので、BAR への書き込みは VFIO の中だけで効く(実際の BAR はカーネルが割り当てたまま)。そのため Linux では `g_bfm_bar0_addr[]` を 0 にしておく。",
+  "summary": "PCIe の設定空間を自分で設定する(VxWorks では OS もドライバも設定しないため)。ConnectX はポートごとに別の PCIe の function なので、手順はポート(`bfm_dev_t`、`g_bfm_dev[port]`)ごとに進め、状態もポートごとの `s_pci[port]` に持つ。`bfm_pci_setup_step()` が次の順に行う。\n\n. 装置の確認(Mellanox の ConnectX-4〜7 の PF か。`pci_probe()`)\n. FLR(`g_bfm_pcie_flr`。前回の実行で動いたままの NIC を止める)\n. BAR0 の大きさを測り、`g_bfm_bar0_addr[port]` を書き込む(0 なら今の値を使う)\n. Memory Space / Bus Master を有効にし、INTx を止める(割り込みは使わない)\n. Max Read Request Size(`g_bfm_pcie_mrrs`)\n\n`bfm_pci_setup_step()` は状態機械(`s_pci[port].step`。`P_PROBE` → `P_TRPND` → `P_FLR_WAIT` → `P_PRESENT` → `P_BAR` → `P_DONE`)で、FLR の待ち(保留中の DMA、FLR から 100ms、設定空間が読めるまで)では待たずに `BFM_INPROGRESS` を返す。ポートの立ち上げ(`bfm_dev_step()` の `D_IDLE`)が `bfm_pci_setup_reset()` で状態を最初に戻し、`D_PCI` で `BFM_INPROGRESS` でなくなるまで呼び続ける。BAR0・MRRS・Command の設定は `pci_setup()` が行う。\n\n設定空間の読み書きは移植層(`bfm_port_pci_read32()` / `bfm_port_pci_write32()`。ポートの番号 `d->port` を渡す)を通す。Linux では VFIO の設定空間を通るので、BAR への書き込みは VFIO の中だけで効く(実際の BAR はカーネルが割り当てたまま)。そのため Linux では `g_bfm_bar0_addr[]` を 0 にしておく。\n\n後半はカードのリセット(`bfm_fw_reset()` から。FW の MFRL に level 3 を書いた後)。FW は、level 3 を書かれた後に PCIe のリンクが落ちると、カード全体(全部の function)をリセットし、次の起動の FW の像で立ち上がる。リンクは上流のポート(ルートポートか PCIe スイッチの下りポート)で落とす(Linux の mlx5 の `mlx5_pci_link_toggle()` / `mlx5_pci_reset_bus()` と同じ)。Link Disable を 500ms 立てて戻すか、Secondary Bus Reset を 2ms 立てて戻すかは、MFRL の pci_reset_req_method で FW が決める。`bfm_pci_reset_check()` が上流のポートを確かめ、`bfm_pci_reset_begin()` が使っている全部のポートの設定空間を覚えてリンクを落とし、`bfm_pci_reset_step()`(状態機械 `s_rst.step`。`L_HOLD` → `L_LINK` → `L_SETTLE` → `L_READY` → `L_DONE`)がリンクを戻し、リンクが上がる(Data Link Layer Link Active)のを待ち、100ms 待ち、設定空間が読めるのを待って、リセットで消えた設定空間(BAR・Command・Max Payload Size など)を戻す。OS が設定空間を仮想化していても装置そのものへ書くため、ここは `bfm_port_pci_hw_read32()` / `bfm_port_pci_hw_write32()` と、上流のポートの `bfm_port_up_read32()` / `bfm_port_up_write32()` を使う。",
   "functions": [
     {
       "func": "pci_cmd_read",
@@ -274,6 +274,134 @@
           {"call": "pci_cmd_write(d, cmd から PCI_CMD_MASTER を落とした値) を呼ぶ"}
         ]}
       ]
+    },
+    {
+      "func": "rst_find_pcie",
+      "purpose": "カードのリセットで、上流のポートと装置の PCI Express の capability(リンクの制御・状態や Max Payload Size のレジスタがある場所)を見つけるための下請け。リセットの手順は、OS が仮想化しない設定空間の道を使うので、`pci_find_pcie_cap()` とは別に持つ。",
+      "summary": "`up` が 1 なら上流のポート(`bfm_port_up_read32()`)、0 なら装置そのもの(`bfm_port_pci_hw_read32()`)の設定空間で、Status の Capabilities List が立っていれば、capability の並び(0x34 から)をたどって PCI Express(ID 0x10)の位置を返す。",
+      "args": {"port": "ポートの番号", "up": "1 = 上流のポート、0 = 装置そのもの"},
+      "ret": "PCI Express の capability の位置。無い・読めない(0xffffffff)なら 0。",
+      "pre": "`bfm_port_init()` の後。",
+      "notes": "たどるのは 48 個まで(壊れた並びで回り続けないため)。",
+      "flow": [
+        {"do": "st = up ? bfm_port_up_read32(port, PCI_COMMAND) : bfm_port_pci_hw_read32(port, PCI_COMMAND)"},
+        {"if": "st == 0xffffffff または Status の Capabilities List が立っていない?", "then": [{"return": "0"}]},
+        {"do": "pos = 0x34(Capabilities Pointer)の値 AND 0xfc(up に応じた関数で読む)"},
+        {"while": "pos != 0 かつ 48 個未満?", "body": [{"do": "v = pos の 32bit(up に応じた関数で読む)"}, {"if": "v の下位 8bit == PCI_CAP_ID_EXP ?", "then": [{"return": "pos"}]}, {"do": "pos = (v >> 8) AND 0xfc"}]},
+        {"return": "0"}
+      ]
+    },
+    {
+      "func": "bfm_pci_reset_check",
+      "purpose": "カードのリセットを始める前に、リンクを落とせる上流のポートがあるかを確かめるための関数。何も止めず・何も書かないうちに断れるよう、`bfm_fw_reset()` の最初に呼ぶ。",
+      "summary": "ポート `d` の上流のポートのベンダ ID が読めること、header が Type 1(ブリッジ)で、PCI Express の capability があり、その Device/Port Type がルートポート(4)かスイッチの下りポート(6)であることを確かめる。通れば、上流のポートの PCI Express の capability の位置と、Link Active を報告できるか(Link Capabilities の DLLLARC)を `s_rst` に覚える。",
+      "args": {"d": "リセットを頼まれたポートの装置"},
+      "ret": "`BFM_OK`: リセットできる。`BFM_E_NOTSUP`: 上流のポートが読めない・ルートポートでもスイッチの下りポートでもない(理由を表示する)。",
+      "pre": "`bfm_port_init()` の後。",
+      "notes": "待たない(設定空間を読むだけ)。上流のポートの下にほかの装置がつながっていないかは確かめない(呼ぶ側の約束。`bfm_fw_reset()` の注意)。",
+      "flow": [
+        {"call": "id = bfm_port_up_read32(p, PCI_ID) を呼ぶ"},
+        {"if": "ベンダ ID が 0xffff ?", "then": [{"do": "BFM_LOG で「上流のポートの設定空間が読めない」を表示"}, {"return": "BFM_E_NOTSUP"}]},
+        {"call": "hdr = header type(bfm_port_up_read32(p, PCI_HDR_TYPE))、pos = rst_find_pcie(p, 1)、type = Device/Port Type を求める"},
+        {"if": "hdr != 1 または pos == 0 または type がルートポートでも下りポートでもない?", "then": [{"do": "BFM_LOG で理由を表示"}, {"return": "BFM_E_NOTSUP"}]},
+        {"do": "s_rst.up_pcie = pos"},
+        {"call": "s_rst.dllla = Link Capabilities の DLLLARC(bfm_port_up_read32(p, pos + PCIE_LNKCAP))"},
+        {"return": "BFM_OK"}
+      ]
+    },
+    {
+      "func": "bfm_pci_reset_begin",
+      "purpose": "カードのリセットで消える設定空間を覚えてから、上流のポートで PCIe のリンクを落とし、FW にカード全体をリセットさせるための関数。全部のポートを止めた後に `bfm_fw_reset()` が 1 回呼ぶ。",
+      "summary": "使っている全部のポートについて、装置そのものの設定空間から Command・cache line と latency・BAR(0x10〜0x24 の 6 つ)・Device Control(FLR のビットを除く)・Link Control(Link Disable・Retrain を除く)・Device Control 2 を `s_rst.dev[]` に覚える。`method` が Secondary Bus Reset なら上流のポートの Bridge Control の SBR を、そうでなければ Link Control の Link Disable を立て、時刻を覚えて `L_HOLD` にする。",
+      "args": {"d": "リセットを頼まれたポートの装置(この上流のポートでリンクを落とす)", "method": "リンクの落とし方(MFRL の pci_reset_req_method。`BFM_RESET_LINK_DISABLE` / `BFM_RESET_HOT_RESET`)"},
+      "ret": "なし",
+      "pre": "`bfm_pci_reset_check()` が通り、MFRL に level 3 を書き、全部のポートを止めて(Bus Master を落として)あること。",
+      "notes": "* カードの全部の function がリセットされるので、使っている全部のポートを覚える。別のカードのポートは、後で同じ値を書き直すだけになる。\n* 装置そのものの道(`bfm_port_pci_hw_read32()`)で読むので、Linux でも VFIO の仮想化した値でなく、装置の本当の値を覚える。",
+      "flow": [
+        {"while": "q < BFM_MAX_PORT ?(q は 0 から)", "body": [{"call": "pos = g_bfm_dev[q].used ? rst_find_pcie(q, 0) : 0"}, {"do": "s_rst.dev[q].pcie = pos"}, {"if": "pos == 0 ?", "then": [{"continue": true}]}, {"call": "bfm_port_pci_hw_read32() で Command・cache line と latency・BAR 6 つ・Device Control・Link Control・Device Control 2 を読んで覚える"}]},
+        {"do": "s_rst.method = method"},
+        {"if": "method == BFM_RESET_HOT_RESET ?", "then": [{"do": "BFM_LOG で「Secondary Bus Reset をかける」を表示"}, {"call": "bfm_port_up_write32(p, PCI_BRIDGE_CTL, 今の値 OR PCI_BCTL_SBR) を呼ぶ"}], "else": [{"do": "BFM_LOG で「リンクを切る(Link Disable)」を表示"}, {"call": "bfm_port_up_write32(p, s_rst.up_pcie + PCIE_LNKCTL, 今の値 OR PCIE_LNKCTL_LD) を呼ぶ"}]},
+        {"call": "s_rst.t0 = bfm_port_time_ns()"},
+        {"do": "s_rst.step = L_HOLD"}
+      ]
+    },
+    {
+      "func": "rst_restore",
+      "purpose": "カードのリセットで初期値に戻ってしまった設定空間を、リセットの前の値に書き戻すための下請け。BAR が戻らないと BAR0 を張れず、Max Payload Size が戻らないと上流のポートとの間で大きすぎる TLP が出うるため。",
+      "summary": "`s_rst.dev[q]` に覚えた値を、装置そのものの設定空間へ書く。BAR 6 つ → cache line と latency → Device Control → Link Control → Device Control 2 → Command の順(Memory Space を入れるのを最後にする)。",
+      "args": {"q": "ポートの番号"},
+      "ret": "なし",
+      "pre": "`s_rst.dev[q].pcie` が 0 でない(覚えてある)こと。設定空間が読めるようになっていること。",
+      "notes": "* cache line・latency は下位 16bit だけを書く(BIST を動かさない)。\n* Device Control・Link Control・Command の上位 16bit(状態。1 を書くと消えるビットがある)は 0 を書いて触らない。",
+      "flow": [
+        {"call": "bfm_port_pci_hw_write32() で BAR 6 つを書く"},
+        {"call": "bfm_port_pci_hw_write32() で cache line と latency・Device Control・Link Control・Device Control 2 を書く"},
+        {"call": "bfm_port_pci_hw_write32(q, PCI_COMMAND, 覚えた Command) を呼ぶ"}
+      ]
+    },
+    {
+      "func": "bfm_pci_reset_step",
+      "purpose": "カードのリセットの後半(リンクを戻し、カードが立ち上がるのを待ち、消えた設定を戻す)を、回って待たずに少しずつ進める状態機械。`bfm_fw_reset()` が `BFM_INPROGRESS` でなくなるまで呼び続ける。",
+      "summary": "`L_HOLD`: 落としてから 500ms(Secondary Bus Reset なら 2ms)たったら、上流のポートの Link Disable / SBR を戻す。`L_LINK`: 上流のポートが Link Active を報告できるなら、Link Status の DLLLA が立つまで待ち(2 秒で時間切れ)、報告できなければ 1 秒待つ。`L_SETTLE`: 100ms 待つ。`L_READY`: 覚えた全部のポートのベンダ ID が読めるまで待ち(2 秒で時間切れ)、`rst_restore()` で設定空間を戻し、かかった時間を表示する。",
+      "args": {"d": "リセットを頼まれたポートの装置"},
+      "ret": "`BFM_INPROGRESS`: 途中(もう一度呼ぶと先へ進む)。`BFM_OK`: 済んだ。`BFM_E_TIMEOUT`: リンクが上がらない・設定空間が読めない(理由を表示する)。",
+      "pre": "`bfm_pci_reset_begin()` の後。",
+      "notes": "* 時間の決め方は Linux の mlx5(`mlx5_pci_link_toggle()`: Link Disable を 500ms、Link Active を待ち、100ms、ベンダ ID を待つ)と、PCIe 基本仕様(リンクが上がってから 100ms 後に設定空間を読む)に合わせた。\n* 装置のベンダ ID は装置そのものの道で読む(Linux の VFIO はベンダ ID を仮想化していて、リセットの途中でも読めてしまうため)。\n* 済んだ後・失敗の後に呼んでも `L_DONE` のまま `BFM_OK` を返す。",
+      "flow": [
+        {"loop": "済むか待つまで", "body": [{"switch": "s_rst.step", "cases": [{"case": "L_HOLD", "body": [{"if": "落としてから RST_LD_HOLD_MS(SBR なら RST_SBR_HOLD_MS)たっていない?", "then": [{"return": "BFM_INPROGRESS"}]}, {"call": "bfm_port_up_write32() で SBR か Link Disable を戻す"}, {"call": "s_rst.t0 = s_rst.t_start = bfm_port_time_ns()"}, {"do": "s_rst.step = L_LINK"}]}, {"case": "L_LINK", "body": [{"if": "!s_rst.dllla ?", "then": [{"if": "RST_NO_DLLLA_MS たっていない?", "then": [{"return": "BFM_INPROGRESS"}]}], "else": [{"call": "bfm_port_up_read32() で Link Status を読む"}, {"if": "DLLLA が立っていない?", "then": [{"if": "RST_LINK_WAIT_MS たっていない?", "then": [{"return": "BFM_INPROGRESS"}]}, {"do": "BFM_LOG で「リンクが上がらない」を表示、s_rst.step = L_DONE"}, {"return": "BFM_E_TIMEOUT"}]}]}, {"do": "BFM_LOG で「リンクが上がった」とかかった時間を表示"}, {"call": "s_rst.t0 = bfm_port_time_ns()、s_rst.step = L_SETTLE"}]}, {"case": "L_SETTLE", "body": [{"if": "RST_SETTLE_MS たっていない?", "then": [{"return": "BFM_INPROGRESS"}]}, {"call": "s_rst.t0 = bfm_port_time_ns()、s_rst.step = L_READY"}]}, {"case": "L_READY", "body": [{"while": "覚えたポート q がある?", "body": [{"call": "bfm_port_pci_hw_read32(q, PCI_ID) を呼ぶ"}, {"if": "ベンダ ID が MLX5_VENDOR_ID でない?", "then": [{"if": "RST_READY_WAIT_MS たっていない?", "then": [{"return": "BFM_INPROGRESS"}]}, {"do": "BFM_LOG で「設定空間が読めない」を表示、s_rst.step = L_DONE"}, {"return": "BFM_E_TIMEOUT"}]}]}, {"while": "覚えたポート q がある?", "body": [{"call": "rst_restore(q) を呼ぶ"}, {"call": "BFM_DBG で戻した BAR0・Command を表示(bfm_port_pci_hw_read32() で読む)"}]}, {"do": "BFM_LOG で「カードのリセットが済んだ」とかかった時間を表示、s_rst.step = L_DONE"}, {"return": "BFM_OK"}]}, {"default": true, "body": [{"return": "BFM_OK"}]}]}]}
+      ],
+      "states": {
+        "start": "bfm_pci_reset_begin()(リンクを落とし、s_rst.step = L_HOLD)",
+        "list": [
+          {
+            "id": "L_HOLD",
+            "text": "Link Disable を 500ms(Secondary Bus Reset なら 2ms)立てたままにし、戻す",
+            "wait": "落としてからの時間"
+          },
+          {
+            "id": "L_LINK",
+            "text": "リンクが上がる(Link Status の DLLLA)のを待つ。報告できない上流のポートなら 1 秒待つ",
+            "wait": "リンクが上がる(2 秒まで)",
+            "next": [
+              {
+                "to": "L_SETTLE",
+                "label": "上がった"
+              },
+              {
+                "to": "L_DONE",
+                "label": "2 秒で上がらない(BFM_E_TIMEOUT)"
+              }
+            ]
+          },
+          {
+            "id": "L_SETTLE",
+            "text": "100ms 待つ(PCIe 基本仕様の決まり)",
+            "wait": "100ms"
+          },
+          {
+            "id": "L_READY",
+            "text": "全部のポートの設定空間が読めるのを待ち、覚えた設定空間を戻す(rst_restore())",
+            "wait": "ベンダ ID が読める(2 秒まで)",
+            "next": [
+              {
+                "to": "L_DONE",
+                "label": "戻した(BFM_OK)・読めない(BFM_E_TIMEOUT)"
+              }
+            ]
+          },
+          {
+            "id": "L_DONE",
+            "text": "済んだ",
+            "next": [
+              {
+                "to": "END"
+              }
+            ]
+          }
+        ],
+        "end": "結果を返す",
+        "note": "待つ状態では BFM_INPROGRESS を返して留まる。"
+      }
     }
   ]
 }

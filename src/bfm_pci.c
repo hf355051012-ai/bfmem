@@ -257,3 +257,213 @@ void bfm_pci_bus_master(bfm_dev_t *d, int on)
     const uint16_t cmd = pci_cmd_read(d);
     pci_cmd_write(d, on ? (uint16_t)(cmd | PCI_CMD_MASTER) : (uint16_t)(cmd & ~PCI_CMD_MASTER));
 }
+
+/*=================================================================
+ * カードのリセット(bfm_fw_reset() から。MFRL に level 3 を書いた後)
+ *
+ * FW は、MFRL に level 3(PCI のリセット)を書かれた後に PCIe のリンクが落ちると、カード全体
+ * (全部の function)をリセットし、次の起動の FW の像で立ち上がる。リンクは上流のポート
+ * (ルートポートか PCIe スイッチの下りポート)で落とす(Linux の mlx5 の mlx5_pci_link_toggle() /
+ * mlx5_pci_reset_bus() と同じ):
+ *   Link Disable:        Link Control の Link Disable を 500ms 立てて戻す
+ *   Secondary Bus Reset: Bridge Control の Secondary Bus Reset を 2ms 立てて戻す
+ * どちらにするかは MFRL の pci_reset_req_method で FW が決める。この後、リンクが上がる
+ * (Data Link Layer Link Active)のを待ち、100ms 待ち、設定空間が読めるようになるのを待って、
+ * リセットで消えた設定空間(BAR・Command・Max Payload Size など)を戻す。
+ * カードの全部の function がリセットされるので、使っている全部のポートの設定空間を覚えて戻す
+ * (別のカードのポートは、同じ値を書き直すだけ)。OS が設定空間を仮想化していても装置そのものへ
+ * 書くため、bfm_port_pci_hw_read32 / write32 を使う。
+ * ===============================================================*/
+
+#define PCI_HDR_TYPE        0x0cu   /* 下位 16bit が cache line・latency、その上が header type と BIST */
+#define PCI_BRIDGE_CTL      0x3cu   /* 上位 16bit が Bridge Control(Type 1)*/
+#define PCI_BCTL_SBR        0x00400000u   /* Secondary Bus Reset(dword 0x3c の bit 22)*/
+#define PCIE_LNKCAP         0x0cu
+#define PCIE_LNKCTL         0x10u   /* 下位 16bit。上位は LnkSta */
+#define PCIE_DEVCTL2        0x28u
+#define PCIE_LNKCAP_DLLLARC 0x00100000u   /* Data Link Layer Link Active を報告できる */
+#define PCIE_LNKCTL_LD      0x0010u
+#define PCIE_LNKCTL_RL      0x0020u
+#define PCIE_LNKSTA_DLLLA   0x2000u
+#define PCIE_TYPE_ROOT      0x4u    /* PCIe の Device/Port Type: ルートポート */
+#define PCIE_TYPE_DOWN      0x6u    /* PCIe の Device/Port Type: スイッチの下りポート */
+
+#define RST_LD_HOLD_MS      500u    /* Link Disable を立てておく時間(Linux の mlx5 と同じ)*/
+#define RST_SBR_HOLD_MS     2u      /* Secondary Bus Reset を立てておく時間(Linux の pci_reset_secondary_bus() と同じ)*/
+#define RST_LINK_WAIT_MS    2000u   /* リンクが上がるのを待つ上限 */
+#define RST_NO_DLLLA_MS     1000u   /* Link Active を報告できない上流のポートでは、この時間だけ待つ */
+#define RST_SETTLE_MS       100u    /* リンクが上がってから設定空間を読むまで(PCIe 基本仕様の決まり)*/
+#define RST_READY_WAIT_MS   2000u   /* 設定空間が読めるようになるのを待つ上限 */
+#define RST_NBAR            6u      /* 覚えて戻す BAR の数(0x10〜0x24)*/
+
+/* リセットの状態(bfm_pci_reset_step() が 1 つずつ進める)。 */
+enum {
+    L_HOLD = 0,       /* Link Disable / Secondary Bus Reset を立てて待つ */
+    L_LINK,           /* リンクが上がるのを待つ */
+    L_SETTLE,         /* 100ms 待つ */
+    L_READY,          /* 全部のポートの設定空間が読めるのを待ち、設定を戻す */
+    L_DONE            /* 済んだ */
+};
+
+static struct {
+    int step;                        /* 今の状態(L_*)*/
+    int method;                      /* BFM_RESET_LINK_DISABLE / BFM_RESET_HOT_RESET */
+    uint32_t up_pcie;                /* 上流のポートの PCI Express の capability の位置 */
+    int dllla;                       /* 1 = 上流のポートが Link Active を報告できる */
+    uint64_t t0;                     /* 時間で待つ状態の起点 */
+    uint64_t t_start;                /* リンクを戻した時刻(表示用)*/
+    struct {
+        uint32_t pcie;               /* 装置の PCI Express の capability の位置(0 = 覚えていない)*/
+        uint32_t cmd, hdr, bar[RST_NBAR], devctl, lnkctl, devctl2;   /* 覚えた設定空間 */
+    } dev[BFM_MAX_PORT];
+} s_rst;
+
+/* PCI Express の capability の位置(up = 1 なら上流のポート、0 なら装置そのもの。無ければ 0)。 */
+static uint32_t rst_find_pcie(unsigned port, int up)
+{
+    const uint32_t st = up ? bfm_port_up_read32(port, PCI_COMMAND) : bfm_port_pci_hw_read32(port, PCI_COMMAND);
+    if (st == 0xffffffffu || !((st >> 16) & PCI_STATUS_CAP)) return 0;
+    uint32_t pos = (up ? bfm_port_up_read32(port, PCI_CAP_PTR) : bfm_port_pci_hw_read32(port, PCI_CAP_PTR)) & 0xfcu;
+    for (unsigned guard = 0; pos != 0 && guard < 48u; guard++) {
+        const uint32_t v = up ? bfm_port_up_read32(port, pos) : bfm_port_pci_hw_read32(port, pos);
+        if ((v & 0xffu) == PCI_CAP_ID_EXP) return pos;
+        pos = (v >> 8) & 0xfcu;
+    }
+    return 0;
+}
+
+/*=================================================================
+ * ポート d の上流のポートで、カードのリセット(リンクを落とす)ができるかを確かめる(待たない)。
+ * 上流のポートが無い・PCIe のルートポートでもスイッチの下りポートでもないなら断る。
+ * 戻り値: BFM_OK = できる。BFM_E_NOTSUP = できない(理由を表示する)。
+ * ===============================================================*/
+int bfm_pci_reset_check(bfm_dev_t *d)
+{
+    const unsigned p = d->port;
+    const uint32_t id = bfm_port_up_read32(p, PCI_ID);
+    if ((id & 0xffffu) == 0xffffu) {
+        BFM_LOG("bfm: ポート %u: 上流のポートの設定空間が読めない (カードのリセットはできない)\n", p);
+        return BFM_E_NOTSUP;
+    }
+    const uint32_t hdr = (bfm_port_up_read32(p, PCI_HDR_TYPE) >> 16) & 0x7fu;
+    const uint32_t pos = rst_find_pcie(p, 1);
+    const uint32_t type = pos ? (bfm_port_up_read32(p, pos) >> 20) & 0xfu : 0u;
+    if (hdr != 1u || pos == 0 || (type != PCIE_TYPE_ROOT && type != PCIE_TYPE_DOWN)) {
+        BFM_LOG("bfm: ポート %u: 上流の装置 (%04x:%04x) が PCIe のルートポートでもスイッチの下りポートでもない "
+                "(header %u、型 %u)\n", p, id & 0xffffu, id >> 16, hdr, type);
+        return BFM_E_NOTSUP;
+    }
+    s_rst.up_pcie = pos;
+    s_rst.dllla = (bfm_port_up_read32(p, pos + PCIE_LNKCAP) & PCIE_LNKCAP_DLLLARC) != 0;
+    return BFM_OK;
+}
+
+/*=================================================================
+ * カードのリセットを始める: 使っている全部のポートの設定空間を覚え、ポート d の上流のポートで
+ * リンクを落とす(method = MFRL の pci_reset_req_method)。bfm_pci_reset_check() が通った後、
+ * 全部のポートを止めてから(Bus Master を落としてから)呼ぶ。続きは bfm_pci_reset_step()。
+ * ===============================================================*/
+void bfm_pci_reset_begin(bfm_dev_t *d, int method)
+{
+    const unsigned p = d->port;
+    for (unsigned q = 0; q < BFM_MAX_PORT; q++) {
+        const uint32_t pos = g_bfm_dev[q].used ? rst_find_pcie(q, 0) : 0u;
+        s_rst.dev[q].pcie = pos;
+        if (pos == 0) continue;
+        s_rst.dev[q].cmd = bfm_port_pci_hw_read32(q, PCI_COMMAND) & 0xffffu;
+        s_rst.dev[q].hdr = bfm_port_pci_hw_read32(q, PCI_HDR_TYPE) & 0xffffu;   /* cache line・latency だけ(BIST は書かない)*/
+        for (unsigned i = 0; i < RST_NBAR; i++) s_rst.dev[q].bar[i] = bfm_port_pci_hw_read32(q, PCI_BAR0 + 4u * i);
+        s_rst.dev[q].devctl = bfm_port_pci_hw_read32(q, pos + PCIE_DEVCTL) & 0xffffu & ~PCIE_DEVCTL_FLR;
+        s_rst.dev[q].lnkctl = bfm_port_pci_hw_read32(q, pos + PCIE_LNKCTL) & 0xffffu & ~(PCIE_LNKCTL_LD | PCIE_LNKCTL_RL);
+        s_rst.dev[q].devctl2 = bfm_port_pci_hw_read32(q, pos + PCIE_DEVCTL2) & 0xffffu;
+    }
+    s_rst.method = method;
+    if (method == BFM_RESET_HOT_RESET) {
+        BFM_LOG("bfm: ポート %u: 上流のポートで Secondary Bus Reset をかけ、カードをリセットする\n", p);
+        bfm_port_up_write32(p, PCI_BRIDGE_CTL, bfm_port_up_read32(p, PCI_BRIDGE_CTL) | PCI_BCTL_SBR);
+    } else {
+        BFM_LOG("bfm: ポート %u: 上流のポートでリンクを切り (Link Disable)、カードをリセットする\n", p);
+        const uint32_t ctl = bfm_port_up_read32(p, s_rst.up_pcie + PCIE_LNKCTL) & 0xffffu;
+        bfm_port_up_write32(p, s_rst.up_pcie + PCIE_LNKCTL, ctl | PCIE_LNKCTL_LD);
+    }
+    s_rst.t0 = bfm_port_time_ns();
+    s_rst.step = L_HOLD;
+}
+
+/* 覚えた設定空間をポート q へ戻す(BAR などを先に、Command を最後に)。 */
+static void rst_restore(unsigned q)
+{
+    const uint32_t pos = s_rst.dev[q].pcie;
+    for (unsigned i = 0; i < RST_NBAR; i++) bfm_port_pci_hw_write32(q, PCI_BAR0 + 4u * i, s_rst.dev[q].bar[i]);
+    bfm_port_pci_hw_write32(q, PCI_HDR_TYPE, s_rst.dev[q].hdr);
+    bfm_port_pci_hw_write32(q, pos + PCIE_DEVCTL, s_rst.dev[q].devctl);   /* 上位(DevSta)は 0 を書いて触らない */
+    bfm_port_pci_hw_write32(q, pos + PCIE_LNKCTL, s_rst.dev[q].lnkctl);
+    bfm_port_pci_hw_write32(q, pos + PCIE_DEVCTL2, s_rst.dev[q].devctl2);
+    bfm_port_pci_hw_write32(q, PCI_COMMAND, s_rst.dev[q].cmd);
+}
+
+/*=================================================================
+ * カードのリセットを、待つところまで進める: リンクを戻す -> リンクが上がるのを待つ -> 100ms 待つ ->
+ * 全部のポートの設定空間が読めるのを待つ -> 覚えた設定空間を戻す。待つところでは BFM_INPROGRESS を返す。
+ * 戻り値: BFM_INPROGRESS = 途中。BFM_OK = 済んだ。BFM_E_TIMEOUT = リンクが上がらない・設定空間が読めない。
+ * ===============================================================*/
+int bfm_pci_reset_step(bfm_dev_t *d)
+{
+    const unsigned p = d->port;
+    for (;;) {
+        switch (s_rst.step) {
+        case L_HOLD:
+            if (ms_since(s_rst.t0) < (s_rst.method == BFM_RESET_HOT_RESET ? RST_SBR_HOLD_MS : RST_LD_HOLD_MS))
+                return BFM_INPROGRESS;
+            if (s_rst.method == BFM_RESET_HOT_RESET) {
+                bfm_port_up_write32(p, PCI_BRIDGE_CTL, bfm_port_up_read32(p, PCI_BRIDGE_CTL) & ~PCI_BCTL_SBR);
+            } else {
+                const uint32_t ctl = bfm_port_up_read32(p, s_rst.up_pcie + PCIE_LNKCTL) & 0xffffu;
+                bfm_port_up_write32(p, s_rst.up_pcie + PCIE_LNKCTL, ctl & ~PCIE_LNKCTL_LD);
+            }
+            s_rst.t0 = s_rst.t_start = bfm_port_time_ns();
+            s_rst.step = L_LINK;
+            break;
+        case L_LINK:
+            if (!s_rst.dllla) {
+                if (ms_since(s_rst.t0) < RST_NO_DLLLA_MS) return BFM_INPROGRESS;
+            } else if (!((bfm_port_up_read32(p, s_rst.up_pcie + PCIE_LNKCTL) >> 16) & PCIE_LNKSTA_DLLLA)) {
+                if (ms_since(s_rst.t0) < RST_LINK_WAIT_MS) return BFM_INPROGRESS;
+                BFM_LOG("bfm: ポート %u: カードのリセットの後、%u ms 待ってもリンクが上がらない\n", p, RST_LINK_WAIT_MS);
+                s_rst.step = L_DONE;
+                return BFM_E_TIMEOUT;
+            }
+            BFM_LOG("bfm: ポート %u: リンクが上がった (%llu ms)\n", p, (unsigned long long)ms_since(s_rst.t_start));
+            s_rst.t0 = bfm_port_time_ns();
+            s_rst.step = L_SETTLE;
+            break;
+        case L_SETTLE:
+            if (ms_since(s_rst.t0) < RST_SETTLE_MS) return BFM_INPROGRESS;
+            s_rst.t0 = bfm_port_time_ns();
+            s_rst.step = L_READY;
+            break;
+        case L_READY:
+            for (unsigned q = 0; q < BFM_MAX_PORT; q++) {
+                if (s_rst.dev[q].pcie == 0) continue;
+                if ((bfm_port_pci_hw_read32(q, PCI_ID) & 0xffffu) == MLX5_VENDOR_ID) continue;
+                if (ms_since(s_rst.t0) < RST_READY_WAIT_MS) return BFM_INPROGRESS;
+                BFM_LOG("bfm: ポート %u: カードのリセットの後、%u ms 待っても設定空間が読めない\n", q, RST_READY_WAIT_MS);
+                s_rst.step = L_DONE;
+                return BFM_E_TIMEOUT;
+            }
+            for (unsigned q = 0; q < BFM_MAX_PORT; q++) {
+                if (s_rst.dev[q].pcie == 0) continue;
+                rst_restore(q);
+                BFM_DBG("bfm: ポート %u: 設定空間を戻した (BAR0 0x%08x%08x、Command 0x%04x)\n", q,
+                        bfm_port_pci_hw_read32(q, PCI_BAR0 + 4u), bfm_port_pci_hw_read32(q, PCI_BAR0),
+                        bfm_port_pci_hw_read32(q, PCI_COMMAND) & 0xffffu);
+            }
+            BFM_LOG("bfm: ポート %u: カードのリセットが済んだ (リンクを戻してから %llu ms)\n", p,
+                    (unsigned long long)ms_since(s_rst.t_start));
+            s_rst.step = L_DONE;
+            return BFM_OK;
+        default:   /* L_DONE */
+            return BFM_OK;
+        }
+    }
+}

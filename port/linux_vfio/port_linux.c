@@ -20,6 +20,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <linux/vfio.h>
 #include <sched.h>
 #include <stdarg.h>
@@ -65,6 +66,14 @@ static struct {
     struct { uint64_t off, len; } seg[SEG_MAX];   /* UC の mmap の区間(off = BAR0 内の位置、len = 長さ)*/
     int nseg;                        /* seg の使っている数 */
 } s_dev[BFM_MAX_PORT];
+
+/* カードのリセットで使う sysfs の config の fd(CFG_HW = 装置そのもの、CFG_UP = 上流のポート)。
+ * tried = 開こうとした(失敗なら fd = -1)。 */
+enum { CFG_HW = 0, CFG_UP = 1 };
+static struct {
+    int fd;
+    int tried;
+} s_cfg[BFM_MAX_PORT][2];
 
 void bfm_port_log(const char *fmt, ...)
 {
@@ -300,6 +309,11 @@ void bfm_port_fini(void)
         if (s_dev[p].device > 0)   /* 0 = まだ掴んでいない(静的な初期値)*/
             close(s_dev[p].device);
         s_dev[p].device = -1;
+        for (int w = 0; w < 2; w++) {
+            if (s_cfg[p][w].tried && s_cfg[p][w].fd >= 0) close(s_cfg[p][w].fd);
+            s_cfg[p][w].tried = 0;
+            s_cfg[p][w].fd = -1;
+        }
     }
     for (int i = 0; i < s_ngrp; i++) close(s_grp[i].fd);
     s_ngrp = 0;
@@ -326,6 +340,84 @@ void bfm_port_pci_write32(unsigned port, uint32_t off, uint32_t val)
 {
     if (pwrite(s_dev[port].device, &val, 4, (off_t)(s_dev[port].cfg_off + off)) != 4)
         bfm_port_log("port: ポート %u の設定空間 0x%x へ書けない (errno=%d)\n", port, off, errno);
+}
+
+/* ---------------------------------------------------------------------
+ * カードのリセットで使う設定空間(sysfs の config。root が要る)
+ *
+ * VFIO の設定空間は BAR・Max Payload Size・ベンダ ID などを仮想化しているので、リセットで消えた値を
+ * 装置へ戻すには使えない。装置そのものと上流のポートは、sysfs の config を読み書きする
+ * (setpci と同じ道。vfio-pci に結びつけたままでよい)。
+ * ------------------------------------------------------------------- */
+
+/* ポート port の装置(which = CFG_HW)か、その上流のポート(CFG_UP。sysfs の木で 1 つ上の PCI の装置)の
+ * config を開く。上流が PCI の装置でない(ルート複合体の直下)なら -1。 */
+static int cfg_fd(unsigned port, int which)
+{
+    char path[PATH_MAX + 16], real[PATH_MAX];
+    if (s_cfg[port][which].tried) return s_cfg[port][which].fd;
+    s_cfg[port][which].tried = 1;
+    s_cfg[port][which].fd = -1;
+    if (g_bfm_linux_pci_bdf[port] == NULL) return -1;
+    snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s", g_bfm_linux_pci_bdf[port]);
+    if (realpath(path, real) == NULL) {
+        bfm_port_log("port: %s が見つからない (errno=%d)\n", path, errno);
+        return -1;
+    }
+    if (which == CFG_UP) {
+        char *slash = strrchr(real, '/');
+        if (slash == NULL) return -1;
+        *slash = '\0';                                  /* 1 つ上の装置(/sys/devices/pci0000:b2/0000:b2:00.0)*/
+        slash = strrchr(real, '/');
+        unsigned dom, bus, dev, fn;
+        if (slash == NULL || sscanf(slash + 1, "%x:%x:%x.%x", &dom, &bus, &dev, &fn) != 4) {
+            bfm_port_log("port: ポート %u の上流のポートが見つからない (%s)\n", port, real);
+            return -1;
+        }
+    }
+    snprintf(path, sizeof(path), "%s/config", real);
+    s_cfg[port][which].fd = open(path, O_RDWR);
+    if (s_cfg[port][which].fd < 0)
+        bfm_port_log("port: %s を開けない (errno=%d。root が要る)\n", path, errno);
+    else if (g_bfm_verbose)
+        bfm_port_log("port: ポート %u の%s = %s\n", port, which == CFG_UP ? "上流のポート" : "装置", path);
+    return s_cfg[port][which].fd;
+}
+
+static uint32_t cfg_read(unsigned port, int which, uint32_t off)
+{
+    uint32_t v = 0xffffffffu;
+    const int fd = cfg_fd(port, which);
+    if (fd >= 0 && pread(fd, &v, 4, (off_t)off) != 4) v = 0xffffffffu;
+    return v;
+}
+
+static void cfg_write(unsigned port, int which, uint32_t off, uint32_t val)
+{
+    const int fd = cfg_fd(port, which);
+    if (fd >= 0 && pwrite(fd, &val, 4, (off_t)off) != 4)
+        bfm_port_log("port: ポート %u の%sの設定空間 0x%x へ書けない (errno=%d)\n", port,
+                     which == CFG_UP ? "上流のポート" : "装置", off, errno);
+}
+
+uint32_t bfm_port_up_read32(unsigned port, uint32_t off)
+{
+    return cfg_read(port, CFG_UP, off);
+}
+
+void bfm_port_up_write32(unsigned port, uint32_t off, uint32_t val)
+{
+    cfg_write(port, CFG_UP, off, val);
+}
+
+uint32_t bfm_port_pci_hw_read32(unsigned port, uint32_t off)
+{
+    return cfg_read(port, CFG_HW, off);
+}
+
+void bfm_port_pci_hw_write32(unsigned port, uint32_t off, uint32_t val)
+{
+    cfg_write(port, CFG_HW, off, val);
 }
 
 /* ---------------------------------------------------------------------

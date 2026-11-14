@@ -387,7 +387,7 @@ PI は guard(データの CRC16、多項式 0x8BB7)・app tag・ref tag(ブロ�
 - スループット(同じ、300 ブロックずつ、データ 512 バイト分で数える): SW の write INSERT 1,666MB/s・write CHECK 1,689MB/s・
   read CHECK 1,597MB/s・read CHECK_DELETE 1,609MB/s。出しておく分を 1 つにすると約 1,180MB/s で、2 面を交互に使って約 4 割速い。
 
-### FW の更新(`src/bfm_fw.c`。確かめるだけを実機で確認、切り替えは未確認)
+### FW の更新とカードのリセット(`src/bfm_fw.c`・`src/bfm_pci.c`。実機で確認)
 
 `bfm_fw_update(port, img, len, mode)` で、ConnectX のフラッシュの FW を書き換える。`BFM_INPROGRESS` 以外が返るまで
 呼び続ける(待たない。`bfm_run()` もその間呼び続けてよい)。方式は Linux の `devlink dev flash` と同じで、
@@ -396,8 +396,10 @@ PI は guard(データの CRC16、多項式 0x8BB7)・app tag・ref tag(ブロ�
 ```c
 /* 確かめるだけ: 書いて FW に確かめさせ、切り替えずに取り消す(次の起動の FW は変わらない)*/
 while ((rc = bfm_fw_update(0, img, len, BFM_FW_VERIFY_ONLY)) == BFM_INPROGRESS) bfm_run();
-/* 切り替える: 確かめた後、次の起動からこの像を使う(電源を入れ直すと有効になる)*/
+/* 切り替える: 確かめた後、次の起動からこの像を使う(電源を入れ直すか、カードをリセットすると有効になる)*/
 while ((rc = bfm_fw_update(0, img, len, BFM_FW_ACTIVATE)) == BFM_INPROGRESS) bfm_run();
+/* カードをリセットして新しい FW で立ち上げ直す(bfmem は止まる。次の bfm_run() で立ち上げ直す)*/
+while ((rc = bfm_fw_reset(0)) == BFM_INPROGRESS) ;
 ```
 
 起動しなくなる危険を小さくするためにしていること:
@@ -410,7 +412,7 @@ while ((rc = bfm_fw_update(0, img, len, BFM_FW_ACTIVATE)) == BFM_INPROGRESS) bfm
 | ボードごとの情報を消す | 配布の .bin のうち、FW の像の部分(ITOC の相対番地の部分)だけを渡す。ボードごとの情報(MAC・GUID・VPD など。ITOC の device_data の欄)は渡さず、それを指す目次の欄は 0xFF にして渡す(mstflint と同じ)|
 | ほかの更新とぶつかる | FW の更新の手順が空き(IDLE)でなければ何もしない(同じカードのもう一方のポート・mstflint などが更新中)|
 | 対応していない FW | MCAM で MCQS・MCQI・MCC・MCDA の対応を確かめ、無ければ何もしない |
-| リセットでの失敗 | 装置のリセットはかけない。新しい FW は、電源を入れ直したときに有効になる |
+| リセットでの失敗 | `bfm_fw_update()` はリセットをかけない。カードのリセットは、頼まれたときだけ `bfm_fw_reset()` で行う。FW が level 3 に対応していない・上流のポートが無いときは、何も止めずに断る |
 
 - 渡すのは、そのボード(PSID)用の **展開した .bin**(MFA2・zip は断る)。公式の配布元(NVIDIA の
   [ConnectX-4 Lx EN の FW のページ](https://network.nvidia.com/support/firmware/connectx4lxen/)。古い版は Archive Versions)の
@@ -428,11 +430,29 @@ while ((rc = bfm_fw_update(0, img, len, BFM_FW_ACTIVATE)) == BFM_INPROGRESS) bfm
   14.29.1016。**取り消した直後は、FW の立ち上げ(mlx5_core の probe)に約 46 秒かかった**(ふだんは約 1.4 秒)。
 - 同じ機械で、最新の 14.32.1912 を `BFM_FW_ACTIVATE` で書いて切り替えた(46.1 秒。次の起動の版 = 14.32.1912)。
 - **書いた FW が動き出すのは、カードがリセットされたとき**(ホストの再起動・電源の入れ直し、またはカードだけのリセット)。
-  bfmem はリセットをかけない。カードだけのリセットは FW のレジスタ MFRL(0x9028)で頼む。ConnectX-4 Lx(14.29.1016)の
-  MFRL は reset_level = 0xc8 で、**level 3(PCI のリセット)に対応している**。MFRL に level 3 を書き、ドライバを外して
-  上流のルートポートでリンクを切って繋ぎ直すと、ホストを再起動せずに 14.32.1912 で立ち上がった(手順は `TEST_PLAN.md`)。
-  - Linux の `devlink … action fw_activate` は、14.29.1016 では使えない(FW が MCAM に MFRL を載せていない)。14.32.1912 は載せている。
-  - bfmem には MFRL とリンクの切断はまだ無い(試験は作業用の版と Linux の `setpci` で行った)。
+  カードだけのリセットは **`bfm_fw_reset(port)`**(Linux の `devlink … action fw_activate` と同じ。待たない状態機械で、
+  `BFM_INPROGRESS` 以外が返るまで呼び続ける):
+  1. FW のレジスタ MFRL(0x9028)を読み、level 3(PCI のリセット)に対応していることと、FW が求めるリンクの落とし方
+     (pci_reset_req_method。0 = Link Disable、1 = Secondary Bus Reset)を確かめ、reset_level = level 3 を書く
+     (同期 `pci_sync_for_fw_update_start` は使わない)。ConnectX-4 Lx の MFRL は reset_level = 0xc8・落とし方 0。
+  2. `bfm_shutdown()` と同じく全部のポートを止める(相手へ BYE、TEARDOWN_HCA、Bus Master を落とす)。
+  3. 使っている全部のポートの設定空間(BAR・Command・Device Control(Max Payload Size)・Link Control・Device Control 2)を覚え、
+     上流のポート(ルートポートか PCIe スイッチの下りポート)で Link Disable を 500ms 立てて戻す(落とし方 1 なら
+     Secondary Bus Reset を 2ms)。FW がカード全体をリセットする。
+  4. リンクが上がる(Data Link Layer Link Active。報告できない上流のポートなら 1 秒)のを待ち、100ms 待ち、設定空間が
+     読めるのを待って、覚えた設定空間を戻す。ポート層を閉じる。次の `bfm_run()` で、新しい FW で最初から立ち上げる。
+  - 時間の決め方は Linux の mlx5 の `mlx5_pci_link_toggle()` と同じ。上流のポートと装置そのものの設定空間は、移植層の
+    `bfm_port_up_read32()` / `write32()` と `bfm_port_pci_hw_read32()` / `write32()` で触る(Linux は sysfs の config。VFIO は
+    BAR・Max Payload Size・ベンダ ID を仮想化しているので、VFIO を通すとリセットで消えた値を装置へ戻せない。
+    VxWorks は ECAM で、上流のポートは装置のバスを下に持つブリッジを探す)。
+  - **カードの全部の function がリセットされる。** 同じカードの function を OS のドライバが使っていないこと
+    (Linux の試験では両方の PF を vfio-pci にする)。上流のポートの下に、ほかの装置が無いこと。
+  - 実機(Precision、2026-11-14): 2 つの PF で `bfmem_test reset` を流し、リンクは 43ms で上がり、リンクを戻してから
+    約 140ms で設定空間を戻し、bfmem は約 6 秒で立ち上げ直した(物理ポートのリンクも一度落ちて ACTIVE に戻る)。
+    `fw -A` で 14.29.1016 を書いて `reset` すると、立ち上げ直しの表示が FW 14.29.1016 になり、mlx5_core に戻した後も
+    running 14.29.1016。同じ手順で 14.32.1912 に戻した。PCIe の誤り(AER)は出ていない。
+  - Linux の `devlink … action fw_activate` は、14.29.1016 では使えない(FW が MCAM に MFRL を載せていない。MFRL そのものは
+    読み書きできるので、`bfm_fw_reset()` は MCAM を見ない)。14.32.1912 は載せている。
 
 ### ConnectX-7 への備え(実機では未確認)
 
@@ -576,11 +596,17 @@ sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -D 0000:01:00.0 -I 192.1
 - `serve` は接続を張って保つだけ(`bench` の相手。`serve -c 1`)。`info` はポートを立ち上げて能力を表示する。
 - `fw` は FW の更新(`bfm_fw_update()`)。ポート 0 だけを立ち上げ(相手は動いていなくてよい)、ファイルの像を書いて
   FW に確かめさせる。**既定は確かめるだけ**(切り替えずに取り消す)で、`-A` を付けたときだけ次の起動から使うよう
-  切り替える(電源を入れ直すと有効になる)。Ctrl-C で取り消す。
+  切り替える(電源を入れ直すか、カードをリセットすると有効になる)。Ctrl-C で取り消す。`-X` を付けると、済んだ後に
+  `reset` と同じくカードをリセットして、新しい FW で立ち上げ直す(ポート 0 だけ。2 つの PF を使うなら、`fw -A` の後に
+  `reset` をポート 1 つきで動かす)。
+- `reset` はカードのリセット(`bfm_fw_reset()`)。使うポートを立ち上げ、ポート 0 のカードをリセットして、立ち上げ直す
+  (相手は動いていなくてよい)。カードの全部の PF を vfio-pci に結びつけておくこと。
 
   ```bash
   sudo build/bfmem_test -d 0000:b3:00.0 -i 192.168.101.21 fw 192.168.101.11 fw-ConnectX4Lx-xxx.bin       # 確かめるだけ
   sudo build/bfmem_test -A -d 0000:b3:00.0 -i 192.168.101.21 fw 192.168.101.11 fw-ConnectX4Lx-xxx.bin    # 切り替える
+  sudo build/bfmem_test -d 0000:b3:00.0 -i 192.168.101.21 -D 0000:b3:00.1 -I 192.168.102.21 
+      reset 192.168.101.11 192.168.102.11                                                             # リセットして立ち上げ直す
   ```
 - `perf` は物理コア 1〜4 で、`bfm_write_post`・`bfm_read`・`bfm_read_async`・CAS・FAA・DIF の write / read(CHECK)の
   IOPS・MB/s・平均の遅延を長さごとに測る(両方の機械で動かす = 両方向。`-n` 秒(既定 2)ずつ)。結果は仕様書の 20 章
@@ -644,7 +670,7 @@ sudo build/bfmem_test -d 0000:01:00.1 -i 192.168.101.11 -D 0000:01:00.0 -I 192.1
   1・2・4・8・16・32・64 本、OptiPlex(4 スレッド)から Precision へ 1・4・64 本で流し、全部 OK(64 本が同時に接続・切断)。
   8 バイトの write / read の合計は CPU の数までほぼ本数に比例して伸び、16 本で write 10.9 Mops・read 8.5 Mops
   (1 本では 0.76 / 0.61 Mops)。FAA は 8 本以上で約 2.55 Mops で頭打ち(受け側の OptiPlex。原因は確かめていない)。
-- まだ: VxWorks、ConnectX-7、T10-DIF のオフロード(`BFM_DIF_HW`)、FW の更新の後のカードのリセット(MFRL level 3 とリンクの切断。bfmem には無い)。VxWorks の上で複数のコアから使うこと。`write_post` は BlueFlame なしのほうが速い
+- まだ: VxWorks、ConnectX-7、T10-DIF のオフロード(`BFM_DIF_HW`)、VxWorks でのカードのリセット(ECAM で上流のポートを探す)。VxWorks の上で複数のコアから使うこと。`write_post` は BlueFlame なしのほうが速い
   (11.4 → 13.1 Mops)ので、続けて出すときの扱いは見直しの余地がある。
 - **2026-11-10: 代表 API `bfm_run()`・接続の表(ポート × 16)・2 ポート・両ノード同じプログラム(双方向)に作り直し、
   実機(OptiPlex ↔ Precision、2 ポートとも 25G で直結)で 2 ポート × 16 本 = 32 本を双方向に通した。** 4 本のスレッドから

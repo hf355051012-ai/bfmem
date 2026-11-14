@@ -98,16 +98,29 @@
       ]
     },
     {
+      "func": "ecam_at",
+      "purpose": "bus / dev / func で指した PCI の装置の設定空間を、OS を通さずに直接読み書きするために、ECAM の中のアドレスを求める下請け。ポートの装置(`ecam()`)と、上流のポートを探す・読み書きする(`find_up()` など)の両方が使う。",
+      "summary": "`g_bfm_pcie_ecam_base` + bus << 20 + dev << 15 + func << 12 + (`off` の下位 12 ビットを 4 の倍数に揃えたもの)を返す。",
+      "args": {"bus": "バスの番号", "dev": "装置の番号(0〜31)", "func": "function の番号(0〜7)", "off": "設定空間の中の位置"},
+      "ret": "ECAM の 32bit の位置(論理 = 物理のポインタ)。",
+      "pre": "`g_bfm_pcie_ecam_base` を設定してあること。ECAM が論理 = 物理で張られていること。",
+      "notes": "* `off` は `0xffc` で切るので、4KiB を超える位置や 4 の倍数でない位置は丸められる。\n* VxWorks の実機で未検証。",
+      "flow": [
+        {"do": "a = g_bfm_pcie_ecam_base + (bus << 20) + (dev << 15) + (func << 12) + (off AND 0xffc)"},
+        {"return": "a を volatile uint32_t のポインタにしたもの"}
+      ]
+    },
+    {
       "func": "ecam",
       "purpose": "`bfm_port_pci_read32()` と `bfm_port_pci_write32()` が、ポートの装置の設定空間を OS を通さずに直接読み書きするために、読み書きする先のアドレスを求める下請け。",
-      "summary": "ポート `port` の設定空間の `off` に対応する ECAM のアドレスを計算して返す(`g_bfm_pcie_ecam_base` + bus << 20 + dev << 15 + func << 12 + (`off` の下位 12 ビットを 4 の倍数に揃えたもの)。bus / dev / func は `g_bfm_pci_bus[port]` / `g_bfm_pci_dev[port]` / `g_bfm_pci_func[port]`)。",
+      "summary": "ポート `port` の bus / dev / func(`g_bfm_pci_bus[port]` / `g_bfm_pci_dev[port]` / `g_bfm_pci_func[port]`)で `ecam_at()` を呼んで返す。",
       "args": {"port": "ポートの番号(0〜`BFM_MAX_PORT`-1)", "off": "設定空間の中の位置"},
       "ret": "ECAM の 32bit の位置(論理 = 物理のポインタ)。",
       "pre": "`g_bfm_pcie_ecam_base`・`g_bfm_pci_bus[port]` / `g_bfm_pci_dev[port]` / `g_bfm_pci_func[port]` を設定してあること。ECAM が論理 = 物理で張られていること。",
-      "notes": "* `off` は `0xffc` で切るので、4KiB を超える位置や 4 の倍数でない位置は丸められる。\n* VxWorks の実機で未検証。",
+      "notes": "VxWorks の実機で未検証。",
       "flow": [
-        {"do": "a = g_bfm_pcie_ecam_base + (g_bfm_pci_bus[port] << 20) + (g_bfm_pci_dev[port] << 15) + (g_bfm_pci_func[port] << 12) + (off AND 0xffc)"},
-        {"return": "a を volatile uint32_t のポインタにしたもの"}
+        {"call": "ecam_at(g_bfm_pci_bus[port], g_bfm_pci_dev[port], g_bfm_pci_func[port], off) を呼ぶ"},
+        {"return": "ecam_at() の値"}
       ]
     },
     {
@@ -135,6 +148,76 @@
         {"call": "ecam(port, off) を呼ぶ"},
         {"do": "*ecam(port, off) = val"},
         {"do": "bfm_mb()(`mfence`)"}
+      ]
+    },
+    {
+      "func": "bfm_port_pci_hw_read32",
+      "purpose": "カードのリセットの前後に、ポートの装置そのものの設定空間を読むための関数(OS が設定空間を仮想化する環境のための区別)。VxWorks 版は ECAM を直接読むので、`bfm_port_pci_read32()` と同じ。",
+      "summary": "`bfm_port_pci_read32(port, off)` を返す。",
+      "args": {"port": "ポートの番号", "off": "設定空間の中の位置(4 の倍数)"},
+      "ret": "読んだ値。",
+      "pre": "`bfm_port_pci_read32()` と同じ。",
+      "notes": "VxWorks の実機で未検証。",
+      "flow": [
+        {"call": "bfm_port_pci_read32(port, off) を呼ぶ"},
+        {"return": "bfm_port_pci_read32() の値"}
+      ]
+    },
+    {
+      "func": "bfm_port_pci_hw_write32",
+      "purpose": "カードのリセットで初期値に戻った設定空間を、装置そのものへ書き戻すための関数。VxWorks 版は `bfm_port_pci_write32()` と同じ。",
+      "summary": "`bfm_port_pci_write32(port, off, val)` を呼ぶ。",
+      "args": {"port": "ポートの番号", "off": "設定空間の中の位置(4 の倍数)", "val": "書く値"},
+      "ret": "なし",
+      "pre": "`bfm_port_pci_write32()` と同じ。",
+      "notes": "VxWorks の実機で未検証。",
+      "flow": [
+        {"call": "bfm_port_pci_write32(port, off, val) を呼ぶ"}
+      ]
+    },
+    {
+      "func": "find_up",
+      "purpose": "カードのリセットでリンクを落とす相手(ポートの装置の上流のポート)を、OS の助けなしに ECAM を見て見つけるための下請け。一度見つけたら覚えておく。",
+      "summary": "覚えていればそれを返す。なければ、装置のバス(`g_bfm_pci_bus[port]`)より小さい番号のバスの装置を順に見て、header が Type 1(ブリッジ)で secondary bus が装置のバスのものを探し、bus << 16 | dev << 8 | func を覚えて返す。function 0 が無い装置と、多機能でない装置の function 1〜7 は飛ばす。見つからなければ表示して `UP_NONE` を覚えて返す。",
+      "args": {"port": "ポートの番号"},
+      "ret": "上流のポートの位置(bus << 16 | dev << 8 | func)。見つからなければ `UP_NONE`。",
+      "pre": "`g_bfm_pcie_ecam_base` と `g_bfm_pci_bus[port]` を設定してあること。BIOS / BSP がバスの番号を割り当ててあること。",
+      "notes": "* 結果は `s_up[port]` に覚える(0 = まだ探していない)。\n* VxWorks の実機で未検証。",
+      "flow": [
+        {"if": "s_up[port] != 0 ?", "then": [{"return": "s_up[port]"}]},
+        {"do": "s_up[port] = UP_NONE、sec = g_bfm_pci_bus[port]"},
+        {"while": "バス b < sec、装置 dv < 32、function fn < 8 を順に?", "body": [{"call": "ecam_at(b, dv, fn, 0x00) でベンダ ID を読む"}, {"if": "0xffff(無い)?", "then": [{"do": "function 0 ならその装置を飛ばす"}, {"continue": true}]}, {"call": "ecam_at(b, dv, fn, 0x0c) で header type を、ecam_at(b, dv, fn, 0x18) で secondary bus を読む"}, {"if": "Type 1 で secondary bus == sec ?", "then": [{"do": "s_up[port] = (b << 16) | (dv << 8) | fn"}, {"return": "s_up[port]"}]}, {"do": "function 0 で多機能でなければ、その装置の残りを飛ばす"}]},
+        {"call": "bfm_port_log() で「上流のポートが見つからない」を表示"},
+        {"return": "UP_NONE"}
+      ]
+    },
+    {
+      "func": "bfm_port_up_read32",
+      "purpose": "カードのリセットで、ポートの装置の上流のポートの設定空間を読むための関数(リンクの制御・状態を見る)。VxWorks 版は ECAM で上流のポートを探して直接読む。",
+      "summary": "`find_up()` で上流のポートの位置を求め、無ければ 0xffffffff、あれば `ecam_at()` のアドレスから読んで返す。",
+      "args": {"port": "ポートの番号", "off": "上流のポートの設定空間の中の位置(4 の倍数)"},
+      "ret": "読んだ値。上流のポートが無ければ 0xffffffff。",
+      "pre": "`find_up()` と同じ。",
+      "notes": "VxWorks の実機で未検証。",
+      "flow": [
+        {"call": "u = find_up(port) を呼ぶ"},
+        {"if": "u == UP_NONE ?", "then": [{"return": "0xffffffff"}]},
+        {"call": "ecam_at(u >> 16, (u >> 8) AND 0xff, u AND 0xff, off) から読む"},
+        {"return": "読んだ値"}
+      ]
+    },
+    {
+      "func": "bfm_port_up_write32",
+      "purpose": "カードのリセットで、上流のポートの Link Control(Link Disable)か Bridge Control(Secondary Bus Reset)を書いて PCIe のリンクを落とし・戻すための関数。VxWorks 版は ECAM へ直接書く。",
+      "summary": "`find_up()` で上流のポートの位置を求め、無ければ何もしない。あれば `ecam_at()` のアドレスへ書き、`bfm_mb()` で書き込みを出す。",
+      "args": {"port": "ポートの番号", "off": "上流のポートの設定空間の中の位置(4 の倍数)", "val": "書く値"},
+      "ret": "なし",
+      "pre": "`find_up()` と同じ。",
+      "notes": "VxWorks の実機で未検証。",
+      "flow": [
+        {"call": "u = find_up(port) を呼ぶ"},
+        {"if": "u == UP_NONE ?", "then": [{"return": "(何もしない)"}]},
+        {"call": "ecam_at(u >> 16, (u >> 8) AND 0xff, u AND 0xff, off) へ val を書き、bfm_mb() を呼ぶ"}
       ]
     },
     {

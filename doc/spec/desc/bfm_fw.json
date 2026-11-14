@@ -1,6 +1,6 @@
 {
   "file": "src/bfm_fw.c",
-  "summary": "ConnectX のフラッシュの FW の更新。FW 自身に書かせる方式(Linux の mlx5_core の `fw.c` と mlxfw の `mlxfw_fsm.c` と同じ)で、FW の中の更新の手順(FSM)を ACCESS_REG のレジスタで進める。\n\n* MCAM(0x907f): どのレジスタに対応しているか。MCQS・MCQI・MCC・MCDA がそろっていなければ何もしない。\n* MCQS(0x9060): 部品(component)の一覧。FW の像の部品(identifier = BOOT_IMG)の番号を探す。\n* MCQI(0x9061): 部品の能力(受けられる大きさ・1 回に渡せる大きさ・PSID を確かめるか)と版。\n* MCC(0x9062): FSM の命令(LOCK・UPDATE_COMPONENT・VERIFY_COMPONENT・ACTIVATE・CANCEL・RELEASE)と、状態・エラーの番号。\n* MCDA(0x9063): 部品のデータを渡す。\n\n流れは、FSM が IDLE か確かめる → LOCK → LOCKED を待つ → UPDATE_COMPONENT → DOWNLOAD を待つ → MCDA で全部渡す → VERIFY → LOCKED を待つ → (ACTIVATE → LOCKED を待つ)→ RELEASE。失敗したら、部品の更新を始めていれば CANCEL、手順を取っていれば RELEASE を出してから終わる。\n\n起動しなくなる危険を小さくするために: FW は今動いている像とは別の置き場に書き、VERIFY で確かめてから ACTIVATE で切り替える(ACTIVATE は VERIFY が通った後にしか出さない)。`BFM_FW_VERIFY_ONLY` では ACTIVATE を出さずに取り消す。像の先頭の印・長さ・FW が受けられる大きさを確かめ、FW が PSID を確かめない装置には `g_bfm_fw_allow_no_psid_check` が 0 なら書かない。FSM が IDLE でなければ(ほかの道具・ほかのポートが更新している)何もしない。装置のリセットはかけない(新しい FW は電源を入れ直したときに有効になる)。\n\n呼び出しは待たない。FW のコマンドを出したら `BFM_INPROGRESS` を返し、次の呼び出しで完了を見る。FSM の状態を待つところは 200ms ごとに MCC を読み、30 秒で時間切れにする(mlxfw と同じ)。FW のコマンドの entry と作業域(`s_in`・`s_out`)はポートをまたいで使うので、`g_bfm_ctl_lock` の中で進める。",
+  "summary": "ConnectX のフラッシュの FW の更新。FW 自身に書かせる方式(Linux の mlx5_core の `fw.c` と mlxfw の `mlxfw_fsm.c` と同じ)で、FW の中の更新の手順(FSM)を ACCESS_REG のレジスタで進める。\n\n* MCAM(0x907f): どのレジスタに対応しているか。MCQS・MCQI・MCC・MCDA がそろっていなければ何もしない。\n* MCQS(0x9060): 部品(component)の一覧。FW の像の部品(identifier = BOOT_IMG)の番号を探す。\n* MCQI(0x9061): 部品の能力(受けられる大きさ・1 回に渡せる大きさ・PSID を確かめるか)と版。\n* MCC(0x9062): FSM の命令(LOCK・UPDATE_COMPONENT・VERIFY_COMPONENT・ACTIVATE・CANCEL・RELEASE)と、状態・エラーの番号。\n* MCDA(0x9063): 部品のデータを渡す。\n\n流れは、FSM が IDLE か確かめる → LOCK → LOCKED を待つ → UPDATE_COMPONENT → DOWNLOAD を待つ → MCDA で全部渡す → VERIFY → LOCKED を待つ → (ACTIVATE → LOCKED を待つ)→ RELEASE。失敗したら、部品の更新を始めていれば CANCEL、手順を取っていれば RELEASE を出してから終わる。\n\n起動しなくなる危険を小さくするために: FW は今動いている像とは別の置き場に書き、VERIFY で確かめてから ACTIVATE で切り替える(ACTIVATE は VERIFY が通った後にしか出さない)。`BFM_FW_VERIFY_ONLY` では ACTIVATE を出さずに取り消す。像の先頭の印・長さ・FW が受けられる大きさを確かめ、FW が PSID を確かめない装置には `g_bfm_fw_allow_no_psid_check` が 0 なら書かない。FSM が IDLE でなければ(ほかの道具・ほかのポートが更新している)何もしない。装置のリセットはかけない(新しい FW は、電源を入れ直すか、`bfm_fw_reset()` でカードをリセットしたときに有効になる)。リセットの準備(MFRL に level 3 を書く)は、このファイルの `bfm_fw_mfrl_step()` が行う(FW の更新と同じ作業域とコマンドの entry を使う)。\n\n呼び出しは待たない。FW のコマンドを出したら `BFM_INPROGRESS` を返し、次の呼び出しで完了を見る。FSM の状態を待つところは 200ms ごとに MCC を読み、30 秒で時間切れにする(mlxfw と同じ)。FW のコマンドの entry と作業域(`s_in`・`s_out`)はポートをまたいで使うので、`g_bfm_ctl_lock` の中で進める。",
   "functions": [
     {
       "func": "ms_since",
@@ -357,7 +357,7 @@
       "args": {"port": "ポートの番号(0〜`BFM_MAX_PORT`-1)", "img": "書く FW の像。NVIDIA の配布の .bin(zip を展開したもの)をそのまま。終わるまで残しておく", "len": "像のファイルの長さ(バイト)", "mode": "`BFM_FW_VERIFY_ONLY`(確かめるだけ)か `BFM_FW_ACTIVATE`(次の起動から使う)"},
       "ret": "`BFM_OK`: 済んだ(`mode` のとおり)。`BFM_INPROGRESS`: 途中(同じ引数で呼び続ける)。`BFM_E_PARAM`: 引数・像が正しくない、または像が大きすぎる。`BFM_E_STATE`: ポートが立ち上がっていない・途中で止まった・取り消した。`BFM_E_NOTSUP`: 装置が対応していない、または PSID を確かめない装置。`BFM_E_BUSY`: ほかの更新が進んでいる。`BFM_E_HW`: FW が断った(理由を表示する)・コマンドの失敗。`BFM_E_TIMEOUT`: FSM の状態が変わらない。",
       "pre": "ポートが立ち上がっていること(`bfm_run()` が進めて使える状態)。同じポートについて、1 つのコアから呼ぶこと。同じカードのポートはフラッシュを共有するので、1 つのポートからだけ行う。",
-      "notes": "* 2 回目からは引数を見ない(最初の呼び出しで覚えた像を使う)。\n* 失敗・取り消しのときは、部品の更新を CANCEL し、手順を RELEASE してから結果を返す。次の起動の像は変わっていない。\n* 新しい FW は、装置の電源を入れ直したとき(またはリセットしたとき)に有効になる。bfmem はリセットをかけない。\n* `bfm_run()` はその間も呼び続けてよい(FW のコマンドの entry は `mlx5_cmd_run()` が順に使わせる)。\n* 途中で `bfm_shutdown()` すると、FW は手順の番号を放っておかれ、時間で手放す(今の像はそのまま)。",
+      "notes": "* 2 回目からは引数を見ない(最初の呼び出しで覚えた像を使う)。\n* 失敗・取り消しのときは、部品の更新を CANCEL し、手順を RELEASE してから結果を返す。次の起動の像は変わっていない。\n* 新しい FW は、装置の電源を入れ直したとき、または `bfm_fw_reset()` でカードをリセットしたときに有効になる。\n* `bfm_run()` はその間も呼び続けてよい(FW のコマンドの entry は `mlx5_cmd_run()` が順に使わせる)。\n* 途中で `bfm_shutdown()` すると、FW は手順の番号を放っておかれ、時間で手放す(今の像はそのまま)。",
       "flow": [
         {"if": "port >= BFM_MAX_PORT ?", "then": [{"return": "BFM_E_PARAM"}]},
         {"if": "手順が F_IDLE(最初の呼び出し)?", "then": [
@@ -391,6 +391,26 @@
       "notes": "取り消しは、次の `bfm_fw_update()` の呼び出しで、出しているコマンドが無いときに始まる(`fw_step()`)。結果は `BFM_E_STATE`。",
       "flow": [
         {"if": "port < BFM_MAX_PORT かつ更新を進めている?", "then": [{"do": "cancel = 1"}]}
+      ]
+    },
+    {
+      "func": "bfm_fw_mfrl_step",
+      "purpose": "カードのリセットの準備として、FW に「次に PCIe のリンクが落ちたら、カード全体をリセットして、次の起動の FW の像で立ち上がる」(MFRL の level 3)を頼むための関数。FW がそれに対応しているか、リンクをどう落としてほしいかも、ここで FW に聞く。`bfm_fw_reset()` が `g_bfm_ctl_lock` の中で `BFM_INPROGRESS` でなくなるまで呼ぶ。",
+      "summary": "`M_READ`: MFRL(0x9028)を読み、対応するリセットの範囲(reset_level)と、リンクの落とし方(pci_reset_req_method)を表示する。level 3(bit 3)が無い・落とし方が Link Disable(0)でも Secondary Bus Reset(1)でもないなら断る。落とし方を `*method` に返して `M_WRITE` へ。`M_WRITE`: MFRL に reset_level = level 3(rst_type_sel = 0、同期なし)を書く。",
+      "args": {"d": "リセットを頼まれたポートの装置", "method": "FW が求めるリンクの落とし方を入れる先(`M_READ` が済んだときに書く。呼び出し側は呼び続ける間これを残しておく)"},
+      "ret": "`BFM_INPROGRESS`: 途中。`BFM_OK`: level 3 を書いた。`BFM_E_NOTSUP`: MFRL が読めない・level 3 に対応していない・知らない落とし方。`BFM_E_BUSY`: FW の更新の途中。`BFM_E_HW`: MFRL に書けない。",
+      "pre": "`g_bfm_ctl_lock` を持っていること。ポートが立ち上がっていること。",
+      "notes": "* FW の更新の作業域(`s_fw[port]` のコマンド・`s_in`・`s_out`)を使うので、`bfm_fw_update()` の途中なら断る。\n* 同期(pci_sync_for_fw_update_start)は使わない(Linux の mlx5 の、同期を使わない場合と同じ)。カードの全部の function の持ち主が bfmem である前提。\n* ConnectX-4 Lx(FW 14.29.1016・14.32.1912)では、範囲 0xc8(level 3 を含む)、落とし方 0(Link Disable)だった。14.29.1016 は MCAM に MFRL を載せていないが、MFRL は読み書きできた(だから MCAM は見ない)。",
+      "flow": [
+        {"if": "f->step != F_IDLE(FW の更新の途中)?", "then": [{"do": "BFM_LOG で断る理由を表示"}, {"return": "BFM_E_BUSY"}]},
+        {"if": "s_mfrl[p] == M_READ ?", "then": [{"call": "reg_in(p) を呼ぶ(出していなければ)"}, {"call": "rc = access_reg(d, f, MLX5_REG_MFRL, 1, MFRL_BYTES, MFRL_BYTES, \"ACCESS_REG(MFRL 読み)\") を呼ぶ"}, {"if": "rc == BFM_INPROGRESS ?", "then": [{"return": "BFM_INPROGRESS"}]}, {"if": "rc != BFM_OK ?", "then": [{"do": "BFM_LOG で「MFRL が読めない」を表示"}, {"return": "BFM_E_NOTSUP"}]}, {"do": "BFM_LOG で reset_level と pci_reset_req_method を表示"}, {"if": "reset_level に level 3 が無い?", "then": [{"do": "BFM_LOG で理由を表示"}, {"return": "BFM_E_NOTSUP"}]}, {"if": "pci_reset_req_method が 0 でも 1 でもない?", "then": [{"do": "BFM_LOG で理由を表示"}, {"return": "BFM_E_NOTSUP"}]}, {"do": "*method = pci_reset_req_method、s_mfrl[p] = M_WRITE"}]},
+        {"call": "出していなければ reg_in(p) を呼び、reset_level = MFRL_RESET_LEVEL3 を入れる"},
+        {"call": "rc = access_reg(d, f, MLX5_REG_MFRL, 0, MFRL_BYTES, MFRL_BYTES, \"ACCESS_REG(MFRL 書き)\") を呼ぶ"},
+        {"if": "rc == BFM_INPROGRESS ?", "then": [{"return": "BFM_INPROGRESS"}]},
+        {"do": "s_mfrl[p] = M_READ"},
+        {"if": "rc != BFM_OK ?", "then": [{"do": "BFM_LOG で「MFRL に level 3 を書けない」を表示"}, {"return": "BFM_E_HW"}]},
+        {"do": "BFM_LOG で「MFRL に level 3 を書いた」を表示"},
+        {"return": "BFM_OK"}
       ]
     }
   ]

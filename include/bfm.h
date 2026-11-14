@@ -291,7 +291,7 @@ void bfm_dif_make_pi(const void *data, uint16_t app_tag, uint32_t ref_tag, uint8
 /* ---- FW の更新 ----
  * ConnectX のフラッシュの FW を、FW 自身に書かせる(MCC / MCDA レジスタ。Linux の devlink の flash と同じ方式)。
  * FW は今動いている像とは別の置き場に新しい像を書き、確かめてから切り替えるので、途中で止まっても前の像で起動する。
- * 新しい FW は、装置の電源を入れ直したとき(またはリセットしたとき)に有効になる。bfmem はリセットをかけない。 */
+ * 新しい FW は、装置の電源を入れ直したとき、または bfm_fw_reset() でカードをリセットしたときに有効になる。 */
 
 #define BFM_FW_VERIFY_ONLY  0   /* 書いて FW に確かめさせるが、切り替えずに取り消す(次の起動の像は変わらない)*/
 #define BFM_FW_ACTIVATE     1   /* 確かめた後、次の起動からこの像を使うよう切り替える */
@@ -313,6 +313,26 @@ int bfm_fw_update(unsigned port, const void *img, uint32_t len, int mode);
 /* 進めている bfm_fw_update() を取り消すよう頼む。この後も bfm_fw_update() を呼び続けると、
  * 取り消して手放し、BFM_E_STATE を返して終わる(切り替えの後は取り消せない)。 */
 void bfm_fw_update_cancel(unsigned port);
+
+/* ポート port のカードをリセットし、次の起動の FW の像で立ち上げ直す(電源を入れ直さずに、bfm_fw_update() の
+ * BFM_FW_ACTIVATE で書いた FW を有効にする。Linux の devlink の fw_activate と同じ)。
+ *   1. FW の MFRL レジスタに reset_level = level 3(PCI のリセット)を書く(対応していなければ断る)。
+ *   2. bfm_shutdown() と同じく全部のポートを止める(相手へ BYE を送り、TEARDOWN_HCA、Bus Master を落とす)。
+ *   3. 上流のポート(ルートポートか PCIe スイッチの下りポート)で PCIe のリンクを落とす(FW の求めに従い、
+ *      Link Disable を 500ms か Secondary Bus Reset)。FW がカード全体をリセットする。
+ *   4. リンクが上がり、設定空間が読めるようになるのを待ち、リセットで消えた設定空間(BAR・Command・
+ *      Max Payload Size など)を、使っている全部のポートへ戻す。ポート層を閉じる。
+ * この後に bfm_run() を呼ぶと、最初から立ち上げ直す(相手のノードでは接続が BFM_ST_DOWN になるので、
+ * bfm_reconnect() で張り直す)。bfm_shutdown() と同じく、ほかのコアが bfmem を使っていないときに 1 つのコアから
+ * 呼び、BFM_INPROGRESS 以外が返るまで同じ引数で呼び続ける(途中で bfm_shutdown() を呼ぶと、リセットを済ませて止まる)。
+ * **カードの全部の function がリセットされる。** 同じカードの function を bfmem 以外(OS のドライバなど)が
+ * 使っていないこと。また、上流のポートの下にこのカードだけがあること(ほかの装置もリンクを失う)。
+ * 戻り値: BFM_OK = リセットした(bfmem は止まっている)。BFM_INPROGRESS = 途中。
+ *         BFM_E_NOTSUP = 上流のポートが無い・FW が level 3 に対応していない。BFM_E_STATE = ポートが立ち上がっていない。
+ *         BFM_E_BUSY = FW の更新の途中・ほかのポートのリセットの途中。BFM_E_HW = MFRL を書けない
+ *         (ここまでの失敗では何も止めておらず、bfmem は動いたまま)。
+ *         BFM_E_TIMEOUT = リンクが上がらない・設定空間が読めない(bfmem は止まっている)。 */
+int bfm_fw_reset(unsigned port);
 
 /* ---- 情報 ---- */
 

@@ -40,6 +40,18 @@ void bfm_port_fini(void);
 uint32_t bfm_port_pci_read32(unsigned port, uint32_t off);
 void     bfm_port_pci_write32(unsigned port, uint32_t off, uint32_t val);
 
+/* カードのリセット(bfm_fw_reset())で使う設定空間の 32bit 読み書き(off は 4 の倍数)。
+ *   bfm_port_up_*:     ポート port の装置の上流のポート(ルートポートか PCIe スイッチの下りポート)の設定空間。
+ *                      ここの Link Control(Link Disable)か Bridge Control(Secondary Bus Reset)でカードをリセットする。
+ *                      上流のポートが無い(見つからない)ときは、読むと 0xffffffff、書いても何もしない。
+ *   bfm_port_pci_hw_*: ポート port の装置そのものの設定空間。OS が設定空間を仮想化していても(Linux の VFIO は
+ *                      BAR・Max Payload Size・ベンダ ID を仮想化する)その中を通さず、装置へ直接読み書きする。
+ *                      リセットで消えた設定を戻すのに使う。VxWorks では bfm_port_pci_read32 / write32 と同じ。 */
+uint32_t bfm_port_up_read32(unsigned port, uint32_t off);
+void     bfm_port_up_write32(unsigned port, uint32_t off, uint32_t val);
+uint32_t bfm_port_pci_hw_read32(unsigned port, uint32_t off);
+void     bfm_port_pci_hw_write32(unsigned port, uint32_t off, uint32_t val);
+
 /* ポート port の BAR0 を UC(キャッシュしない)で CPU から触れるようにして先頭を返す。
  * bar_phys は設定空間から読んだ BAR0 の値(Linux では使わない)。NULL = 失敗。 */
 volatile uint8_t *bfm_port_bar0_map(unsigned port, uint64_t bar_phys, uint64_t bar_size);

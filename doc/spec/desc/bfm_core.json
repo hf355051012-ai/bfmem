@@ -326,27 +326,101 @@
       ]
     },
     {
+      "func": "stop_all_step",
+      "purpose": "使っている全部のポートを止める手順(接続を畳む・FW を止める・Bus Master を落とす)を、回って待たずに進めるための下請け。`bfm_shutdown()` と、カードのリセット `bfm_fw_reset()` の両方が使う。",
+      "summary": "`g_bfm_ctl_lock` を(回って)取り、使うポートのうち `D_IDLE`・`D_FAILED` でないものについて、`D_STOP` でなければ `dev_stop_begin(d, BFM_OK)` で止める手順を始め、`dev_stop_step()` で進める。止め終えたポートは `D_IDLE` にする。ポート層は閉じない。",
+      "args": {},
+      "ret": "`BFM_INPROGRESS`: 途中(止め終えていないポートがある)。`BFM_OK`: 全部止めた。",
+      "pre": "`s_run` を `R_STOP` にしてあること(`bfm_run()` が表を進めないように)。ほかのコアが bfmem を使っていないこと。",
+      "notes": "`g_bfm_ctl_lock` は `bfm_lock()` で回って取る(ほかのコアの `bfm_run()` が持つのは 1 つの手順を進める間だけ)。",
+      "flow": [
+        {"do": "busy = 0"},
+        {"call": "bfm_lock(&g_bfm_ctl_lock) を呼ぶ"},
+        {"while": "p < BFM_MAX_PORT ?(p は 0 から)", "body": [{"do": "d = &g_bfm_dev[p]"}, {"if": "!d->used または d->phase == D_IDLE または d->phase == D_FAILED ?", "then": [{"continue": true}]}, {"if": "d->phase != D_STOP ?", "then": [{"call": "dev_stop_begin(d, BFM_OK) を呼ぶ"}]}, {"call": "dev_stop_step(d) を呼ぶ"}, {"if": "dev_stop_step() == BFM_INPROGRESS ?", "then": [{"do": "busy = 1"}], "else": [{"do": "d->phase = D_IDLE"}]}]},
+        {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
+        {"return": "busy ? BFM_INPROGRESS : BFM_OK"}
+      ]
+    },
+    {
+      "func": "bfm_fw_reset",
+      "purpose": "電源を入れ直さずに、`bfm_fw_update()` で書いて切り替えた新しい FW を有効にするため、ConnectX のカードをリセットする関数(Linux の devlink の fw_activate にあたる)。アプリケーションが、ほかのコアが bfmem を使っていないときに 1 つのコアから、`BFM_INPROGRESS` 以外が返るまで呼び続ける。済むと bfmem は止まっていて、次の `bfm_run()` で新しい FW で立ち上げ直す。",
+      "summary": "状態機械(`s_xr.step`)。`X_IDLE`: 動いていて(`R_RUN`)ポートが立ち上がっていることと、上流のポートでリセットできること(`bfm_pci_reset_check()`)を確かめ、`X_ARM` へ。`X_ARM`: `g_bfm_ctl_lock` を取れたら `bfm_fw_mfrl_step()` で MFRL に level 3 を書く(失敗なら何も止めずに `X_IDLE` へ戻って失敗を返す)。済んだら `s_run` を `R_STOP` にして `X_STOP` へ。`X_STOP`: `stop_all_step()` で全部のポートを止め、済んだら `bfm_pci_reset_begin()` で設定空間を覚えてリンクを落とし、`X_LINK` へ。`X_LINK`: `bfm_pci_reset_step()` を進め、済んだら(失敗でも)ポート層を閉じ(`bfm_port_fini()`)、`R_IDLE` に戻して結果を返す。",
+      "args": {"port": "リセットするカードのポートの番号(このポートから MFRL を書き、この上流のポートでリンクを落とす)"},
+      "ret": "`BFM_OK`: リセットした(bfmem は止まっている)。`BFM_INPROGRESS`: 途中(同じ引数でもう一度呼ぶ)。`BFM_E_PARAM`: ポートの番号が範囲外。`BFM_E_STATE`: 動いていない・ポートが立ち上がっていない。`BFM_E_NOTSUP`: 上流のポートが無い・FW が level 3 に対応していない。`BFM_E_BUSY`: FW の更新の途中・別のポートのリセットの途中。`BFM_E_HW`: MFRL に書けない(ここまでの失敗では何も止めておらず、bfmem は動いたまま)。`BFM_E_TIMEOUT`: リンクが上がらない・設定空間が読めない(bfmem は止まっている)。",
+      "pre": "ほかのコアが bfmem を使っていない(`bfm_run()` もデータ経路の関数も呼んでいない)ときに、1 つのコアから呼ぶこと。カードの全部の function を bfmem 以外(OS のドライバなど)が使っていないこと。上流のポートの下に、このカードのほかに装置が無いこと。",
+      "notes": "* MFRL を書いてからリンクを落とすまでの間に、全部のポートを止める(Linux の mlx5 も、MFRL を書いてからドライバを外し、リンクを落とす)。TEARDOWN_HCA と Bus Master を落とすことでは、MFRL の level 3 は取り消されなかった(実機)。\n* 途中で `bfm_shutdown()` を呼ぶと、リセットを済ませて止まる(`bfm_shutdown()` が続きを進める)。\n* 相手のノードでは、接続が BYE で `BFM_ST_DOWN` になるので、`bfm_reconnect()` で張り直す。\n* Linux では、ポート層を閉じるときに vfio-pci が装置をリセットして開いたときの設定空間を戻す。`bfm_pci_reset_step()` が戻しておくので、そのリセットも効く。",
+      "flow": [
+        {"if": "port >= BFM_MAX_PORT ?", "then": [{"return": "BFM_E_PARAM"}]},
+        {"do": "d = &g_bfm_dev[port]"},
+        {"switch": "s_xr.step", "cases": [{"case": "X_IDLE", "body": [{"call": "s_run が R_RUN で、d->used で、bfm_dev_ready(d) か確かめる"}, {"if": "そうでない?", "then": [{"return": "BFM_E_STATE"}]}, {"call": "rc = bfm_pci_reset_check(d) を呼ぶ"}, {"if": "rc != BFM_OK ?", "then": [{"return": "rc"}]}, {"do": "BFM_LOG で「カードをリセットする」を表示"}, {"do": "s_xr.port = port、s_xr.method = BFM_RESET_LINK_DISABLE、s_xr.step = X_ARM"}, {"return": "BFM_INPROGRESS"}]}, {"case": "X_ARM", "body": [{"if": "port != s_xr.port ?", "then": [{"return": "BFM_E_BUSY"}]}, {"call": "bfm_trylock(&g_bfm_ctl_lock) を呼ぶ"}, {"if": "取れない?", "then": [{"return": "BFM_INPROGRESS"}]}, {"call": "rc = bfm_dev_ready(d) ? bfm_fw_mfrl_step(d, &s_xr.method) : BFM_E_STATE"}, {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"}, {"if": "rc == BFM_INPROGRESS ?", "then": [{"return": "BFM_INPROGRESS"}]}, {"if": "rc != BFM_OK ?", "then": [{"do": "s_xr.step = X_IDLE(何も止めていない)"}, {"return": "rc"}]}, {"do": "s_run = R_STOP(release)、s_xr.step = X_STOP"}, {"return": "BFM_INPROGRESS"}]}, {"case": "X_STOP", "body": [{"if": "port != s_xr.port ?", "then": [{"return": "BFM_E_BUSY"}]}, {"call": "stop_all_step() を呼ぶ"}, {"if": "stop_all_step() == BFM_INPROGRESS ?", "then": [{"return": "BFM_INPROGRESS"}]}, {"call": "bfm_pci_reset_begin(d, s_xr.method) を呼ぶ"}, {"do": "s_xr.step = X_LINK"}, {"return": "BFM_INPROGRESS"}]}, {"default": true, "body": [{"if": "port != s_xr.port ?", "then": [{"return": "BFM_E_BUSY"}]}, {"call": "rc = bfm_pci_reset_step(d) を呼ぶ"}, {"if": "rc == BFM_INPROGRESS ?", "then": [{"return": "BFM_INPROGRESS"}]}, {"call": "bfm_port_fini() を呼ぶ"}, {"do": "s_xr.step = X_IDLE、s_run = R_IDLE(release)"}, {"call": "bfm_strerror(rc) を呼び、BFM_LOG で「止めた」と結果を表示"}, {"return": "rc"}]}]}
+      ],
+      "states": {
+        "start": "最初の呼び出し(s_xr.step = X_IDLE)",
+        "list": [
+          {
+            "id": "X_IDLE",
+            "text": "動いていてポートが立ち上がっていること、上流のポートでリセットできること(bfm_pci_reset_check())を確かめる",
+            "next": [
+              {
+                "to": "X_ARM",
+                "label": "できる"
+              },
+              {
+                "to": "END",
+                "label": "できない(BFM_E_STATE / BFM_E_NOTSUP)"
+              }
+            ]
+          },
+          {
+            "id": "X_ARM",
+            "text": "MFRL に level 3 を書く(bfm_fw_mfrl_step()。ポートは動いたまま)",
+            "wait": "g_bfm_ctl_lock と FW のコマンド",
+            "next": [
+              {
+                "to": "X_STOP",
+                "label": "書いた(s_run = R_STOP)"
+              },
+              {
+                "to": "X_IDLE",
+                "label": "失敗(何も止めずに失敗を返す)"
+              }
+            ]
+          },
+          {
+            "id": "X_STOP",
+            "text": "全部のポートを止める(stop_all_step()。接続を畳み、TEARDOWN_HCA、Bus Master を落とす)。済んだら設定空間を覚えてリンクを落とす(bfm_pci_reset_begin())",
+            "wait": "全部のポートが止まる"
+          },
+          {
+            "id": "X_LINK",
+            "text": "リンクを戻し、上がるのを待ち、設定空間を戻す(bfm_pci_reset_step())。済んだらポート層を閉じ、s_run = R_IDLE",
+            "wait": "リンクと設定空間",
+            "next": [
+              {
+                "to": "END",
+                "label": "済んだ(BFM_OK / BFM_E_TIMEOUT)"
+              }
+            ]
+          }
+        ],
+        "end": "結果を返す(次の bfm_run() で最初から立ち上げる)",
+        "note": "待つ状態では BFM_INPROGRESS を返して留まる。X_ARM までの失敗では bfmem は動いたまま。"
+      }
+    },
+    {
       "func": "bfm_shutdown",
       "purpose": "アプリケーションが bfmem をやめるときに、全部の接続を畳み、NIC を止めるための関数。成功が返るまで呼び続ける。立ち上げの途中でも呼べ、止めた後に `bfm_run()` を呼ぶと最初から立ち上げ直す。ほかのコアが bfmem を使っていないときに 1 つのコアから呼ぶ。",
-      "summary": "ライブラリを止める(待つところでは `BFM_INPROGRESS` を返す)。全体の状態を `R_STOP` にして `bfm_run()` が表を進めないようにし、`g_bfm_ctl_lock` を(回って)取って、使うポートのうち `D_IDLE`・`D_FAILED` でないものについて、`D_STOP` でなければ `dev_stop_begin(d, BFM_OK)` で止める手順を始め、`dev_stop_step()` で進める(全部の接続を畳み、出したままのコマンドを捨て、FW を止め、Bus Master を落とし、BAR0 を外す)。止め終えたポートは `D_IDLE` にする。全部のポートが止まったら、ポート層を閉じ(`bfm_port_fini()`)、`R_IDLE` に戻す。",
+      "summary": "ライブラリを止める(待つところでは `BFM_INPROGRESS` を返す)。カードのリセット(`bfm_fw_reset()`)の途中なら、まずその続きを進める(リセットも全部を止めるところまで進む)。止まっていなければ、全体の状態を `R_STOP` にして `bfm_run()` が表を進めないようにし、`stop_all_step()` で全部のポートを止める(全部の接続を畳み、出したままのコマンドを捨て、FW を止め、Bus Master を落とし、BAR0 を外す)。全部のポートが止まったら、ポート層を閉じ(`bfm_port_fini()`)、`R_IDLE` に戻す。",
       "args": {},
       "ret": "`BFM_OK`: 止めた(止まっていたときも)。`BFM_INPROGRESS`: 途中(もう一度呼ぶと先へ進む)。",
       "pre": "ほかのコアが bfmem を使っていない(`bfm_run()` もデータ経路の関数も呼んでいない)ときに、1 つのコアから呼ぶこと。",
-      "notes": "* 止まっていれば(`R_IDLE`)何もせず `BFM_OK` を返す。\n* 立ち上げの途中でも呼べる(そこで止める)。立ち上げの失敗の後始末の途中(`D_STOP`)なら、その続きを進める。`D_FAILED` のポートは止め終えているので触らない。\n* 接続が残っていれば `bfm_cm_fini_step()` が相手へ BYE を送ってから畳む。\n* `g_bfm_ctl_lock` は `bfm_lock()` で回って取る(ほかのコアの `bfm_run()` が持つのは 1 つの手順を進める間だけ)。\n* `BFM_OK` が返るまで呼び続けること。止めた後に `bfm_run()` を呼ぶと、最初から立ち上げ直す。",
+      "notes": "* 止まっていれば(`R_IDLE`)何もせず `BFM_OK` を返す。\n* 立ち上げの途中でも呼べる(そこで止める)。立ち上げの失敗の後始末の途中(`D_STOP`)なら、その続きを進める。`D_FAILED` のポートは止め終えているので触らない。\n* 接続が残っていれば `bfm_cm_fini_step()` が相手へ BYE を送ってから畳む。\n* カードのリセットが MFRL を書く前に失敗したときは、bfmem は動いたままなので、続けてふつうに止める。\n* `BFM_OK` が返るまで呼び続けること。止めた後に `bfm_run()` を呼ぶと、最初から立ち上げ直す。",
       "flow": [
+        {"if": "s_xr.step != X_IDLE(カードのリセットの途中)?", "then": [{"call": "bfm_fw_reset(s_xr.port) を呼ぶ"}, {"if": "bfm_fw_reset() == BFM_INPROGRESS ?", "then": [{"return": "BFM_INPROGRESS"}]}]},
         {"if": "s_run == R_IDLE ?", "then": [{"return": "BFM_OK"}]},
         {"do": "s_run = R_STOP(release)"},
-        {"do": "busy = 0"},
-        {"call": "bfm_lock(&g_bfm_ctl_lock) を呼ぶ"},
-        {"while": "p < BFM_MAX_PORT ?(p は 0 から)", "body": [
-          {"do": "d = &g_bfm_dev[p]"},
-          {"if": "!d->used または d->phase == D_IDLE または d->phase == D_FAILED ?", "then": [{"continue": true}]},
-          {"if": "d->phase != D_STOP ?", "then": [{"call": "dev_stop_begin(d, BFM_OK) を呼ぶ"}]},
-          {"call": "dev_stop_step(d) を呼ぶ"},
-          {"if": "dev_stop_step() == BFM_INPROGRESS ?", "then": [{"do": "busy = 1"}], "else": [{"do": "d->phase = D_IDLE"}]}
-        ]},
-        {"call": "bfm_unlock(&g_bfm_ctl_lock) を呼ぶ"},
-        {"if": "busy ?", "then": [{"return": "BFM_INPROGRESS"}]},
+        {"call": "stop_all_step() を呼ぶ"},
+        {"if": "stop_all_step() == BFM_INPROGRESS ?", "then": [{"return": "BFM_INPROGRESS"}]},
         {"call": "bfm_port_fini() を呼ぶ"},
         {"do": "s_run = R_IDLE(release)"},
         {"do": "BFM_LOG で「止めた」を表示"},

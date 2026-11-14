@@ -210,10 +210,17 @@ MCC で書くときと同じく(`FwExtract4MBImage()`)、像の目次(ITOC。先
 device_data の欄は 0xFF にして渡す。ConnectX-4 Lx の 14.29.1016 では、部品の上限 7MB・MCDA 1 回 128 バイトで、
 16,744,768 バイトの .bin のうち 4,840,404 バイトを渡す。
 
-書いた FW はカードのリセットで動き出す。カードだけのリセットは MFRL(0x9028、8 バイト。bfmem はまだ使わない)で頼む:
+書いた FW はカードのリセットで動き出す。カードだけのリセットは MFRL(0x9028、8 バイト。`bfm_fw_mfrl_step()`)で頼む:
 byte 7 reset_level(対応しているものの印。bit0 live-patch・bit3 PCI のリセット・bit6 warm reboot)、byte 6 reset_type、
 byte 5 の上位 3bit pci_reset_req_method(0 = リンクの切断)と下位 4bit reset_state。reset_level に 0x08(level 3)を書いて
-ドライバを外し、上流のポートでリンクを切って繋ぎ直すと、FW がカード全体をリセットして新しい像で立ち上がる。
+ドライバを外し(TEARDOWN_HCA・Bus Master を落とす)、上流のポートでリンクを落として繋ぎ直すと、FW がカード全体(全部の function)を
+リセットして新しい像で立ち上がる(`bfm_fw_reset()`)。リンクの落とし方は pci_reset_req_method に従う:
+0 なら上流のポートの Link Control の Link Disable(bit 4)を 500ms 立てて戻し、1 なら Bridge Control の Secondary Bus Reset
+(bit 6)を 2ms 立てて戻す。その後、上流のポートの Link Status の Data Link Layer Link Active(bit 13。Link Capabilities の
+bit 20 が報告できる印)を待ち、100ms 待ち、ベンダ ID が読めるのを待つ(`bfm_pci_reset_step()`)。リセットで設定空間は初期値に
+戻るので、BAR・Command・Device Control(Max Payload Size。上流のポートより小さいままだと、上流からの大きい TLP を受けられない)・
+Link Control・Device Control 2 を前の値に書き戻す。ConnectX-4 Lx では reset_level 0xc8・落とし方 0 で、リンクは 43ms で上がり、
+立ち上げ直した bfmem に FW が新しい版を返した。
 MCAM の byte 18 bit0 が MFRL への対応の印(ConnectX-4 Lx は 14.29.1016 で 0・14.32.1912 で 1。0 でも MFRL は読み書きできた)。
 
 ==== HCA の能力(QUERY_HCA_CAP / SET_HCA_CAP)

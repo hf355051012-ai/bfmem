@@ -133,9 +133,13 @@ Precision `b3:00.1`、ポート 1 は 192.168.102.11 / .21)ので、2 ポート�
   .bin 16MB、部品の上限 7MB)。渡すのは mstflint の `FwExtract4MBImage(img, true)` と同じ部分(ITOC の相対番地の部分の
   終わりまで。先頭 16 バイトの印と device_data の ITOC の欄は 0xFF)。ボードごとの情報(MAC・GUID・VPD)を渡さないためでもある。
   FW の更新を試すときは、まず確かめるだけ(`-A` なし)で。取り消した直後は mlx5_core の立ち上げに約 46 秒かかった。
-- **書いた FW を動かすにはカードのリセットが要る。** Precision の ConnectX-4 Lx は MFRL の level 3(PCI のリセット)に対応して
-  いて、MFRL に level 3 を書いてルートポート `0000:b2:00.0` でリンクを切って繋ぎ直せば、ホストを再起動せずに切り替わる
-  (`TEST_PLAN.md`)。14.29.1016 は MCAM に MFRL を載せていないので、Linux の `devlink … fw_activate` は断られる。
+- **書いた FW を動かすにはカードのリセットが要る。** `bfm_fw_reset()`(MFRL の level 3 → 全部のポートを止める →
+  上流のポートでリンクを切って繋ぎ直す → 設定空間を戻す)で、ホストを再起動せずに切り替わる(`TEST_PLAN.md`)。
+  14.29.1016 は MCAM に MFRL を載せていないので、Linux の `devlink … fw_activate` は断られる(MFRL そのものは使える)。
+- **リセットで設定空間が初期値に戻る**(BAR が 0、Max Payload Size が 128)。Linux の VFIO は BAR・MPS・ベンダ ID を
+  仮想化していて、VFIO を通して読み書きしても装置の本当の値は見えず・戻らない。リセットの前後は sysfs の config
+  (`bfm_port_pci_hw_*`)で読み書きする。**試すときはカードの 2 つの PF を両方 vfio-pci にする**(片方を mlx5_core に
+  残すと、それもリセットされる)。
   **Precision の ConnectX は 2026-11-14 から FW 14.32.1912**(OptiPlex は 14.32.1900)。
 
 ## vfio_nvme から引き継ぐ落とし穴

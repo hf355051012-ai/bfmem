@@ -64,6 +64,7 @@ bfmem の関数のうち、外から使うもの。関数名を押すと、そ�
 2+h|FW の更新
 |<<src_bfm_fw-bfm_fw_update,`bfm_fw_update(port, img, len, mode)`>> |アプリケーションが、ConnectX のフラッシュの FW を新しい版に書き換えるための関数。FW 自身に今の像とは別の置き場へ書かせて確かめさせるので、途中で止まっても前の FW で起動できる。確かめるだけ(切り替えない)の形もあり、本番の前に像が装置に合うかを試せる。待たずに少しずつ進めるので、終わるまで呼び続ける。
 |<<src_bfm_fw-bfm_fw_update_cancel,`bfm_fw_update_cancel(port)`>> |アプリケーションが、進めている FW の更新をやめるための関数。頼んだ後も `bfm_fw_update()` を呼び続けると、取り消して手順を手放してから終わる。切り替えの後は取り消せない。
+|<<src_bfm_core-bfm_fw_reset,`bfm_fw_reset(port)`>> |電源を入れ直さずに、`bfm_fw_update()` で書いて切り替えた新しい FW を有効にするため、ConnectX のカードをリセットする関数(Linux の devlink の `fw_activate` にあたる)。アプリケーションが、ほかのコアが bfmem を使っていないときに 1 つのコアから、`BFM_INPROGRESS` 以外が返るまで呼び続ける。済むと bfmem は止まっていて、次の `bfm_run()` で新しい FW で立ち上げ直す。
 2+h|情報
 |<<src_bfm_ops-bfm_inline_max,`bfm_inline_max()`>> |アプリケーションが、データを WQE に埋め込んで送れる write の最大の長さを知るための関数。`bfm_write_post()` で書ける長さの上限であり、`bfm_write()` などがこの長さまでは速い形で送る。
 |<<src_bfm_ops-bfm_bf_active,`bfm_bf_active(c)`>> |アプリケーションや試験が、その接続が BlueFlame(NIC への指示を 1 回の書き込みで届ける仕組み)を使えているかを知るための関数。遅延を測るときなどに、状態として表示する。
@@ -84,6 +85,10 @@ bfmem の関数のうち、外から使うもの。関数名を押すと、そ�
 |`bfm_port_fini()` |<<port_linux_vfio_port_linux-bfm_port_fini,節へ>> |<<port_vxworks_port_vxworks-bfm_port_fini,節へ>> |ライブラリが、`bfm_shutdown()` で全部のポートを止めた後に、`bfm_port_init()` で取ったもの(装置・メモリの対応づけなど)を返すために呼ぶ関数。Linux 版では `bfm_port_init()` の途中で失敗したときの後始末にも使う。移植する人は、`bfm_port_init()` で取ったものを返す処理を用意する。
 |`bfm_port_pci_read32(port, off)` |<<port_linux_vfio_port_linux-bfm_port_pci_read32,節へ>> |<<port_vxworks_port_vxworks-bfm_port_pci_read32,節へ>> |ライブラリが、ポートの立ち上げで装置の PCIe の設定空間を読むための関数(装置の ID・BAR0 の位置と大きさ・機能の一覧・リセットの済み具合などを調べる)。移植する人は、ポートの番号で選んだ装置の設定空間から 32bit を読む関数を用意する。Linux 版は VFIO を通して読む。
 |`bfm_port_pci_write32(port, off, val)` |<<port_linux_vfio_port_linux-bfm_port_pci_write32,節へ>> |<<port_vxworks_port_vxworks-bfm_port_pci_write32,節へ>> |ライブラリが、ポートの立ち上げと停止で装置の PCIe の設定空間へ書くための関数(Bus Master の入り切り・BAR0 の大きさを測る・装置のリセットなど)。移植する人は、ポートの番号で選んだ装置の設定空間へ 32bit を書く関数を用意する。Linux 版は VFIO を通して書く。
+|`bfm_port_up_read32(port, off)` |<<port_linux_vfio_port_linux-bfm_port_up_read32,節へ>> |<<port_vxworks_port_vxworks-bfm_port_up_read32,節へ>> |カードのリセット(`bfm_fw_reset()`)で、ポートの装置の上流のポート(ルートポートか PCIe スイッチの下りポート)の設定空間を読むための関数。リンクの制御・状態を見るのに使う。移植する人は、装置のバスを下に持つブリッジの設定空間を読む関数を用意する。Linux 版は sysfs の木で 1 つ上の装置の config を読む。
+|`bfm_port_up_write32(port, off, val)` |<<port_linux_vfio_port_linux-bfm_port_up_write32,節へ>> |<<port_vxworks_port_vxworks-bfm_port_up_write32,節へ>> |カードのリセットで、上流のポートの Link Control(Link Disable)か Bridge Control(Secondary Bus Reset)を書いて PCIe のリンクを落とし・戻すための関数。移植する人は、上流のポートの設定空間へ書く関数を用意する。
+|`bfm_port_pci_hw_read32(port, off)` |<<port_linux_vfio_port_linux-bfm_port_pci_hw_read32,節へ>> |<<port_vxworks_port_vxworks-bfm_port_pci_hw_read32,節へ>> |カードのリセットの前後に、ポートの装置そのものの設定空間を(OS の仮想化を通さずに)読むための関数。リセットの前の値を覚え、リセットの後に設定空間が読めるようになったかを見る。移植する人は、OS が設定空間を仮想化するなら、それを通さずに装置へ届く読み方を用意する。Linux 版は sysfs の config を読む(VFIO は BAR・Max Payload Size・ベンダ ID を仮想化しているため)。
+|`bfm_port_pci_hw_write32(port, off, val)` |<<port_linux_vfio_port_linux-bfm_port_pci_hw_write32,節へ>> |<<port_vxworks_port_vxworks-bfm_port_pci_hw_write32,節へ>> |カードのリセットで初期値に戻った設定空間(BAR・Command・Max Payload Size など)を、装置そのものへ書き戻すための関数。移植する人は、OS の仮想化を通さずに装置へ届く書き方を用意する。
 |`bfm_port_bar0_map(port, bar_phys, bar_size)` |<<port_linux_vfio_port_linux-bfm_port_bar0_map,節へ>> |<<port_vxworks_port_vxworks-bfm_port_bar0_map,節へ>> |ライブラリが、ポートの立ち上げで PCIe の設定を済ませた後に、装置のレジスタ(BAR0)を CPU から触れるようにするために呼ぶ関数。返った先頭から、FW のコマンドの受け渡しやドアベルの書き込みができるようになる。移植する人は、BAR0 をキャッシュしない属性で張った先頭を返す関数を用意する。
 |`bfm_port_bar0_unmap(port)` |<<port_linux_vfio_port_linux-bfm_port_bar0_unmap,節へ>> |<<port_vxworks_port_vxworks-bfm_port_bar0_unmap,節へ>> |ライブラリが、ポートを止めるときに Bus Master を落とした後で、`bfm_port_bar0_map()` で張った BAR0 の窓を外すために呼ぶ関数。移植する人は、`bfm_port_bar0_map()` で張ったものを外す処理を用意する。
 |`bfm_port_bar0_wc(port, off, len)` |<<port_linux_vfio_port_linux-bfm_port_bar0_wc,節へ>> |<<port_vxworks_port_vxworks-bfm_port_bar0_wc,節へ>> |ライブラリが、接続ごとの UAR(ドアベルと BlueFlame の窓)のページを write-combining で触れるようにするために、接続の枠を用意するときに呼ぶ関数。返ったアドレスへ BlueFlame で WQE を書き込めるようになる。NULL が返れば BlueFlame を使わずにドアベルだけで動かすので、移植する人は、用意できない環境では NULL を返せばよい。
@@ -334,10 +339,17 @@ MCC で書くときと同じく(`FwExtract4MBImage()`)、像の目次(ITOC。先
 device_data の欄は 0xFF にして渡す。ConnectX-4 Lx の 14.29.1016 では、部品の上限 7MB・MCDA 1 回 128 バイトで、
 16,744,768 バイトの .bin のうち 4,840,404 バイトを渡す。
 
-書いた FW はカードのリセットで動き出す。カードだけのリセットは MFRL(0x9028、8 バイト。bfmem はまだ使わない)で頼む:
+書いた FW はカードのリセットで動き出す。カードだけのリセットは MFRL(0x9028、8 バイト。`bfm_fw_mfrl_step()`)で頼む:
 byte 7 reset_level(対応しているものの印。bit0 live-patch・bit3 PCI のリセット・bit6 warm reboot)、byte 6 reset_type、
 byte 5 の上位 3bit pci_reset_req_method(0 = リンクの切断)と下位 4bit reset_state。reset_level に 0x08(level 3)を書いて
-ドライバを外し、上流のポートでリンクを切って繋ぎ直すと、FW がカード全体をリセットして新しい像で立ち上がる。
+ドライバを外し(TEARDOWN_HCA・Bus Master を落とす)、上流のポートでリンクを落として繋ぎ直すと、FW がカード全体(全部の function)を
+リセットして新しい像で立ち上がる(`bfm_fw_reset()`)。リンクの落とし方は pci_reset_req_method に従う:
+0 なら上流のポートの Link Control の Link Disable(bit 4)を 500ms 立てて戻し、1 なら Bridge Control の Secondary Bus Reset
+(bit 6)を 2ms 立てて戻す。その後、上流のポートの Link Status の Data Link Layer Link Active(bit 13。Link Capabilities の
+bit 20 が報告できる印)を待ち、100ms 待ち、ベンダ ID が読めるのを待つ(`bfm_pci_reset_step()`)。リセットで設定空間は初期値に
+戻るので、BAR・Command・Device Control(Max Payload Size。上流のポートより小さいままだと、上流からの大きい TLP を受けられない)・
+Link Control・Device Control 2 を前の値に書き戻す。ConnectX-4 Lx では reset_level 0xc8・落とし方 0 で、リンクは 43ms で上がり、
+立ち上げ直した bfmem に FW が新しい版を返した。
 MCAM の byte 18 bit0 が MFRL への対応の印(ConnectX-4 Lx は 14.29.1016 で 0・14.32.1912 で 1。0 でも MFRL は読み書きできた)。
 
 ==== HCA の能力(QUERY_HCA_CAP / SET_HCA_CAP)
@@ -628,7 +640,7 @@ CQE は 64 バイト。
 [cols="1,5",options="autowidth"]
 .bfm_rd16be()
 |===
-|関数名 |`bfm_rd16be`(`include/bfm_port.h` 85 行目)
+|関数名 |`bfm_rd16be`(`include/bfm_port.h` 97 行目)
 |宣言 |`static inline uint16_t bfm_rd16be(const volatile void *p)`
 |目的 a|ConnectX とやりとりするビッグエンディアンの構造(コマンド・WQE・CQE など)や T10-DIF の PI から、16 ビットの欄を CPU で扱える値として取り出すための関数。
 |処理内容 a|`p` から 2 バイトをビッグエンディアンの 16bit の値として読む。
@@ -655,7 +667,7 @@ image::call_include_bfm_port-bfm_rd16be.drawio.svg[bfm_rd16be() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_rd24be()
 |===
-|関数名 |`bfm_rd24be`(`include/bfm_port.h` 89 行目)
+|関数名 |`bfm_rd24be`(`include/bfm_port.h` 101 行目)
 |宣言 |`static inline uint32_t bfm_rd24be(const volatile void *p)`
 |目的 a|ConnectX とやりとりするビッグエンディアンの構造から、24 ビットの欄(QP・CQ・PD などの番号)を CPU で扱える値として取り出すための関数。FW のコマンドの出力から番号を読むのに使う。
 |処理内容 a|`p` から 3 バイトをビッグエンディアンの 24bit の値として読む(QPN などの 24bit の欄)。
@@ -682,7 +694,7 @@ image::call_include_bfm_port-bfm_rd24be.drawio.svg[bfm_rd24be() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_rd32be()
 |===
-|関数名 |`bfm_rd32be`(`include/bfm_port.h` 93 行目)
+|関数名 |`bfm_rd32be`(`include/bfm_port.h` 105 行目)
 |宣言 |`static inline uint32_t bfm_rd32be(const volatile void *p)`
 |目的 a|ConnectX とやりとりするビッグエンディアンの構造(コマンド・WQE・CQE など)から、32 ビットの欄を CPU で扱える値として取り出すための関数。
 |処理内容 a|`p` から 4 バイトをビッグエンディアンの 32bit の値として読む。
@@ -709,7 +721,7 @@ image::call_include_bfm_port-bfm_rd32be.drawio.svg[bfm_rd32be() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_rd64be()
 |===
-|関数名 |`bfm_rd64be`(`include/bfm_port.h` 97 行目)
+|関数名 |`bfm_rd64be`(`include/bfm_port.h` 109 行目)
 |宣言 |`static inline uint64_t bfm_rd64be(const volatile void *p)`
 |目的 a|ConnectX とやりとりするビッグエンディアンの構造(コマンド・WQE・CQE など)から、64 ビットの欄を CPU で扱える値として取り出すための関数。
 |処理内容 a|`p` から 8 バイトをビッグエンディアンの 64bit の値として読む。前の 4 バイトを上位、後の 4 バイトを下位にする。
@@ -736,7 +748,7 @@ image::call_include_bfm_port-bfm_rd64be.drawio.svg[bfm_rd64be() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_wr16be()
 |===
-|関数名 |`bfm_wr16be`(`include/bfm_port.h` 101 行目)
+|関数名 |`bfm_wr16be`(`include/bfm_port.h` 113 行目)
 |宣言 |`static inline void bfm_wr16be(volatile void *p, uint16_t v)`
 |目的 a|CPU の値を、ConnectX が読むビッグエンディアンの構造(コマンド・WQE など)や T10-DIF の PI の 16 ビットの欄へ書き込むための関数。
 |処理内容 a|`v` をビッグエンディアンの 2 バイトとして `p` に書く。
@@ -764,7 +776,7 @@ image::call_include_bfm_port-bfm_wr16be.drawio.svg[bfm_wr16be() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_wr24be()
 |===
-|関数名 |`bfm_wr24be`(`include/bfm_port.h` 106 行目)
+|関数名 |`bfm_wr24be`(`include/bfm_port.h` 118 行目)
 |宣言 |`static inline void bfm_wr24be(volatile void *p, uint32_t v)`
 |目的 a|CPU の値を、ConnectX が読むビッグエンディアンの構造の 24 ビットの欄(QP・PD などの番号や PSN)へ書き込むための関数。FW のコマンドの入力を組むのに使う。
 |処理内容 a|`v` の下位 24bit をビッグエンディアンの 3 バイトとして `p` に書く。
@@ -792,7 +804,7 @@ image::call_include_bfm_port-bfm_wr24be.drawio.svg[bfm_wr24be() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_wr32be()
 |===
-|関数名 |`bfm_wr32be`(`include/bfm_port.h` 112 行目)
+|関数名 |`bfm_wr32be`(`include/bfm_port.h` 124 行目)
 |宣言 |`static inline void bfm_wr32be(volatile void *p, uint32_t v)`
 |目的 a|CPU の値を、ConnectX が読むビッグエンディアンの構造(コマンド・WQE など)の 32 ビットの欄へ書き込むための関数。
 |処理内容 a|`v` をビッグエンディアンの 4 バイトとして `p` に書く。
@@ -820,7 +832,7 @@ image::call_include_bfm_port-bfm_wr32be.drawio.svg[bfm_wr32be() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_wr64be()
 |===
-|関数名 |`bfm_wr64be`(`include/bfm_port.h` 119 行目)
+|関数名 |`bfm_wr64be`(`include/bfm_port.h` 131 行目)
 |宣言 |`static inline void bfm_wr64be(volatile void *p, uint64_t v)`
 |目的 a|CPU の値を、ConnectX が読むビッグエンディアンの構造(コマンド・WQE など)の 64 ビットの欄(アドレスなど)へ書き込むための関数。
 |処理内容 a|`v` をビッグエンディアンの 8 バイトとして `p` に書く。上位 32bit を前の 4 バイトに、下位 32bit を後の 4 バイトに書く。
@@ -848,7 +860,7 @@ image::call_include_bfm_port-bfm_wr64be.drawio.svg[bfm_wr64be() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_mmio_rd32be()
 |===
-|関数名 |`bfm_mmio_rd32be`(`include/bfm_port.h` 126 行目)
+|関数名 |`bfm_mmio_rd32be`(`include/bfm_port.h` 138 行目)
 |宣言 |`static inline uint32_t bfm_mmio_rd32be(const volatile uint8_t *base, uint64_t off)`
 |目的 a|ConnectX の BAR0 のレジスタ(FW の版・初期化中かどうかなど)を読むための関数。レジスタはビッグエンディアンなので、CPU で扱える値に直して返す。
 |処理内容 a|MMIO(BAR0 など)の `base + off` から 32bit を 1 回で読み、ビッグエンディアンから CPU のバイト順に直して返す。
@@ -876,7 +888,7 @@ image::call_include_bfm_port-bfm_mmio_rd32be.drawio.svg[bfm_mmio_rd32be() の関
 [cols="1,5",options="autowidth"]
 .bfm_mmio_wr32be()
 |===
-|関数名 |`bfm_mmio_wr32be`(`include/bfm_port.h` 129 行目)
+|関数名 |`bfm_mmio_wr32be`(`include/bfm_port.h` 141 行目)
 |宣言 |`static inline void bfm_mmio_wr32be(volatile uint8_t *base, uint64_t off, uint32_t v)`
 |目的 a|ConnectX の BAR0 のレジスタ(コマンドの置き場所・コマンドのドアベルなど)に、CPU の値をビッグエンディアンにして書くための関数。
 |処理内容 a|`v` をビッグエンディアンに直し、MMIO(BAR0 など)の `base + off` へ 32bit を 1 回で書く。
@@ -905,7 +917,7 @@ image::call_include_bfm_port-bfm_mmio_wr32be.drawio.svg[bfm_mmio_wr32be() の関
 [cols="1,5",options="autowidth"]
 .bfm_mmio_wr64_raw()
 |===
-|関数名 |`bfm_mmio_wr64_raw`(`include/bfm_port.h` 134 行目)
+|関数名 |`bfm_mmio_wr64_raw`(`include/bfm_port.h` 146 行目)
 |宣言 |`static inline void bfm_mmio_wr64_raw(volatile void *dst, uint64_t v)`
 |目的 a|NIC に新しい WQE を知らせるドアベルを、途中で分かれない 1 回の書き込みで出すための関数。BlueFlame を使わないときの接続の送信と、接続管理(GSI)の送信が使う。
 |処理内容 a|8 バイトのドアベルを、64bit の書き込み 1 回で `dst` に出す。`v` はバイト順を直さずにそのまま書く。
@@ -933,7 +945,7 @@ image::call_include_bfm_port-bfm_mmio_wr64_raw.drawio.svg[bfm_mmio_wr64_raw() �
 [cols="1,5",options="autowidth"]
 .bfm_dma_addr()
 |===
-|関数名 |`bfm_dma_addr`(`include/bfm_port.h` 139 行目)
+|関数名 |`bfm_dma_addr`(`include/bfm_port.h` 151 行目)
 |宣言 |`static inline uint64_t bfm_dma_addr(const volatile void *p)`
 |目的 a|NIC に渡すアドレス(WQE やコマンドに書くアドレス)を、CPU のポインタから得るための関数。本体はアドレスを変換せず、NIC に渡すアドレスはこの関数で得る。
 |処理内容 a|CPU のポインタを、NIC に渡す DMA のアドレスにする(ポインタの値そのもの)。
@@ -1089,7 +1101,7 @@ image::call_src_bfm_internal-bfm_unlock.drawio.svg[bfm_unlock() の関係図]
 [cols="1,5",options="autowidth"]
 .check_config()
 |===
-|関数名 |`check_config`(`src/bfm_core.c` 54 行目)
+|関数名 |`check_config`(`src/bfm_core.c` 56 行目)
 |宣言 |`static int check_config(void)`
 |目的 a|立ち上げを始める前に、`bfm_config.h` の設定の値の誤りを見つけて立ち上げを断るための関数。`run_start()` が最初に呼ぶ。直せる値(範囲外の数など)は使える値に直し、そのまま進められるようにする。
 |処理内容 a|立ち上げの前に設定の変数を検査する。
@@ -1119,7 +1131,7 @@ image::call_src_bfm_core-check_config.drawio.svg[check_config() の関係図]
 [cols="1,5",options="autowidth"]
 .run_start()
 |===
-|関数名 |`run_start`(`src/bfm_core.c` 92 行目)
+|関数名 |`run_start`(`src/bfm_core.c` 94 行目)
 |宣言 |`static int run_start(void)`
 |目的 a|最初の `bfm_run()` で 1 回だけ、ポートごとの立ち上げを始められる状態を用意するための関数。これが済むと、接続の表の各行の状態機械を `bfm_run()` が進められるようになる。
 |処理内容 a|最初の `bfm_run()` で 1 回だけ行う準備。設定を検査し(`check_config()`)、装置 `g_bfm_dev[]` を 0 で埋めてポートごとに番号・使うか(`g_bfm_port_conn[p]` が 0 でない)・接続の数・掛け側か(自分の IPv4 < 相手の IPv4)を入れて `D_IDLE` にする。続けてポート層を開き(`bfm_port_init()`。DMA 領域と公開メモリを使えるようにする)、接続の表を作り(`bfm_cm_table_init()`)、DMA 領域の切り出しを最初に戻し(`bfm_mem_reset()`)、使うポートごとに接続の数・役割・IPv4 を表示する。
@@ -1147,7 +1159,7 @@ image::call_src_bfm_core-run_start.drawio.svg[run_start() の関係図]
 [cols="1,5",options="autowidth"]
 .dev_stop_begin()
 |===
-|関数名 |`dev_stop_begin`(`src/bfm_core.c` 124 行目)
+|関数名 |`dev_stop_begin`(`src/bfm_core.c` 126 行目)
 |宣言 |`static void dev_stop_begin(bfm_dev_t *d, int rc)`
 |目的 a|ポートを止める手順を最初から始めるための関数。`bfm_shutdown()` と、ポートの立ち上げに失敗したときの `bfm_dev_step()` が呼び、その後の `dev_stop_step()` で実際に止める。止め終えたときに返す結果(停止なら成功、立ち上げの失敗ならその理由)をここで覚えさせる。
 |処理内容 a|ポート `d` を止める手順を始める。`d->phase` を `D_STOP` に、止める手順 `d->stop` を最初(`S_CM`)にし、止め終えたときの結果 `d->stop_rc` に `rc` を入れる。
@@ -1175,7 +1187,7 @@ image::call_src_bfm_core-dev_stop_begin.drawio.svg[dev_stop_begin() の関係図
 [cols="1,5",options="autowidth"]
 .dev_stop_step()
 |===
-|関数名 |`dev_stop_step`(`src/bfm_core.c` 136 行目)
+|関数名 |`dev_stop_step`(`src/bfm_core.c` 138 行目)
 |宣言 |`static int dev_stop_step(bfm_dev_t *d)`
 |目的 a|ポートで取った資源(接続・FW・PCIe の設定)を、回って待たずに少しずつ返していくための関数。`bfm_shutdown()` と、立ち上げに失敗したときの `bfm_dev_step()` が、終わるまで繰り返し呼ぶ。済むと、そのポートの NIC は止まり、メモリへの DMA もしなくなる。
 |処理内容 a|ポート `d` を止める手順を、待つところまで進める。接続を畳み、GSI の送信を待ち、WC の窓を返す(`bfm_cm_fini_step()`)→ 出したままの FW のコマンドの完了を待って捨てる(`mlx5_cmd_drain()`)→ FW を止める(`mlx5_hca_teardown()`)→ Bus Master を落として BAR0 を外す、の順に行う。
@@ -1212,7 +1224,7 @@ image::call_src_bfm_core-dev_stop_step.drawio.svg[dev_stop_step() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_dev_ready()
 |===
-|関数名 |`bfm_dev_ready`(`src/bfm_core.c` 173 行目)
+|関数名 |`bfm_dev_ready`(`src/bfm_core.c` 175 行目)
 |宣言 |`int bfm_dev_ready(const bfm_dev_t *d)`
 |目的 a|ポートの立ち上げが済んで、装置にコマンドを出せる状態かを、このファイルの外から知るための関数。立ち上がった装置にだけ許す操作(FW の更新 `bfm_fw_update()`)と、試験の fw が使う。
 |処理内容 a|ポートの立ち上げの状態(`d->phase`)が `D_READY` なら 1 を返す。
@@ -1239,7 +1251,7 @@ image::call_src_bfm_core-bfm_dev_ready.drawio.svg[bfm_dev_ready() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_dev_step()
 |===
-|関数名 |`bfm_dev_step`(`src/bfm_core.c` 178 行目)
+|関数名 |`bfm_dev_step`(`src/bfm_core.c` 180 行目)
 |宣言 |`int bfm_dev_step(bfm_dev_t *d)`
 |目的 a|1 つのポート(ConnectX の 1 つの PCIe の function)を、接続を張れる状態まで立ち上げる状態機械。そのポートの接続がポートの立ち上げを待つ手順にいる間に、`bfm_cm_conn_step()` が繰り返し呼ぶ。済むと、そのポートの接続の確立を始められる。
 |処理内容 a|ポート `d` の立ち上げを、待つところまで進める(待つところでは `BFM_INPROGRESS` を返す状態機械)。`D_IDLE` では、そのポートの各層の状態を最初に戻し(`bfm_pci_setup_reset()`・`mlx5_hca_init_reset()`・`bfm_dif_init_reset()`・`bfm_cm_reset()`)、その後は PCIe の設定(`bfm_pci_setup_step()`)→ BAR0 を張る(`bfm_port_bar0_map()`)→ HCA の立ち上げ(`mlx5_hca_init_step()`。公開メモリの MKey を含む)→ T10-DIF の準備(`bfm_dif_init_step()`)→ GSI と接続の枠の用意(`bfm_cm_init_step()`)の順に進め、準備完了(使った DMA 領域・接続の数・inline の上限・BlueFlame の窓)を表示して `D_READY` にする。途中で失敗したら、取ったものを返す手順(`D_STOP`。`dev_stop_step()`)を進めてから `D_FAILED` にする。
@@ -1287,7 +1299,7 @@ image::call_src_bfm_core-bfm_dev_step.drawio.svg[bfm_dev_step() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_run()
 |===
-|関数名 |`bfm_run`(`src/bfm_core.c` 245 行目)
+|関数名 |`bfm_run`(`src/bfm_core.c` 247 行目)
 |宣言 |`int bfm_run(void)`
 |目的 a|bfmem の代表 API。アプリケーションはこれを周期的に呼び続けるだけで、装置の立ち上げから接続の確立・メモリの公開までが進み、全部の接続が使えるようになると成功を返す。どのコアから同時に呼んでもよく、使えるようになった後も、相手からの切断の知らせや FW の要求を処理するため、ときどき呼び続ける。
 |処理内容 a|代表 API。呼ぶたびに待たずに少しずつ進め、接続の表の全体の様子を返す。全体の状態 `s_run`(acquire で読む)の switch で、状態ごとに分けて処理する。
@@ -1327,29 +1339,97 @@ image::flow_src_bfm_core-bfm_run.drawio.svg[bfm_run() のフロー図]
 .bfm_run() の関係図
 image::call_src_bfm_core-bfm_run.drawio.svg[bfm_run() の関係図]
 
+[[src_bfm_core-stop_all_step]]
+=== `stop_all_step()`
+[cols="1,5",options="autowidth"]
+.stop_all_step()
+|===
+|関数名 |`stop_all_step`(`src/bfm_core.c` 315 行目)
+|宣言 |`static int stop_all_step(void)`
+|目的 a|使っている全部のポートを止める手順(接続を畳む・FW を止める・Bus Master を落とす)を、回って待たずに進めるための下請け。`bfm_shutdown()` と、カードのリセット `bfm_fw_reset()` の両方が使う。
+|処理内容 a|`g_bfm_ctl_lock` を(回って)取り、使うポートのうち `D_IDLE`・`D_FAILED` でないものについて、`D_STOP` でなければ `dev_stop_begin(d, BFM_OK)` で止める手順を始め、`dev_stop_step()` で進める。止め終えたポートは `D_IDLE` にする。ポート層は閉じない。
+|引数 |なし
+|戻り値 a|`BFM_INPROGRESS`: 途中(止め終えていないポートがある)。`BFM_OK`: 全部止めた。
+|前提条件 a|`s_run` を `R_STOP` にしてあること(`bfm_run()` が表を進めないように)。ほかのコアが bfmem を使っていないこと。
+|注意事項 a|`g_bfm_ctl_lock` は `bfm_lock()` で回って取る(ほかのコアの `bfm_run()` が持つのは 1 つの手順を進める間だけ)。
+|使用関数 a|* <<src_bfm_internal-bfm_lock,`bfm_lock()`>>
+* <<src_bfm_core-dev_stop_begin,`dev_stop_begin()`>>
+* <<src_bfm_core-dev_stop_step,`dev_stop_step()`>>
+* <<src_bfm_internal-bfm_unlock,`bfm_unlock()`>>
+|===
+
+.stop_all_step() のフロー図
+image::flow_src_bfm_core-stop_all_step.drawio.svg[stop_all_step() のフロー図]
+
+.stop_all_step() の関係図
+image::call_src_bfm_core-stop_all_step.drawio.svg[stop_all_step() の関係図]
+
+[[src_bfm_core-bfm_fw_reset]]
+=== `bfm_fw_reset()`
+[cols="1,5",options="autowidth"]
+.bfm_fw_reset()
+|===
+|関数名 |`bfm_fw_reset`(`src/bfm_core.c` 344 行目)
+|宣言 |`int bfm_fw_reset(unsigned port)`
+|目的 a|電源を入れ直さずに、`bfm_fw_update()` で書いて切り替えた新しい FW を有効にするため、ConnectX のカードをリセットする関数(Linux の devlink の fw_activate にあたる)。アプリケーションが、ほかのコアが bfmem を使っていないときに 1 つのコアから、`BFM_INPROGRESS` 以外が返るまで呼び続ける。済むと bfmem は止まっていて、次の `bfm_run()` で新しい FW で立ち上げ直す。
+|処理内容 a|状態機械(`s_xr.step`)。`X_IDLE`: 動いていて(`R_RUN`)ポートが立ち上がっていることと、上流のポートでリセットできること(`bfm_pci_reset_check()`)を確かめ、`X_ARM` へ。`X_ARM`: `g_bfm_ctl_lock` を取れたら `bfm_fw_mfrl_step()` で MFRL に level 3 を書く(失敗なら何も止めずに `X_IDLE` へ戻って失敗を返す)。済んだら `s_run` を `R_STOP` にして `X_STOP` へ。`X_STOP`: `stop_all_step()` で全部のポートを止め、済んだら `bfm_pci_reset_begin()` で設定空間を覚えてリンクを落とし、`X_LINK` へ。`X_LINK`: `bfm_pci_reset_step()` を進め、済んだら(失敗でも)ポート層を閉じ(`bfm_port_fini()`)、`R_IDLE` に戻して結果を返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`unsigned` !`port` !リセットするカードのポートの番号(このポートから MFRL を書き、この上流のポートでリンクを落とす)
+!===
+|戻り値 a|`BFM_OK`: リセットした(bfmem は止まっている)。`BFM_INPROGRESS`: 途中(同じ引数でもう一度呼ぶ)。`BFM_E_PARAM`: ポートの番号が範囲外。`BFM_E_STATE`: 動いていない・ポートが立ち上がっていない。`BFM_E_NOTSUP`: 上流のポートが無い・FW が level 3 に対応していない。`BFM_E_BUSY`: FW の更新の途中・別のポートのリセットの途中。`BFM_E_HW`: MFRL に書けない(ここまでの失敗では何も止めておらず、bfmem は動いたまま)。`BFM_E_TIMEOUT`: リンクが上がらない・設定空間が読めない(bfmem は止まっている)。
+|前提条件 a|ほかのコアが bfmem を使っていない(`bfm_run()` もデータ経路の関数も呼んでいない)ときに、1 つのコアから呼ぶこと。カードの全部の function を bfmem 以外(OS のドライバなど)が使っていないこと。上流のポートの下に、このカードのほかに装置が無いこと。
+|注意事項 a|* MFRL を書いてからリンクを落とすまでの間に、全部のポートを止める(Linux の mlx5 も、MFRL を書いてからドライバを外し、リンクを落とす)。TEARDOWN_HCA と Bus Master を落とすことでは、MFRL の level 3 は取り消されなかった(実機)。
+* 途中で `bfm_shutdown()` を呼ぶと、リセットを済ませて止まる(`bfm_shutdown()` が続きを進める)。
+* 相手のノードでは、接続が BYE で `BFM_ST_DOWN` になるので、`bfm_reconnect()` で張り直す。
+* Linux では、ポート層を閉じるときに vfio-pci が装置をリセットして開いたときの設定空間を戻す。`bfm_pci_reset_step()` が戻しておくので、そのリセットも効く。
+|使用関数 a|* `__atomic_load_n()`(外部)
+* <<src_bfm_core-bfm_dev_ready,`bfm_dev_ready()`>>
+* <<src_bfm_pci-bfm_pci_reset_check,`bfm_pci_reset_check()`>>
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* <<src_bfm_internal-bfm_trylock,`bfm_trylock()`>>
+* <<src_bfm_fw-bfm_fw_mfrl_step,`bfm_fw_mfrl_step()`>>
+* <<src_bfm_internal-bfm_unlock,`bfm_unlock()`>>
+* `__atomic_store_n()`(外部)
+* <<src_bfm_core-stop_all_step,`stop_all_step()`>>
+* <<src_bfm_pci-bfm_pci_reset_begin,`bfm_pci_reset_begin()`>>
+* <<src_bfm_pci-bfm_pci_reset_step,`bfm_pci_reset_step()`>>
+* `bfm_port_fini()`(<<port_linux_vfio_port_linux-bfm_port_fini,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_fini,VxWorks 版>>)
+* <<src_bfm_ops-bfm_strerror,`bfm_strerror()`>>
+|===
+
+.bfm_fw_reset() の状態遷移図
+image::state_src_bfm_core-bfm_fw_reset.drawio.svg[bfm_fw_reset() の状態遷移図]
+
+.bfm_fw_reset() のフロー図
+image::flow_src_bfm_core-bfm_fw_reset.drawio.svg[bfm_fw_reset() のフロー図]
+
+.bfm_fw_reset() の関係図
+image::call_src_bfm_core-bfm_fw_reset.drawio.svg[bfm_fw_reset() の関係図]
+
 [[src_bfm_core-bfm_shutdown]]
 === `bfm_shutdown()`
 [cols="1,5",options="autowidth"]
 .bfm_shutdown()
 |===
-|関数名 |`bfm_shutdown`(`src/bfm_core.c` 308 行目)
+|関数名 |`bfm_shutdown`(`src/bfm_core.c` 388 行目)
 |宣言 |`int bfm_shutdown(void)`
 |目的 a|アプリケーションが bfmem をやめるときに、全部の接続を畳み、NIC を止めるための関数。成功が返るまで呼び続ける。立ち上げの途中でも呼べ、止めた後に `bfm_run()` を呼ぶと最初から立ち上げ直す。ほかのコアが bfmem を使っていないときに 1 つのコアから呼ぶ。
-|処理内容 a|ライブラリを止める(待つところでは `BFM_INPROGRESS` を返す)。全体の状態を `R_STOP` にして `bfm_run()` が表を進めないようにし、`g_bfm_ctl_lock` を(回って)取って、使うポートのうち `D_IDLE`・`D_FAILED` でないものについて、`D_STOP` でなければ `dev_stop_begin(d, BFM_OK)` で止める手順を始め、`dev_stop_step()` で進める(全部の接続を畳み、出したままのコマンドを捨て、FW を止め、Bus Master を落とし、BAR0 を外す)。止め終えたポートは `D_IDLE` にする。全部のポートが止まったら、ポート層を閉じ(`bfm_port_fini()`)、`R_IDLE` に戻す。
+|処理内容 a|ライブラリを止める(待つところでは `BFM_INPROGRESS` を返す)。カードのリセット(`bfm_fw_reset()`)の途中なら、まずその続きを進める(リセットも全部を止めるところまで進む)。止まっていなければ、全体の状態を `R_STOP` にして `bfm_run()` が表を進めないようにし、`stop_all_step()` で全部のポートを止める(全部の接続を畳み、出したままのコマンドを捨て、FW を止め、Bus Master を落とし、BAR0 を外す)。全部のポートが止まったら、ポート層を閉じ(`bfm_port_fini()`)、`R_IDLE` に戻す。
 |引数 |なし
 |戻り値 a|`BFM_OK`: 止めた(止まっていたときも)。`BFM_INPROGRESS`: 途中(もう一度呼ぶと先へ進む)。
 |前提条件 a|ほかのコアが bfmem を使っていない(`bfm_run()` もデータ経路の関数も呼んでいない)ときに、1 つのコアから呼ぶこと。
 |注意事項 a|* 止まっていれば(`R_IDLE`)何もせず `BFM_OK` を返す。
 * 立ち上げの途中でも呼べる(そこで止める)。立ち上げの失敗の後始末の途中(`D_STOP`)なら、その続きを進める。`D_FAILED` のポートは止め終えているので触らない。
 * 接続が残っていれば `bfm_cm_fini_step()` が相手へ BYE を送ってから畳む。
-* `g_bfm_ctl_lock` は `bfm_lock()` で回って取る(ほかのコアの `bfm_run()` が持つのは 1 つの手順を進める間だけ)。
+* カードのリセットが MFRL を書く前に失敗したときは、bfmem は動いたままなので、続けてふつうに止める。
 * `BFM_OK` が返るまで呼び続けること。止めた後に `bfm_run()` を呼ぶと、最初から立ち上げ直す。
-|使用関数 a|* `__atomic_load_n()`(外部)
+|使用関数 a|* <<src_bfm_core-bfm_fw_reset,`bfm_fw_reset()`>>
+* `__atomic_load_n()`(外部)
 * `__atomic_store_n()`(外部)
-* <<src_bfm_internal-bfm_lock,`bfm_lock()`>>
-* <<src_bfm_core-dev_stop_begin,`dev_stop_begin()`>>
-* <<src_bfm_core-dev_stop_step,`dev_stop_step()`>>
-* <<src_bfm_internal-bfm_unlock,`bfm_unlock()`>>
+* <<src_bfm_core-stop_all_step,`stop_all_step()`>>
 * `bfm_port_fini()`(<<port_linux_vfio_port_linux-bfm_port_fini,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_fini,VxWorks 版>>)
 * `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
 |===
@@ -1454,6 +1534,8 @@ PCIe の設定空間を自分で設定する(VxWorks では OS もドライバ�
 `bfm_pci_setup_step()` は状態機械(`s_pci[port].step`。`P_PROBE` → `P_TRPND` → `P_FLR_WAIT` → `P_PRESENT` → `P_BAR` → `P_DONE`)で、FLR の待ち(保留中の DMA、FLR から 100ms、設定空間が読めるまで)では待たずに `BFM_INPROGRESS` を返す。ポートの立ち上げ(`bfm_dev_step()` の `D_IDLE`)が `bfm_pci_setup_reset()` で状態を最初に戻し、`D_PCI` で `BFM_INPROGRESS` でなくなるまで呼び続ける。BAR0・MRRS・Command の設定は `pci_setup()` が行う。
 
 設定空間の読み書きは移植層(`bfm_port_pci_read32()` / `bfm_port_pci_write32()`。ポートの番号 `d->port` を渡す)を通す。Linux では VFIO の設定空間を通るので、BAR への書き込みは VFIO の中だけで効く(実際の BAR はカーネルが割り当てたまま)。そのため Linux では `g_bfm_bar0_addr[]` を 0 にしておく。
+
+後半はカードのリセット(`bfm_fw_reset()` から。FW の MFRL に level 3 を書いた後)。FW は、level 3 を書かれた後に PCIe のリンクが落ちると、カード全体(全部の function)をリセットし、次の起動の FW の像で立ち上がる。リンクは上流のポート(ルートポートか PCIe スイッチの下りポート)で落とす(Linux の mlx5 の `mlx5_pci_link_toggle()` / `mlx5_pci_reset_bus()` と同じ)。Link Disable を 500ms 立てて戻すか、Secondary Bus Reset を 2ms 立てて戻すかは、MFRL の pci_reset_req_method で FW が決める。`bfm_pci_reset_check()` が上流のポートを確かめ、`bfm_pci_reset_begin()` が使っている全部のポートの設定空間を覚えてリンクを落とし、`bfm_pci_reset_step()`(状態機械 `s_rst.step`。`L_HOLD` → `L_LINK` → `L_SETTLE` → `L_READY` → `L_DONE`)がリンクを戻し、リンクが上がる(Data Link Layer Link Active)のを待ち、100ms 待ち、設定空間が読めるのを待って、リセットで消えた設定空間(BAR・Command・Max Payload Size など)を戻す。OS が設定空間を仮想化していても装置そのものへ書くため、ここは `bfm_port_pci_hw_read32()` / `bfm_port_pci_hw_write32()` と、上流のポートの `bfm_port_up_read32()` / `bfm_port_up_write32()` を使う。
 
 [[src_bfm_pci-pci_cmd_read]]
 === `pci_cmd_read()`
@@ -1761,6 +1843,164 @@ image::flow_src_bfm_pci-bfm_pci_bus_master.drawio.svg[bfm_pci_bus_master() の�
 
 .bfm_pci_bus_master() の関係図
 image::call_src_bfm_pci-bfm_pci_bus_master.drawio.svg[bfm_pci_bus_master() の関係図]
+
+[[src_bfm_pci-rst_find_pcie]]
+=== `rst_find_pcie()`
+[cols="1,5",options="autowidth"]
+.rst_find_pcie()
+|===
+|関数名 |`rst_find_pcie`(`src/bfm_pci.c` 322 行目)
+|宣言 |`static uint32_t rst_find_pcie(unsigned port, int up)`
+|目的 a|カードのリセットで、上流のポートと装置の PCI Express の capability(リンクの制御・状態や Max Payload Size のレジスタがある場所)を見つけるための下請け。リセットの手順は、OS が仮想化しない設定空間の道を使うので、`pci_find_pcie_cap()` とは別に持つ。
+|処理内容 a|`up` が 1 なら上流のポート(`bfm_port_up_read32()`)、0 なら装置そのもの(`bfm_port_pci_hw_read32()`)の設定空間で、Status の Capabilities List が立っていれば、capability の並び(0x34 から)をたどって PCI Express(ID 0x10)の位置を返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`unsigned` !`port` !ポートの番号
+!`int` !`up` !1 = 上流のポート、0 = 装置そのもの
+!===
+|戻り値 a|PCI Express の capability の位置。無い・読めない(0xffffffff)なら 0。
+|前提条件 a|`bfm_port_init()` の後。
+|注意事項 a|たどるのは 48 個まで(壊れた並びで回り続けないため)。
+|使用関数 a|* `bfm_port_up_read32()`(<<port_linux_vfio_port_linux-bfm_port_up_read32,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_up_read32,VxWorks 版>>)
+* `bfm_port_pci_hw_read32()`(<<port_linux_vfio_port_linux-bfm_port_pci_hw_read32,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_pci_hw_read32,VxWorks 版>>)
+|===
+
+.rst_find_pcie() のフロー図
+image::flow_src_bfm_pci-rst_find_pcie.drawio.svg[rst_find_pcie() のフロー図]
+
+.rst_find_pcie() の関係図
+image::call_src_bfm_pci-rst_find_pcie.drawio.svg[rst_find_pcie() の関係図]
+
+[[src_bfm_pci-bfm_pci_reset_check]]
+=== `bfm_pci_reset_check()`
+[cols="1,5",options="autowidth"]
+.bfm_pci_reset_check()
+|===
+|関数名 |`bfm_pci_reset_check`(`src/bfm_pci.c` 340 行目)
+|宣言 |`int bfm_pci_reset_check(bfm_dev_t *d)`
+|目的 a|カードのリセットを始める前に、リンクを落とせる上流のポートがあるかを確かめるための関数。何も止めず・何も書かないうちに断れるよう、`bfm_fw_reset()` の最初に呼ぶ。
+|処理内容 a|ポート `d` の上流のポートのベンダ ID が読めること、header が Type 1(ブリッジ)で、PCI Express の capability があり、その Device/Port Type がルートポート(4)かスイッチの下りポート(6)であることを確かめる。通れば、上流のポートの PCI Express の capability の位置と、Link Active を報告できるか(Link Capabilities の DLLLARC)を `s_rst` に覚える。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !リセットを頼まれたポートの装置
+!===
+|戻り値 a|`BFM_OK`: リセットできる。`BFM_E_NOTSUP`: 上流のポートが読めない・ルートポートでもスイッチの下りポートでもない(理由を表示する)。
+|前提条件 a|`bfm_port_init()` の後。
+|注意事項 a|待たない(設定空間を読むだけ)。上流のポートの下にほかの装置がつながっていないかは確かめない(呼ぶ側の約束。`bfm_fw_reset()` の注意)。
+|使用関数 a|* `bfm_port_up_read32()`(<<port_linux_vfio_port_linux-bfm_port_up_read32,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_up_read32,VxWorks 版>>)
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* <<src_bfm_pci-rst_find_pcie,`rst_find_pcie()`>>
+|===
+
+.bfm_pci_reset_check() のフロー図
+image::flow_src_bfm_pci-bfm_pci_reset_check.drawio.svg[bfm_pci_reset_check() のフロー図]
+
+.bfm_pci_reset_check() の関係図
+image::call_src_bfm_pci-bfm_pci_reset_check.drawio.svg[bfm_pci_reset_check() の関係図]
+
+[[src_bfm_pci-bfm_pci_reset_begin]]
+=== `bfm_pci_reset_begin()`
+[cols="1,5",options="autowidth"]
+.bfm_pci_reset_begin()
+|===
+|関数名 |`bfm_pci_reset_begin`(`src/bfm_pci.c` 366 行目)
+|宣言 |`void bfm_pci_reset_begin(bfm_dev_t *d, int method)`
+|目的 a|カードのリセットで消える設定空間を覚えてから、上流のポートで PCIe のリンクを落とし、FW にカード全体をリセットさせるための関数。全部のポートを止めた後に `bfm_fw_reset()` が 1 回呼ぶ。
+|処理内容 a|使っている全部のポートについて、装置そのものの設定空間から Command・cache line と latency・BAR(0x10〜0x24 の 6 つ)・Device Control(FLR のビットを除く)・Link Control(Link Disable・Retrain を除く)・Device Control 2 を `s_rst.dev[]` に覚える。`method` が Secondary Bus Reset なら上流のポートの Bridge Control の SBR を、そうでなければ Link Control の Link Disable を立て、時刻を覚えて `L_HOLD` にする。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !リセットを頼まれたポートの装置(この上流のポートでリンクを落とす)
+!`int` !`method` !リンクの落とし方(MFRL の pci_reset_req_method。`BFM_RESET_LINK_DISABLE` / `BFM_RESET_HOT_RESET`)
+!===
+|戻り値 a|なし
+|前提条件 a|`bfm_pci_reset_check()` が通り、MFRL に level 3 を書き、全部のポートを止めて(Bus Master を落として)あること。
+|注意事項 a|* カードの全部の function がリセットされるので、使っている全部のポートを覚える。別のカードのポートは、後で同じ値を書き直すだけになる。
+* 装置そのものの道(`bfm_port_pci_hw_read32()`)で読むので、Linux でも VFIO の仮想化した値でなく、装置の本当の値を覚える。
+|使用関数 a|* <<src_bfm_pci-rst_find_pcie,`rst_find_pcie()`>>
+* `bfm_port_pci_hw_read32()`(<<port_linux_vfio_port_linux-bfm_port_pci_hw_read32,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_pci_hw_read32,VxWorks 版>>)
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* `bfm_port_up_write32()`(<<port_linux_vfio_port_linux-bfm_port_up_write32,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_up_write32,VxWorks 版>>)
+* `bfm_port_up_read32()`(<<port_linux_vfio_port_linux-bfm_port_up_read32,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_up_read32,VxWorks 版>>)
+* `bfm_port_time_ns()`(<<port_linux_vfio_port_linux-bfm_port_time_ns,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_time_ns,VxWorks 版>>)
+|===
+
+.bfm_pci_reset_begin() のフロー図
+image::flow_src_bfm_pci-bfm_pci_reset_begin.drawio.svg[bfm_pci_reset_begin() のフロー図]
+
+.bfm_pci_reset_begin() の関係図
+image::call_src_bfm_pci-bfm_pci_reset_begin.drawio.svg[bfm_pci_reset_begin() の関係図]
+
+[[src_bfm_pci-rst_restore]]
+=== `rst_restore()`
+[cols="1,5",options="autowidth"]
+.rst_restore()
+|===
+|関数名 |`rst_restore`(`src/bfm_pci.c` 394 行目)
+|宣言 |`static void rst_restore(unsigned q)`
+|目的 a|カードのリセットで初期値に戻ってしまった設定空間を、リセットの前の値に書き戻すための下請け。BAR が戻らないと BAR0 を張れず、Max Payload Size が戻らないと上流のポートとの間で大きすぎる TLP が出うるため。
+|処理内容 a|`s_rst.dev[q]` に覚えた値を、装置そのものの設定空間へ書く。BAR 6 つ → cache line と latency → Device Control → Link Control → Device Control 2 → Command の順(Memory Space を入れるのを最後にする)。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`unsigned` !`q` !ポートの番号
+!===
+|戻り値 a|なし
+|前提条件 a|`s_rst.dev[q].pcie` が 0 でない(覚えてある)こと。設定空間が読めるようになっていること。
+|注意事項 a|* cache line・latency は下位 16bit だけを書く(BIST を動かさない)。
+* Device Control・Link Control・Command の上位 16bit(状態。1 を書くと消えるビットがある)は 0 を書いて触らない。
+|使用関数 a|* `bfm_port_pci_hw_write32()`(<<port_linux_vfio_port_linux-bfm_port_pci_hw_write32,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_pci_hw_write32,VxWorks 版>>)
+|===
+
+.rst_restore() のフロー図
+image::flow_src_bfm_pci-rst_restore.drawio.svg[rst_restore() のフロー図]
+
+.rst_restore() の関係図
+image::call_src_bfm_pci-rst_restore.drawio.svg[rst_restore() の関係図]
+
+[[src_bfm_pci-bfm_pci_reset_step]]
+=== `bfm_pci_reset_step()`
+[cols="1,5",options="autowidth"]
+.bfm_pci_reset_step()
+|===
+|関数名 |`bfm_pci_reset_step`(`src/bfm_pci.c` 410 行目)
+|宣言 |`int bfm_pci_reset_step(bfm_dev_t *d)`
+|目的 a|カードのリセットの後半(リンクを戻し、カードが立ち上がるのを待ち、消えた設定を戻す)を、回って待たずに少しずつ進める状態機械。`bfm_fw_reset()` が `BFM_INPROGRESS` でなくなるまで呼び続ける。
+|処理内容 a|`L_HOLD`: 落としてから 500ms(Secondary Bus Reset なら 2ms)たったら、上流のポートの Link Disable / SBR を戻す。`L_LINK`: 上流のポートが Link Active を報告できるなら、Link Status の DLLLA が立つまで待ち(2 秒で時間切れ)、報告できなければ 1 秒待つ。`L_SETTLE`: 100ms 待つ。`L_READY`: 覚えた全部のポートのベンダ ID が読めるまで待ち(2 秒で時間切れ)、`rst_restore()` で設定空間を戻し、かかった時間を表示する。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !リセットを頼まれたポートの装置
+!===
+|戻り値 a|`BFM_INPROGRESS`: 途中(もう一度呼ぶと先へ進む)。`BFM_OK`: 済んだ。`BFM_E_TIMEOUT`: リンクが上がらない・設定空間が読めない(理由を表示する)。
+|前提条件 a|`bfm_pci_reset_begin()` の後。
+|注意事項 a|* 時間の決め方は Linux の mlx5(`mlx5_pci_link_toggle()`: Link Disable を 500ms、Link Active を待ち、100ms、ベンダ ID を待つ)と、PCIe 基本仕様(リンクが上がってから 100ms 後に設定空間を読む)に合わせた。
+* 装置のベンダ ID は装置そのものの道で読む(Linux の VFIO はベンダ ID を仮想化していて、リセットの途中でも読めてしまうため)。
+* 済んだ後・失敗の後に呼んでも `L_DONE` のまま `BFM_OK` を返す。
+|使用関数 a|* <<src_bfm_pci-ms_since,`ms_since()`>>
+* `bfm_port_up_write32()`(<<port_linux_vfio_port_linux-bfm_port_up_write32,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_up_write32,VxWorks 版>>)
+* `bfm_port_up_read32()`(<<port_linux_vfio_port_linux-bfm_port_up_read32,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_up_read32,VxWorks 版>>)
+* `bfm_port_time_ns()`(<<port_linux_vfio_port_linux-bfm_port_time_ns,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_time_ns,VxWorks 版>>)
+* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* `bfm_port_pci_hw_read32()`(<<port_linux_vfio_port_linux-bfm_port_pci_hw_read32,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_pci_hw_read32,VxWorks 版>>)
+* <<src_bfm_pci-rst_restore,`rst_restore()`>>
+|===
+
+.bfm_pci_reset_step() の状態遷移図
+image::state_src_bfm_pci-bfm_pci_reset_step.drawio.svg[bfm_pci_reset_step() の状態遷移図]
+
+.bfm_pci_reset_step() のフロー図
+image::flow_src_bfm_pci-bfm_pci_reset_step.drawio.svg[bfm_pci_reset_step() のフロー図]
+
+.bfm_pci_reset_step() の関係図
+image::call_src_bfm_pci-bfm_pci_reset_step.drawio.svg[bfm_pci_reset_step() の関係図]
 
 == `src/mlx5_cmd.c`
 
@@ -7673,7 +7913,7 @@ ConnectX のフラッシュの FW の更新。FW 自身に書かせる方式(Lin
 
 流れは、FSM が IDLE か確かめる → LOCK → LOCKED を待つ → UPDATE_COMPONENT → DOWNLOAD を待つ → MCDA で全部渡す → VERIFY → LOCKED を待つ → (ACTIVATE → LOCKED を待つ)→ RELEASE。失敗したら、部品の更新を始めていれば CANCEL、手順を取っていれば RELEASE を出してから終わる。
 
-起動しなくなる危険を小さくするために: FW は今動いている像とは別の置き場に書き、VERIFY で確かめてから ACTIVATE で切り替える(ACTIVATE は VERIFY が通った後にしか出さない)。`BFM_FW_VERIFY_ONLY` では ACTIVATE を出さずに取り消す。像の先頭の印・長さ・FW が受けられる大きさを確かめ、FW が PSID を確かめない装置には `g_bfm_fw_allow_no_psid_check` が 0 なら書かない。FSM が IDLE でなければ(ほかの道具・ほかのポートが更新している)何もしない。装置のリセットはかけない(新しい FW は電源を入れ直したときに有効になる)。
+起動しなくなる危険を小さくするために: FW は今動いている像とは別の置き場に書き、VERIFY で確かめてから ACTIVATE で切り替える(ACTIVATE は VERIFY が通った後にしか出さない)。`BFM_FW_VERIFY_ONLY` では ACTIVATE を出さずに取り消す。像の先頭の印・長さ・FW が受けられる大きさを確かめ、FW が PSID を確かめない装置には `g_bfm_fw_allow_no_psid_check` が 0 なら書かない。FSM が IDLE でなければ(ほかの道具・ほかのポートが更新している)何もしない。装置のリセットはかけない(新しい FW は、電源を入れ直すか、`bfm_fw_reset()` でカードをリセットしたときに有効になる)。リセットの準備(MFRL に level 3 を書く)は、このファイルの `bfm_fw_mfrl_step()` が行う(FW の更新と同じ作業域とコマンドの entry を使う)。
 
 呼び出しは待たない。FW のコマンドを出したら `BFM_INPROGRESS` を返し、次の呼び出しで完了を見る。FSM の状態を待つところは 200ms ごとに MCC を読み、30 秒で時間切れにする(mlxfw と同じ)。FW のコマンドの entry と作業域(`s_in`・`s_out`)はポートをまたいで使うので、`g_bfm_ctl_lock` の中で進める。
 
@@ -7682,7 +7922,7 @@ ConnectX のフラッシュの FW の更新。FW 自身に書かせる方式(Lin
 [cols="1,5",options="autowidth"]
 .ms_since()
 |===
-|関数名 |`ms_since`(`src/bfm_fw.c` 117 行目)
+|関数名 |`ms_since`(`src/bfm_fw.c` 118 行目)
 |宣言 |`static uint64_t ms_since(uint64_t t0)`
 |目的 a|FW の更新で、FSM の状態を読み直す間隔と、状態が変わるのを待つ上限を判断するために、ある時刻からの経過をミリ秒で知るための下請け関数。`fw_step()` が使う。
 |処理内容 a|`bfm_port_time_ns()` と `t0` の差をミリ秒にして返す。
@@ -7709,7 +7949,7 @@ image::call_src_bfm_fw-ms_since.drawio.svg[ms_since() の関係図]
 [cols="1,5",options="autowidth"]
 .reg_in()
 |===
-|関数名 |`reg_in`(`src/bfm_fw.c` 123 行目)
+|関数名 |`reg_in`(`src/bfm_fw.c` 124 行目)
 |宣言 |`static uint8_t *reg_in(unsigned port)`
 |目的 a|これから出す ACCESS_REG のレジスタの部分を、0 で埋めた状態で用意するための下請け関数。`fw_step()` と `mcc_set()` が、レジスタの欄を書く前に使う。
 |処理内容 a|ポート `port` の入力の作業域(`s_in[port]`)を全部 0 で埋め、そのうちレジスタの部分(頭 16 バイトの後)の先頭を返す。
@@ -7736,7 +7976,7 @@ image::call_src_bfm_fw-reg_in.drawio.svg[reg_in() の関係図]
 [cols="1,5",options="autowidth"]
 .access_reg()
 |===
-|関数名 |`access_reg`(`src/bfm_fw.c` 131 行目)
+|関数名 |`access_reg`(`src/bfm_fw.c` 132 行目)
 |宣言 |`static int access_reg(bfm_dev_t *d, fw_state_t *f, uint16_t reg, int read, uint32_t inlen, uint32_t outlen, const char *what)`
 |目的 a|FW の更新のレジスタ(MCAM・MCQS・MCQI・MCC・MCDA)を、ACCESS_REG のコマンドで待たずに読み書きするための下請け関数。`fw_step()` と `mcc_set()` が使う。
 |処理内容 a|まだ出していなければ、作業域の頭に ACCESS_REG の opcode・op_mod(1 = 読む、0 = 書く)・レジスタの番号を書く。`mlx5_cmd_run()` でコマンドを出す・完了を見る。読んだレジスタは `s_out[port]` の 16 バイト目から。
@@ -7770,7 +8010,7 @@ image::call_src_bfm_fw-access_reg.drawio.svg[access_reg() の関係図]
 [cols="1,5",options="autowidth"]
 .mcc_set()
 |===
-|関数名 |`mcc_set`(`src/bfm_fw.c` 143 行目)
+|関数名 |`mcc_set`(`src/bfm_fw.c` 144 行目)
 |宣言 |`static int mcc_set(bfm_dev_t *d, fw_state_t *f, uint8_t instr, uint16_t comp, uint32_t size, const char *what)`
 |目的 a|FW の中の更新の手順(FSM)に、LOCK・UPDATE_COMPONENT・VERIFY_COMPONENT・ACTIVATE・CANCEL・RELEASE の命令を出すための下請け関数。`fw_step()` が使う(Linux の `mlx5_reg_mcc_set()` と同じ)。
 |処理内容 a|まだ出していなければ、MCC の instruction・component_index・update_handle(`f->handle`)・component_size を書く。`access_reg()` で MCC を書く。
@@ -7806,7 +8046,7 @@ image::call_src_bfm_fw-mcc_set.drawio.svg[mcc_set() の関係図]
 [cols="1,5",options="autowidth"]
 .fsm_err_str()
 |===
-|関数名 |`fsm_err_str`(`src/bfm_fw.c` 156 行目)
+|関数名 |`fsm_err_str`(`src/bfm_fw.c` 157 行目)
 |宣言 |`static const char *fsm_err_str(uint8_t e)`
 |目的 a|FW が更新の手順を断ったときに、その理由(MCC の error_code)を表示できる文にするための下請け関数。`fw_step()` が使う。
 |処理内容 a|error_code(Linux の mlxfw の `enum mlxfw_fsm_state_err`)を文にする。1 一般のエラー、2 像のハッシュが合わない、3 この装置には当てはまらない像、4 知らない鍵、5 認証に失敗した、6 署名の無い像、7 当てはまらない鍵、8 像の形が正しくない、9 前の更新の後のリセット待ち。
@@ -7833,7 +8073,7 @@ image::call_src_bfm_fw-fsm_err_str.drawio.svg[fsm_err_str() の関係図]
 [cols="1,5",options="autowidth"]
 .show_version()
 |===
-|関数名 |`show_version`(`src/bfm_fw.c` 173 行目)
+|関数名 |`show_version`(`src/bfm_fw.c` 174 行目)
 |宣言 |`static void show_version(const bfm_dev_t *d, const char *what)`
 |目的 a|更新の前に今動いている FW の版を、切り替えた後に次の起動で使われる FW の版を表示して、何を書いたかを確かめられるようにするための下請け関数。`fw_step()` が使う。
 |処理内容 a|MCQI で読んだ版の情報(`s_out[port]` の 16 + 24 バイト目から)から、版の数(major.minor.subminor)と版の文字列を取り出して表示する。
@@ -7863,7 +8103,7 @@ image::call_src_bfm_fw-show_version.drawio.svg[show_version() の関係図]
 [cols="1,5",options="autowidth"]
 .itoc_crc()
 |===
-|関数名 |`itoc_crc`(`src/bfm_fw.c` 187 行目)
+|関数名 |`itoc_crc`(`src/bfm_fw.c` 188 行目)
 |宣言 |`static uint16_t itoc_crc(const uint8_t *p, uint32_t n)`
 |目的 a|FW の像の目次(ITOC)が壊れていないかを確かめるために、目次の頭・欄の CRC を mstflint と同じ式で求めるための下請け関数。`img_parse()` が使う。
 |処理内容 a|ビッグエンディアンの 4 バイトの語を `n` 個読み、初めの値 0xffff・多項式 0x100b の 16 bit の CRC を、各語の上の bit から順に流して求める。最後に 0 を 16 bit 流し、全部の bit を反転して返す(mstflint の `CalcImageCRC()` と同じ)。
@@ -7891,7 +8131,7 @@ image::call_src_bfm_fw-itoc_crc.drawio.svg[itoc_crc() の関係図]
 [cols="1,5",options="autowidth"]
 .img_parse()
 |===
-|関数名 |`img_parse`(`src/bfm_fw.c` 205 行目)
+|関数名 |`img_parse`(`src/bfm_fw.c` 206 行目)
 |宣言 |`static int img_parse(fw_state_t *f, const uint8_t *b, uint32_t len)`
 |目的 a|NVIDIA が配る FW のファイル(フラッシュ全体の像)から、FW の更新で FW に渡す部分を決めるための下請け関数。ボードごとの情報(MAC・GUID など)を渡さないように、mstflint が MCC で書くときと同じ部分を選ぶ。`bfm_fw_update()` が最初の呼び出しで使う。
 |処理内容 a|先頭の 16 バイトが FW の像の印("MTFW" と決まった 12 バイト)か確かめる。0x1000 から 0x10000 まで 4KiB ごとに目次(ITOC)の印を探し、頭の CRC が合う最初のものを使う。目次の欄を最後(種類 0xff)まで読み、各欄の CRC を確かめる。相対番地の欄はファイルの中にあることを確かめ、その終わりの最大を FW に渡す長さにする。ボードの情報の欄(device_data)は、その欄の位置を 0xFF で消す一覧(`f->mask`)に入れる。
@@ -7927,7 +8167,7 @@ image::call_src_bfm_fw-img_parse.drawio.svg[img_parse() の関係図]
 [cols="1,5",options="autowidth"]
 .img_word()
 |===
-|関数名 |`img_word`(`src/bfm_fw.c` 271 行目)
+|関数名 |`img_word`(`src/bfm_fw.c` 272 行目)
 |宣言 |`static uint32_t img_word(const fw_state_t *f, uint32_t off)`
 |目的 a|FW の更新で MCDA に載せるデータを 4 バイトずつ作るための下請け関数。先頭の印と、ボードの情報を指す目次の欄を 0xFF に置き換えて返す(mstflint と同じ)。`fw_step()` が F_DATA で使う。
 |処理内容 a|位置 `off` が先頭の 16 バイトの中か、`f->mask` のどれかの欄(32 バイト)の中なら 0xffffffff を返す。そうでなければ、像の `off` から 4 バイトをホスト順の値として返す。
@@ -7955,7 +8195,7 @@ image::call_src_bfm_fw-img_word.drawio.svg[img_word() の関係図]
 [cols="1,5",options="autowidth"]
 .fail()
 |===
-|関数名 |`fail`(`src/bfm_fw.c` 282 行目)
+|関数名 |`fail`(`src/bfm_fw.c` 283 行目)
 |宣言 |`static void fail(fw_state_t *f, int rc)`
 |目的 a|FW の更新の途中で失敗したり取り消しを頼まれたりしたときに、取ったもの(部品の更新・手順の番号)を正しい順に返してから終わるよう、次の手順を選ぶための下請け関数。`fw_step()` が使う。
 |処理内容 a|まだ結果が決まっていなければ `rc` を結果にする。部品の更新を始めていて切り替えていなければ CANCEL へ、手順を取っていれば RELEASE へ、どちらでもなければ終わり(F_DONE)へ移る。
@@ -7983,7 +8223,7 @@ image::call_src_bfm_fw-fail.drawio.svg[fail() の関係図]
 [cols="1,5",options="autowidth"]
 .wait_state()
 |===
-|関数名 |`wait_state`(`src/bfm_fw.c` 289 行目)
+|関数名 |`wait_state`(`src/bfm_fw.c` 290 行目)
 |宣言 |`static void wait_state(fw_state_t *f, uint8_t want, int next, int step)`
 |目的 a|FW の更新の手順(FSM)が、命令を受けて次の状態になるのを待つ手順に入るための下請け関数。`fw_step()` が LOCK・UPDATE_COMPONENT・VERIFY_COMPONENT・ACTIVATE の後に使う。
 |処理内容 a|待つ状態 `want` と、待ち終えたら移る手順 `next` を覚え、待ち始めた時刻を記録し、手順を `step` にする。
@@ -8013,7 +8253,7 @@ image::call_src_bfm_fw-wait_state.drawio.svg[wait_state() の関係図]
 [cols="1,5",options="autowidth"]
 .fw_step()
 |===
-|関数名 |`fw_step`(`src/bfm_fw.c` 302 行目)
+|関数名 |`fw_step`(`src/bfm_fw.c` 303 行目)
 |宣言 |`static int fw_step(bfm_dev_t *d, fw_state_t *f)`
 |目的 a|FW の更新の手順を、待たずに 1 つずつ進めるための状態機械。`bfm_fw_update()` が `g_bfm_ctl_lock` の中で、呼ばれるたびに 1 回呼ぶ。
 |処理内容 a|取り消しを頼まれていて、コマンドを出していなければ、取り消しの手順(`fail()`)へ移る。手順(`f->step`)に応じて 1 つ進める。
@@ -8070,7 +8310,7 @@ image::call_src_bfm_fw-fw_step.drawio.svg[fw_step() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_fw_update()
 |===
-|関数名 |`bfm_fw_update`(`src/bfm_fw.c` 550 行目)
+|関数名 |`bfm_fw_update`(`src/bfm_fw.c` 551 行目)
 |宣言 |`int bfm_fw_update(unsigned port, const void *img, uint32_t len, int mode)`
 |目的 a|アプリケーションが、ConnectX のフラッシュの FW を新しい版に書き換えるための関数。FW 自身に今の像とは別の置き場へ書かせて確かめさせるので、途中で止まっても前の FW で起動できる。確かめるだけ(切り替えない)の形もあり、本番の前に像が装置に合うかを試せる。待たずに少しずつ進めるので、終わるまで呼び続ける。
 |処理内容 a|最初の呼び出し(手順が F_IDLE)なら、引数を確かめる: 像が NULL でなく、`mode` が `BFM_FW_VERIFY_ONLY` か `BFM_FW_ACTIVATE`、ポートが使われていて立ち上がっていること。状態を 0 で埋め、`img_parse()` で配布の .bin から FW に渡す部分(長さと、0xFF で消す欄)を決める(印・目次が正しくなければ `BFM_E_PARAM`)。F_MCAM から始める。
@@ -8089,7 +8329,7 @@ image::call_src_bfm_fw-fw_step.drawio.svg[fw_step() の関係図]
 |前提条件 a|ポートが立ち上がっていること(`bfm_run()` が進めて使える状態)。同じポートについて、1 つのコアから呼ぶこと。同じカードのポートはフラッシュを共有するので、1 つのポートからだけ行う。
 |注意事項 a|* 2 回目からは引数を見ない(最初の呼び出しで覚えた像を使う)。
 * 失敗・取り消しのときは、部品の更新を CANCEL し、手順を RELEASE してから結果を返す。次の起動の像は変わっていない。
-* 新しい FW は、装置の電源を入れ直したとき(またはリセットしたとき)に有効になる。bfmem はリセットをかけない。
+* 新しい FW は、装置の電源を入れ直したとき、または `bfm_fw_reset()` でカードをリセットしたときに有効になる。
 * `bfm_run()` はその間も呼び続けてよい(FW のコマンドの entry は `mlx5_cmd_run()` が順に使わせる)。
 * 途中で `bfm_shutdown()` すると、FW は手順の番号を放っておかれ、時間で手放す(今の像はそのまま)。
 |使用関数 a|* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
@@ -8112,7 +8352,7 @@ image::call_src_bfm_fw-bfm_fw_update.drawio.svg[bfm_fw_update() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_fw_update_cancel()
 |===
-|関数名 |`bfm_fw_update_cancel`(`src/bfm_fw.c` 589 行目)
+|関数名 |`bfm_fw_update_cancel`(`src/bfm_fw.c` 590 行目)
 |宣言 |`void bfm_fw_update_cancel(unsigned port)`
 |目的 a|アプリケーションが、進めている FW の更新をやめるための関数。頼んだ後も `bfm_fw_update()` を呼び続けると、取り消して手順を手放してから終わる。切り替えの後は取り消せない。
 |処理内容 a|ポートの番号が範囲内で、更新を進めていれば(手順が F_IDLE でなければ)、取り消しの旗を立てる。
@@ -8134,6 +8374,38 @@ image::flow_src_bfm_fw-bfm_fw_update_cancel.drawio.svg[bfm_fw_update_cancel() �
 .bfm_fw_update_cancel() の関係図
 image::call_src_bfm_fw-bfm_fw_update_cancel.drawio.svg[bfm_fw_update_cancel() の関係図]
 
+[[src_bfm_fw-bfm_fw_mfrl_step]]
+=== `bfm_fw_mfrl_step()`
+[cols="1,5",options="autowidth"]
+.bfm_fw_mfrl_step()
+|===
+|関数名 |`bfm_fw_mfrl_step`(`src/bfm_fw.c` 609 行目)
+|宣言 |`int bfm_fw_mfrl_step(bfm_dev_t *d, int *method)`
+|目的 a|カードのリセットの準備として、FW に「次に PCIe のリンクが落ちたら、カード全体をリセットして、次の起動の FW の像で立ち上がる」(MFRL の level 3)を頼むための関数。FW がそれに対応しているか、リンクをどう落としてほしいかも、ここで FW に聞く。`bfm_fw_reset()` が `g_bfm_ctl_lock` の中で `BFM_INPROGRESS` でなくなるまで呼ぶ。
+|処理内容 a|`M_READ`: MFRL(0x9028)を読み、対応するリセットの範囲(reset_level)と、リンクの落とし方(pci_reset_req_method)を表示する。level 3(bit 3)が無い・落とし方が Link Disable(0)でも Secondary Bus Reset(1)でもないなら断る。落とし方を `*method` に返して `M_WRITE` へ。`M_WRITE`: MFRL に reset_level = level 3(rst_type_sel = 0、同期なし)を書く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`bfm_dev_t *` !`d` !リセットを頼まれたポートの装置
+!`int *` !`method` !FW が求めるリンクの落とし方を入れる先(`M_READ` が済んだときに書く。呼び出し側は呼び続ける間これを残しておく)
+!===
+|戻り値 a|`BFM_INPROGRESS`: 途中。`BFM_OK`: level 3 を書いた。`BFM_E_NOTSUP`: MFRL が読めない・level 3 に対応していない・知らない落とし方。`BFM_E_BUSY`: FW の更新の途中。`BFM_E_HW`: MFRL に書けない。
+|前提条件 a|`g_bfm_ctl_lock` を持っていること。ポートが立ち上がっていること。
+|注意事項 a|* FW の更新の作業域(`s_fw[port]` のコマンド・`s_in`・`s_out`)を使うので、`bfm_fw_update()` の途中なら断る。
+* 同期(pci_sync_for_fw_update_start)は使わない(Linux の mlx5 の、同期を使わない場合と同じ)。カードの全部の function の持ち主が bfmem である前提。
+* ConnectX-4 Lx(FW 14.29.1016・14.32.1912)では、範囲 0xc8(level 3 を含む)、落とし方 0(Link Disable)だった。14.29.1016 は MCAM に MFRL を載せていないが、MFRL は読み書きできた(だから MCAM は見ない)。
+|使用関数 a|* `bfm_port_log()`(<<port_linux_vfio_port_linux-bfm_port_log,Linux 版>>・<<port_vxworks_port_vxworks-bfm_port_log,VxWorks 版>>)
+* <<src_bfm_fw-reg_in,`reg_in()`>>
+* <<src_bfm_fw-access_reg,`access_reg()`>>
+|===
+
+.bfm_fw_mfrl_step() のフロー図
+image::flow_src_bfm_fw-bfm_fw_mfrl_step.drawio.svg[bfm_fw_mfrl_step() のフロー図]
+
+.bfm_fw_mfrl_step() の関係図
+image::call_src_bfm_fw-bfm_fw_mfrl_step.drawio.svg[bfm_fw_mfrl_step() の関係図]
+
 == `port/linux_vfio/port_linux.c`
 
 移植層の Linux 版(x86-64 Linux + VFIO の試験環境)。`g_bfm_port_conn[]` が 0 でないポートの装置(`g_bfm_linux_pci_bdf[port]`)を VFIO で掴み、DMA 領域と公開メモリを `g_bfm_dma_base` / `g_bfm_mr_base` の仮想アドレスにそのまま張って、同じ値を IOVA にして `VFIO_IOMMU_MAP_DMA` する(VxWorks の「論理アドレス = 物理アドレス」を真似る)。VFIO のコンテナ(`s_container`)は全部のポートで 1 つにし、IOMMU グループは開いたものを `s_grp[]` に覚えて同じ番号なら使い回す(同じカードの 2 つの PF が同じグループのことがある)。装置の fd・設定空間の位置・BAR0 の窓はポートごとに `s_dev[port]` に持つ。BAR0 は VFIO の fd ではなく sysfs の `resource0` から UC で張り、BlueFlame に使う UAR のページだけを、窓を「前 / そのページ / 後」の mmap に張り直してから `resource0_wc` で write-combining に張り替える。UC の窓を作っている mmap の一覧はポートごとの配列 `s_dev[port].seg`(最大 `SEG_MAX` = 2 × `BFM_MAX_PORT_CONN` + 8 個)で持つ。
@@ -8143,7 +8415,7 @@ image::call_src_bfm_fw-bfm_fw_update_cancel.drawio.svg[bfm_fw_update_cancel() �
 [cols="1,5",options="autowidth"]
 .bfm_port_log()
 |===
-|関数名 |`bfm_port_log`(`port/linux_vfio/port_linux.c` 69 行目)
+|関数名 |`bfm_port_log`(`port/linux_vfio/port_linux.c` 78 行目)
 |宣言 |`void bfm_port_log(const char *fmt, ...)`
 |目的 a|ライブラリが、立ち上げの経過・注意・失敗の理由などの文字を表示するための関数(本体の表示はすべてこれを通る)。移植する人は、`printf` と同じ書式を受け取って、その環境で見える所(標準出力やコンソール)へ出す関数を用意する。Linux 版は標準出力へ出し、すぐに表示されるようにする。
 |処理内容 a|`printf` と同じ書式で標準出力に表示し、すぐに `fflush` する。
@@ -8174,7 +8446,7 @@ image::call_port_linux_vfio_port_linux-bfm_port_log.drawio.svg[bfm_port_log() �
 [cols="1,5",options="autowidth"]
 .bfm_port_time_ns()
 |===
-|関数名 |`bfm_port_time_ns`(`port/linux_vfio/port_linux.c` 78 行目)
+|関数名 |`bfm_port_time_ns`(`port/linux_vfio/port_linux.c` 87 行目)
 |宣言 |`uint64_t bfm_port_time_ns(void)`
 |目的 a|ライブラリが、FW のコマンドや接続の手順の時間切れを判定し、状態遷移の記録に時刻を残すための関数。立ち上げ・接続・切断は回って待たないので、待つところでは毎回この時刻を見て経った時間を測る。移植する人は、単調に増えるナノ秒の時刻を返す関数を用意する(分解能は粗くてよい)。
 |処理内容 a|`clock_gettime(CLOCK_MONOTONIC)` で単調に増える時刻をナノ秒で返す。
@@ -8196,7 +8468,7 @@ image::call_port_linux_vfio_port_linux-bfm_port_time_ns.drawio.svg[bfm_port_time
 [cols="1,5",options="autowidth"]
 .bfm_port_delay_us()
 |===
-|関数名 |`bfm_port_delay_us`(`port/linux_vfio/port_linux.c` 85 行目)
+|関数名 |`bfm_port_delay_us`(`port/linux_vfio/port_linux.c` 94 行目)
 |宣言 |`void bfm_port_delay_us(uint32_t us)`
 |目的 a|指定したマイクロ秒だけ待つための関数。移植層の決まりとして用意するが、ライブラリ本体(`src/`)からは呼ばない(本体は待たずに `bfm_port_time_ns()` で時間を見る)。Linux 版では `cpu_init()` が TSC の周波数を OS の時計と比べて測るときに使う。
 |処理内容 a|`nanosleep` で `us` マイクロ秒待つ。シグナルで起こされたら残りの時間を眠り直す。
@@ -8223,7 +8495,7 @@ image::call_port_linux_vfio_port_linux-bfm_port_delay_us.drawio.svg[bfm_port_del
 [cols="1,5",options="autowidth"]
 .bfm_port_cpu_id()
 |===
-|関数名 |`bfm_port_cpu_id`(`port/linux_vfio/port_linux.c` 93 行目)
+|関数名 |`bfm_port_cpu_id`(`port/linux_vfio/port_linux.c` 102 行目)
 |宣言 |`unsigned bfm_port_cpu_id(void)`
 |目的 a|ライブラリが、接続の状態遷移の記録に、どのコアが状態を進めたかを残すための関数(`bfm_run()` は複数のコアから呼ばれる)。移植する人は、今動いているコアを見分けられる番号を返す関数を用意する。Linux 版は `taskset` などと同じ OS の CPU の番号を返す。
 |処理内容 a|今動いているコアの番号として、OS の CPU の番号(`sched_getcpu()`。`taskset` や `/proc/cpuinfo` と同じ番号)を返す。取れなければ APIC ID(`bfm_x86_apic_id()`)を返す。
@@ -8246,7 +8518,7 @@ image::call_port_linux_vfio_port_linux-bfm_port_cpu_id.drawio.svg[bfm_port_cpu_i
 [cols="1,5",options="autowidth"]
 .linux_rdmsr()
 |===
-|関数名 |`linux_rdmsr`(`port/linux_vfio/port_linux.c` 107 行目)
+|関数名 |`linux_rdmsr`(`port/linux_vfio/port_linux.c` 116 行目)
 |宣言 |`static int linux_rdmsr(uint32_t msr, uint64_t *val)`
 |目的 a|`cpu_init()` が `bfm_x86_init()` に渡す、CPU の MSR を読む関数。ユーザ空間では MSR を読む命令を使えないので、カーネルの msr ドライバを通して読み、TSC の周波数などを CPU から求められるようにする。
 |処理内容 a|`/dev/cpu/N/msr`(`cpu_init()` が開いた `s_msr_fd`)を、MSR の番号の位置から 8 バイト読む。`bfm_x86_init()` に渡す、MSR を読む関数。
@@ -8274,7 +8546,7 @@ image::call_port_linux_vfio_port_linux-linux_rdmsr.drawio.svg[linux_rdmsr() の�
 [cols="1,5",options="autowidth"]
 .cpu_init()
 |===
-|関数名 |`cpu_init`(`port/linux_vfio/port_linux.c` 112 行目)
+|関数名 |`cpu_init`(`port/linux_vfio/port_linux.c` 121 行目)
 |宣言 |`static void cpu_init(void)`
 |目的 a|`bfm_port_init()` が、CPU を調べて TSC の周波数を決めるために呼ぶ下請け。Linux 版の時刻と待ちは OS のものを使うので、ここは VxWorks 版と同じ TSC と MSR の扱いのコードを Linux の上で試し、求めた周波数が正しいかを確かめるためにある。
 |処理内容 a|今いる CPU の `/dev/cpu/N/msr` を開き、`bfm_x86_init()` で CPU を調べて TSC の周波数を決める(開けたら `linux_rdmsr()` を、開けなければ NULL を渡す)。`g_bfm_verbose` なら、TSC を OS の時計で 100ms 測った周波数も表示して、求めた値と比べられるようにする。
@@ -8305,7 +8577,7 @@ image::call_port_linux_vfio_port_linux-cpu_init.drawio.svg[cpu_init() の関係�
 [cols="1,5",options="autowidth"]
 .vfio_open_container()
 |===
-|関数名 |`vfio_open_container`(`port/linux_vfio/port_linux.c` 140 行目)
+|関数名 |`vfio_open_container`(`port/linux_vfio/port_linux.c` 149 行目)
 |宣言 |`static int vfio_open_container(void)`
 |目的 a|`vfio_open_device()` が、装置を VFIO で使う前に、全部のポートで共有する VFIO のコンテナ(IOMMU の対応づけをまとめる入れ物)を用意するために呼ぶ下請け。2 つめのポートからは、開いてあるものをそのまま使う。
 |処理内容 a|VFIO のコンテナ(`/dev/vfio/vfio`)を開き、API の版と Type1 IOMMU が使えることを確かめる。開いてあれば何もしない(コンテナは全部のポートで 1 つ)。
@@ -8330,7 +8602,7 @@ image::call_port_linux_vfio_port_linux-vfio_open_container.drawio.svg[vfio_open_
 [cols="1,5",options="autowidth"]
 .vfio_open_group()
 |===
-|関数名 |`vfio_open_group`(`port/linux_vfio/port_linux.c` 153 行目)
+|関数名 |`vfio_open_group`(`port/linux_vfio/port_linux.c` 162 行目)
 |宣言 |`static int vfio_open_group(int grp)`
 |目的 a|`vfio_open_device()` が、装置の属する IOMMU グループを開いてコンテナに入れ、そのグループから装置を取り出せるようにするために呼ぶ下請け。同じカードの 2 つのポートが同じグループに入っていることがあるので、一度開いたグループは使い回す。
 |処理内容 a|IOMMU グループ `grp`(`/dev/vfio/<grp>`)を開いてコンテナに入れ、fd を返す。既に開いたグループ(`s_grp[]` にある番号)ならその fd を返す。最初のグループを入れたときに、コンテナの IOMMU の型を Type1 に決める。
@@ -8361,7 +8633,7 @@ image::call_port_linux_vfio_port_linux-vfio_open_group.drawio.svg[vfio_open_grou
 [cols="1,5",options="autowidth"]
 .vfio_open_device()
 |===
-|関数名 |`vfio_open_device`(`port/linux_vfio/port_linux.c` 185 行目)
+|関数名 |`vfio_open_device`(`port/linux_vfio/port_linux.c` 194 行目)
 |宣言 |`static int vfio_open_device(unsigned port)`
 |目的 a|`bfm_port_init()` が、使うポートの ConnectX の装置を VFIO で掴むために、ポートごとに呼ぶ下請け。これで、そのポートの設定空間の読み書き(`bfm_port_pci_read32()` など)と BAR0 を張ること(`bfm_port_bar0_map()`)ができるようになる。
 |処理内容 a|ポート `port` の装置(PCI アドレス `g_bfm_linux_pci_bdf[port]`)を VFIO で掴む。sysfs の `iommu_group` からグループ番号を読み、コンテナ(`vfio_open_container()`)とグループ(`vfio_open_group()`)を開いて、装置の fd を `s_dev[port].device` に取る。あわせて設定空間と BAR0 の領域の位置(`s_dev[port].cfg_off`・`bar0_vfio_off`)と BAR0 の大きさ(`bar0_size`)を読む。
@@ -8397,7 +8669,7 @@ image::call_port_linux_vfio_port_linux-vfio_open_device.drawio.svg[vfio_open_dev
 [cols="1,5",options="autowidth"]
 .map_region()
 |===
-|関数名 |`map_region`(`port/linux_vfio/port_linux.c` 225 行目)
+|関数名 |`map_region`(`port/linux_vfio/port_linux.c` 234 行目)
 |宣言 |`static void *map_region(uint64_t va, uint64_t size, const char *what)`
 |目的 a|`bfm_port_init()` が、DMA 領域と公開メモリを、CPU と NIC の両方から同じアドレスで触れるようにするために呼ぶ下請け。設定で決めた仮想アドレスにメモリを張り、同じ値を NIC から見たアドレスにすることで、VxWorks の「論理アドレス = 物理アドレス」と同じ扱いを Linux で作る。
 |処理内容 a|仮想アドレス `va` の位置に `size` バイトの無名メモリを張り(`va` と `size` が 2MiB の境界・倍数なら hugepage を先に試す)、同じ値を IOVA にして `VFIO_IOMMU_MAP_DMA` で NIC から見えるようにする(コンテナの中の全部の装置から見える)。
@@ -8431,7 +8703,7 @@ image::call_port_linux_vfio_port_linux-map_region.drawio.svg[map_region() の関
 [cols="1,5",options="autowidth"]
 .bfm_port_init()
 |===
-|関数名 |`bfm_port_init`(`port/linux_vfio/port_linux.c` 253 行目)
+|関数名 |`bfm_port_init`(`port/linux_vfio/port_linux.c` 262 行目)
 |宣言 |`int bfm_port_init(void)`
 |目的 a|ライブラリが、最初の `bfm_run()` で(ポートの立ち上げより前に)1 回だけ呼ぶ、移植層を使えるようにする関数。呼ぶと、使うポートの装置に設定空間と BAR0 から触れるようになり、DMA 領域と公開メモリが CPU と NIC の両方から同じアドレスで触れるようになり、時刻が取れるようになる。移植する人は、この関数でこれらを用意する。
 |処理内容 a|移植層を立ち上げる。`g_bfm_port_conn[]` が 0 でないポートの装置を全部 VFIO で掴み(`vfio_open_device()`)、それから DMA 領域と公開メモリを `g_bfm_dma_base` / `g_bfm_mr_base` に張って IOVA に対応づける(`map_region()`)。`cpu_init()` で CPU を調べる(TSC の周波数・MSR。時刻と待ちには使わない)。`g_bfm_cpu_awake` が 0 でなければ `/dev/cpu_dma_latency` に 0 を書いて fd を開いたままにし、CPU を深い C-state に入れない。
@@ -8463,7 +8735,7 @@ image::call_port_linux_vfio_port_linux-bfm_port_init.drawio.svg[bfm_port_init() 
 [cols="1,5",options="autowidth"]
 .bfm_port_fini()
 |===
-|関数名 |`bfm_port_fini`(`port/linux_vfio/port_linux.c` 296 行目)
+|関数名 |`bfm_port_fini`(`port/linux_vfio/port_linux.c` 305 行目)
 |宣言 |`void bfm_port_fini(void)`
 |目的 a|ライブラリが、`bfm_shutdown()` で全部のポートを止めた後に、`bfm_port_init()` で取ったもの(装置・メモリの対応づけなど)を返すために呼ぶ関数。Linux 版では `bfm_port_init()` の途中で失敗したときの後始末にも使う。移植する人は、`bfm_port_init()` で取ったものを返す処理を用意する。
 |処理内容 a|移植層が取ったものを返す。ポートごとに BAR0 を張っていれば外して装置の fd を閉じ、開いた IOMMU グループの fd とコンテナの fd を閉じ(IOMMU の対応づけもここで外れる)、DMA 領域と公開メモリを外し、`/dev/cpu_dma_latency` と `/dev/cpu/N/msr` を閉じる。
@@ -8487,7 +8759,7 @@ image::call_port_linux_vfio_port_linux-bfm_port_fini.drawio.svg[bfm_port_fini() 
 [cols="1,5",options="autowidth"]
 .bfm_port_pci_read32()
 |===
-|関数名 |`bfm_port_pci_read32`(`port/linux_vfio/port_linux.c` 317 行目)
+|関数名 |`bfm_port_pci_read32`(`port/linux_vfio/port_linux.c` 331 行目)
 |宣言 |`uint32_t bfm_port_pci_read32(unsigned port, uint32_t off)`
 |目的 a|ライブラリが、ポートの立ち上げで装置の PCIe の設定空間を読むための関数(装置の ID・BAR0 の位置と大きさ・機能の一覧・リセットの済み具合などを調べる)。移植する人は、ポートの番号で選んだ装置の設定空間から 32bit を読む関数を用意する。Linux 版は VFIO を通して読む。
 |処理内容 a|ポート `port` の PCIe の設定空間の `off` から 32bit を読む。VFIO の装置の fd(`s_dev[port].device`)の設定空間の領域を `pread` する。
@@ -8516,7 +8788,7 @@ image::call_port_linux_vfio_port_linux-bfm_port_pci_read32.drawio.svg[bfm_port_p
 [cols="1,5",options="autowidth"]
 .bfm_port_pci_write32()
 |===
-|関数名 |`bfm_port_pci_write32`(`port/linux_vfio/port_linux.c` 325 行目)
+|関数名 |`bfm_port_pci_write32`(`port/linux_vfio/port_linux.c` 339 行目)
 |宣言 |`void bfm_port_pci_write32(unsigned port, uint32_t off, uint32_t val)`
 |目的 a|ライブラリが、ポートの立ち上げと停止で装置の PCIe の設定空間へ書くための関数(Bus Master の入り切り・BAR0 の大きさを測る・装置のリセットなど)。移植する人は、ポートの番号で選んだ装置の設定空間へ 32bit を書く関数を用意する。Linux 版は VFIO を通して書く。
 |処理内容 a|ポート `port` の PCIe の設定空間の `off` へ 32bit を書く。VFIO の装置の fd(`s_dev[port].device`)の設定空間の領域へ `pwrite` する。
@@ -8541,12 +8813,222 @@ image::flow_port_linux_vfio_port_linux-bfm_port_pci_write32.drawio.svg[bfm_port_
 .bfm_port_pci_write32() の関係図
 image::call_port_linux_vfio_port_linux-bfm_port_pci_write32.drawio.svg[bfm_port_pci_write32() の関係図]
 
+[[port_linux_vfio_port_linux-cfg_fd]]
+=== `cfg_fd()`
+[cols="1,5",options="autowidth"]
+.cfg_fd()
+|===
+|関数名 |`cfg_fd`(`port/linux_vfio/port_linux.c` 355 行目)
+|宣言 |`static int cfg_fd(unsigned port, int which)`
+|目的 a|カードのリセットで、VFIO が仮想化していない本当の設定空間(装置そのものと、上流のポート)を読み書きするために、sysfs の config のファイルを開いておく下請け。
+|処理内容 a|一度だけ開こうとし、結果(fd か -1)を `s_cfg[port][which]` に覚えて、次からはそれを返す。`/sys/bus/pci/devices/<g_bfm_linux_pci_bdf[port]>` の実際の場所(`realpath`)を求め、`which` が `CFG_UP` なら 1 つ上のディレクトリ(上流のポート)にする。その名前が PCI のアドレス(`dddd:bb:dd.f`)でなければ(ルート複合体の直下)上流のポートは無い。`config` を読み書きで開く。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`unsigned` !`port` !ポートの番号
+!`int` !`which` !`CFG_HW` = 装置そのもの、`CFG_UP` = 上流のポート
+!===
+|戻り値 a|config の fd。開けない・上流のポートが無いなら -1。
+|前提条件 a|`g_bfm_linux_pci_bdf[port]` を決めてあること。root で動かしていること(設定空間の 64 バイトより先を読み書きするため)。
+|注意事項 a|* vfio-pci に結びつけたままで読み書きできる(setpci と同じ道)。
+* 開いた fd は `bfm_port_fini()` が閉じる。
+|使用関数 a|* `snprintf()`(外部)
+* `realpath()`(外部)
+* <<port_linux_vfio_port_linux-bfm_port_log,`bfm_port_log()`>>
+* `strrchr()`(外部)
+* `sscanf()`(外部)
+* `open()`(外部)
+|===
+
+.cfg_fd() のフロー図
+image::flow_port_linux_vfio_port_linux-cfg_fd.drawio.svg[cfg_fd() のフロー図]
+
+.cfg_fd() の関係図
+image::call_port_linux_vfio_port_linux-cfg_fd.drawio.svg[cfg_fd() の関係図]
+
+[[port_linux_vfio_port_linux-cfg_read]]
+=== `cfg_read()`
+[cols="1,5",options="autowidth"]
+.cfg_read()
+|===
+|関数名 |`cfg_read`(`port/linux_vfio/port_linux.c` 387 行目)
+|宣言 |`static uint32_t cfg_read(unsigned port, int which, uint32_t off)`
+|目的 a|`bfm_port_up_read32()` と `bfm_port_pci_hw_read32()` の共通の下請け。sysfs の config から 32bit を読む。
+|処理内容 a|`cfg_fd()` で開いた config の `off` から 4 バイトを `pread` する。開けない・読めないなら 0xffffffff。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`unsigned` !`port` !ポートの番号
+!`int` !`which` !`CFG_HW` / `CFG_UP`
+!`uint32_t` !`off` !設定空間の中の位置(4 の倍数)
+!===
+|戻り値 a|読んだ値(失敗なら 0xffffffff。無い装置を読んだときと同じ値)。
+|前提条件 a|`cfg_fd()` と同じ。
+|注意事項 a|失敗は表示しない(リセットの途中で装置がいないときに、何度も読むため)。
+|使用関数 a|* <<port_linux_vfio_port_linux-cfg_fd,`cfg_fd()`>>
+* `pread()`(外部)
+|===
+
+.cfg_read() のフロー図
+image::flow_port_linux_vfio_port_linux-cfg_read.drawio.svg[cfg_read() のフロー図]
+
+.cfg_read() の関係図
+image::call_port_linux_vfio_port_linux-cfg_read.drawio.svg[cfg_read() の関係図]
+
+[[port_linux_vfio_port_linux-cfg_write]]
+=== `cfg_write()`
+[cols="1,5",options="autowidth"]
+.cfg_write()
+|===
+|関数名 |`cfg_write`(`port/linux_vfio/port_linux.c` 395 行目)
+|宣言 |`static void cfg_write(unsigned port, int which, uint32_t off, uint32_t val)`
+|目的 a|`bfm_port_up_write32()` と `bfm_port_pci_hw_write32()` の共通の下請け。sysfs の config へ 32bit を書く。
+|処理内容 a|`cfg_fd()` で開いた config の `off` へ 4 バイトを `pwrite` する。書けなければ表示する。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`unsigned` !`port` !ポートの番号
+!`int` !`which` !`CFG_HW` / `CFG_UP`
+!`uint32_t` !`off` !設定空間の中の位置(4 の倍数)
+!`uint32_t` !`val` !書く値
+!===
+|戻り値 a|なし
+|前提条件 a|`cfg_fd()` と同じ。
+|注意事項 a|開けないときは何もしない(開くときに表示してある)。
+|使用関数 a|* <<port_linux_vfio_port_linux-cfg_fd,`cfg_fd()`>>
+* `pwrite()`(外部)
+* <<port_linux_vfio_port_linux-bfm_port_log,`bfm_port_log()`>>
+|===
+
+.cfg_write() のフロー図
+image::flow_port_linux_vfio_port_linux-cfg_write.drawio.svg[cfg_write() のフロー図]
+
+.cfg_write() の関係図
+image::call_port_linux_vfio_port_linux-cfg_write.drawio.svg[cfg_write() の関係図]
+
+[[port_linux_vfio_port_linux-bfm_port_up_read32]]
+=== `bfm_port_up_read32()`
+[cols="1,5",options="autowidth"]
+.bfm_port_up_read32()
+|===
+|関数名 |`bfm_port_up_read32`(`port/linux_vfio/port_linux.c` 403 行目)
+|宣言 |`uint32_t bfm_port_up_read32(unsigned port, uint32_t off)`
+|目的 a|カードのリセット(`bfm_fw_reset()`)で、ポートの装置の上流のポート(ルートポートか PCIe スイッチの下りポート)の設定空間を読むための関数。リンクの制御・状態を見るのに使う。移植する人は、装置のバスを下に持つブリッジの設定空間を読む関数を用意する。Linux 版は sysfs の木で 1 つ上の装置の config を読む。
+|処理内容 a|`cfg_read(port, CFG_UP, off)` を返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`unsigned` !`port` !ポートの番号
+!`uint32_t` !`off` !上流のポートの設定空間の中の位置(4 の倍数)
+!===
+|戻り値 a|読んだ値。上流のポートが無い・読めないなら 0xffffffff。
+|前提条件 a|root で動かしていること。
+|注意事項 a|VFIO を通さない(上流のポートは vfio-pci に結びつけていない)。
+|使用関数 a|* <<port_linux_vfio_port_linux-cfg_read,`cfg_read()`>>
+|===
+
+.bfm_port_up_read32() のフロー図
+image::flow_port_linux_vfio_port_linux-bfm_port_up_read32.drawio.svg[bfm_port_up_read32() のフロー図]
+
+.bfm_port_up_read32() の関係図
+image::call_port_linux_vfio_port_linux-bfm_port_up_read32.drawio.svg[bfm_port_up_read32() の関係図]
+
+[[port_linux_vfio_port_linux-bfm_port_up_write32]]
+=== `bfm_port_up_write32()`
+[cols="1,5",options="autowidth"]
+.bfm_port_up_write32()
+|===
+|関数名 |`bfm_port_up_write32`(`port/linux_vfio/port_linux.c` 408 行目)
+|宣言 |`void bfm_port_up_write32(unsigned port, uint32_t off, uint32_t val)`
+|目的 a|カードのリセットで、上流のポートの Link Control(Link Disable)か Bridge Control(Secondary Bus Reset)を書いて PCIe のリンクを落とし・戻すための関数。移植する人は、上流のポートの設定空間へ書く関数を用意する。
+|処理内容 a|`cfg_write(port, CFG_UP, off, val)` を呼ぶ。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`unsigned` !`port` !ポートの番号
+!`uint32_t` !`off` !上流のポートの設定空間の中の位置(4 の倍数)
+!`uint32_t` !`val` !書く値
+!===
+|戻り値 a|なし
+|前提条件 a|root で動かしていること。
+|注意事項 a|上流のポートが無ければ何もしない。
+|使用関数 a|* <<port_linux_vfio_port_linux-cfg_write,`cfg_write()`>>
+|===
+
+.bfm_port_up_write32() のフロー図
+image::flow_port_linux_vfio_port_linux-bfm_port_up_write32.drawio.svg[bfm_port_up_write32() のフロー図]
+
+.bfm_port_up_write32() の関係図
+image::call_port_linux_vfio_port_linux-bfm_port_up_write32.drawio.svg[bfm_port_up_write32() の関係図]
+
+[[port_linux_vfio_port_linux-bfm_port_pci_hw_read32]]
+=== `bfm_port_pci_hw_read32()`
+[cols="1,5",options="autowidth"]
+.bfm_port_pci_hw_read32()
+|===
+|関数名 |`bfm_port_pci_hw_read32`(`port/linux_vfio/port_linux.c` 413 行目)
+|宣言 |`uint32_t bfm_port_pci_hw_read32(unsigned port, uint32_t off)`
+|目的 a|カードのリセットの前後に、ポートの装置そのものの設定空間を(OS の仮想化を通さずに)読むための関数。リセットの前の値を覚え、リセットの後に設定空間が読めるようになったかを見る。移植する人は、OS が設定空間を仮想化するなら、それを通さずに装置へ届く読み方を用意する。Linux 版は sysfs の config を読む(VFIO は BAR・Max Payload Size・ベンダ ID を仮想化しているため)。
+|処理内容 a|`cfg_read(port, CFG_HW, off)` を返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`unsigned` !`port` !ポートの番号
+!`uint32_t` !`off` !設定空間の中の位置(4 の倍数)
+!===
+|戻り値 a|読んだ値。読めないなら 0xffffffff。
+|前提条件 a|root で動かしていること。
+|注意事項 a|ふだんの設定空間の読み書き(`bfm_port_pci_read32()`)は VFIO を通したまま。
+|使用関数 a|* <<port_linux_vfio_port_linux-cfg_read,`cfg_read()`>>
+|===
+
+.bfm_port_pci_hw_read32() のフロー図
+image::flow_port_linux_vfio_port_linux-bfm_port_pci_hw_read32.drawio.svg[bfm_port_pci_hw_read32() のフロー図]
+
+.bfm_port_pci_hw_read32() の関係図
+image::call_port_linux_vfio_port_linux-bfm_port_pci_hw_read32.drawio.svg[bfm_port_pci_hw_read32() の関係図]
+
+[[port_linux_vfio_port_linux-bfm_port_pci_hw_write32]]
+=== `bfm_port_pci_hw_write32()`
+[cols="1,5",options="autowidth"]
+.bfm_port_pci_hw_write32()
+|===
+|関数名 |`bfm_port_pci_hw_write32`(`port/linux_vfio/port_linux.c` 418 行目)
+|宣言 |`void bfm_port_pci_hw_write32(unsigned port, uint32_t off, uint32_t val)`
+|目的 a|カードのリセットで初期値に戻った設定空間(BAR・Command・Max Payload Size など)を、装置そのものへ書き戻すための関数。移植する人は、OS の仮想化を通さずに装置へ届く書き方を用意する。
+|処理内容 a|`cfg_write(port, CFG_HW, off, val)` を呼ぶ。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`unsigned` !`port` !ポートの番号
+!`uint32_t` !`off` !設定空間の中の位置(4 の倍数)
+!`uint32_t` !`val` !書く値
+!===
+|戻り値 a|なし
+|前提条件 a|root で動かしていること。
+|注意事項 a|VFIO は BAR を仮想化していて、VFIO を通して書いても装置の BAR は戻らないので、ここで装置へ書く(Command の Memory Space を VFIO を通して入れると vfio-pci も BAR を戻すが、Max Payload Size は戻らない)。
+|使用関数 a|* <<port_linux_vfio_port_linux-cfg_write,`cfg_write()`>>
+|===
+
+.bfm_port_pci_hw_write32() のフロー図
+image::flow_port_linux_vfio_port_linux-bfm_port_pci_hw_write32.drawio.svg[bfm_port_pci_hw_write32() のフロー図]
+
+.bfm_port_pci_hw_write32() の関係図
+image::call_port_linux_vfio_port_linux-bfm_port_pci_hw_write32.drawio.svg[bfm_port_pci_hw_write32() の関係図]
+
 [[port_linux_vfio_port_linux-bar_map_uc]]
 === `bar_map_uc()`
 [cols="1,5",options="autowidth"]
 .bar_map_uc()
 |===
-|関数名 |`bar_map_uc`(`port/linux_vfio/port_linux.c` 336 行目)
+|関数名 |`bar_map_uc`(`port/linux_vfio/port_linux.c` 428 行目)
 |宣言 |`static void *bar_map_uc(unsigned port, void *va, uint64_t off, uint64_t len, int fixed)`
 |目的 a|BAR0 の一部または全体を、キャッシュしない属性で CPU から触れるように張る下請け。`bfm_port_bar0_map()` が BAR0 全体を張るのと、`bfm_port_bar0_wc()` / `bfm_port_bar0_wc_release()` が write-combining に張り替えるページの前後やそのページを張り直すのに使う。
 |処理内容 a|ポート `port` の BAR0 の `[off, off+len)` を UC で `va` に張る。`s_dev[port].bar0_sysfs` が 0 でなければ sysfs の `resource0`(`g_bfm_linux_pci_bdf[port]`)を `O_SYNC` で開いて張り、0 なら VFIO の装置の fd の BAR0 の領域から張る。
@@ -8580,7 +9062,7 @@ image::call_port_linux_vfio_port_linux-bar_map_uc.drawio.svg[bar_map_uc() の関
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_map()
 |===
-|関数名 |`bfm_port_bar0_map`(`port/linux_vfio/port_linux.c` 355 行目)
+|関数名 |`bfm_port_bar0_map`(`port/linux_vfio/port_linux.c` 447 行目)
 |宣言 |`volatile uint8_t *bfm_port_bar0_map(unsigned port, uint64_t bar_phys, uint64_t bar_size)`
 |目的 a|ライブラリが、ポートの立ち上げで PCIe の設定を済ませた後に、装置のレジスタ(BAR0)を CPU から触れるようにするために呼ぶ関数。返った先頭から、FW のコマンドの受け渡しやドアベルの書き込みができるようになる。移植する人は、BAR0 をキャッシュしない属性で張った先頭を返す関数を用意する。
 |処理内容 a|ポート `port` の BAR0 全体(VFIO から読んだ大きさ `s_dev[port].bar0_size`)を UC で張って先頭を返す。まず sysfs の `resource0` から張り、だめなら VFIO の fd から張る(このときは BlueFlame を使えない)。UC の窓の mmap の一覧を空にする。
@@ -8611,7 +9093,7 @@ image::call_port_linux_vfio_port_linux-bfm_port_bar0_map.drawio.svg[bfm_port_bar
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_unmap()
 |===
-|関数名 |`bfm_port_bar0_unmap`(`port/linux_vfio/port_linux.c` 374 行目)
+|関数名 |`bfm_port_bar0_unmap`(`port/linux_vfio/port_linux.c` 466 行目)
 |宣言 |`void bfm_port_bar0_unmap(unsigned port)`
 |目的 a|ライブラリが、ポートを止めるときに Bus Master を落とした後で、`bfm_port_bar0_map()` で張った BAR0 の窓を外すために呼ぶ関数。移植する人は、`bfm_port_bar0_map()` で張ったものを外す処理を用意する。
 |処理内容 a|ポート `port` の BAR0 の窓を外し、UC の窓の mmap の一覧を空にする。
@@ -8639,7 +9121,7 @@ image::call_port_linux_vfio_port_linux-bfm_port_bar0_unmap.drawio.svg[bfm_port_b
 [cols="1,5",options="autowidth"]
 .seg_add()
 |===
-|関数名 |`seg_add`(`port/linux_vfio/port_linux.c` 382 行目)
+|関数名 |`seg_add`(`port/linux_vfio/port_linux.c` 474 行目)
 |宣言 |`static void seg_add(unsigned port, uint64_t off, uint64_t len)`
 |目的 a|BAR0 のどの区間がキャッシュしない属性の 1 つの mmap として張られているかを覚えておく下請け。`bfm_port_bar0_wc()` が write-combining に張り替えるページを含む mmap を探せるように、`bfm_port_bar0_wc()` と `bfm_port_bar0_wc_release()` が張り直した区間を足すのに使う。
 |処理内容 a|UC で張ったポート `port` の BAR0 の区間 `[off, off+len)` を、UC の mmap の一覧 `s_dev[port].seg` に足す。一覧が満杯なら足さない。
@@ -8668,7 +9150,7 @@ image::call_port_linux_vfio_port_linux-seg_add.drawio.svg[seg_add() の関係図
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_wc()
 |===
-|関数名 |`bfm_port_bar0_wc`(`port/linux_vfio/port_linux.c` 395 行目)
+|関数名 |`bfm_port_bar0_wc`(`port/linux_vfio/port_linux.c` 487 行目)
 |宣言 |`volatile uint8_t *bfm_port_bar0_wc(unsigned port, uint64_t off, uint64_t len)`
 |目的 a|ライブラリが、接続ごとの UAR(ドアベルと BlueFlame の窓)のページを write-combining で触れるようにするために、接続の枠を用意するときに呼ぶ関数。返ったアドレスへ BlueFlame で WQE を書き込めるようになる。NULL が返れば BlueFlame を使わずにドアベルだけで動かすので、移植する人は、用意できない環境では NULL を返せばよい。
 |処理内容 a|ポート `port` の BAR0 の `[off, off+len)`(UAR の 1 ページ)を、同じ仮想アドレスのまま write-combining に張り替えて先頭を返す。その範囲を含む UC の mmap を探し、範囲の前と後を UC で張り直して元の mmap をその範囲だけに縮め、その範囲を外してから sysfs の `resource0_wc` で張る。失敗したらその範囲を UC に戻して NULL を返す。
@@ -8710,7 +9192,7 @@ image::call_port_linux_vfio_port_linux-bfm_port_bar0_wc.drawio.svg[bfm_port_bar0
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_wc_release()
 |===
-|関数名 |`bfm_port_bar0_wc_release`(`port/linux_vfio/port_linux.c` 431 行目)
+|関数名 |`bfm_port_bar0_wc_release`(`port/linux_vfio/port_linux.c` 523 行目)
 |宣言 |`void bfm_port_bar0_wc_release(unsigned port, uint64_t off, uint64_t len)`
 |目的 a|ライブラリが、ポートを止めるときに接続を畳んだ後で、`bfm_port_bar0_wc()` で write-combining にした UAR のページを返すために呼ぶ関数。移植する人は、`bfm_port_bar0_wc()` で用意したものを元に戻す処理を用意する(何も取っていなければ何もしなくてよい)。
 |処理内容 a|`bfm_port_bar0_wc()` で WC に張り替えたポート `port` の BAR0 の `[off, off+len)` を外し、同じ仮想アドレスに UC で張り直して、UC の mmap の一覧に足す。
@@ -8746,7 +9228,7 @@ image::call_port_linux_vfio_port_linux-bfm_port_bar0_wc_release.drawio.svg[bfm_p
 [cols="1,5",options="autowidth"]
 .bfm_port_log()
 |===
-|関数名 |`bfm_port_log`(`port/vxworks/port_vxworks.c` 32 行目)
+|関数名 |`bfm_port_log`(`port/vxworks/port_vxworks.c` 33 行目)
 |宣言 |`void bfm_port_log(const char *fmt, ...)`
 |目的 a|ライブラリが、立ち上げの経過・注意・失敗の理由などの文字を表示するための関数(本体の表示はすべてこれを通る)。VxWorks 版は VxWorks 固有の関数を使わず、C の `vprintf` で出す。
 |処理内容 a|`printf` と同じ書式で表示する(`vprintf`)。
@@ -8776,7 +9258,7 @@ image::call_port_vxworks_port_vxworks-bfm_port_log.drawio.svg[bfm_port_log() の
 [cols="1,5",options="autowidth"]
 .bfm_port_time_ns()
 |===
-|関数名 |`bfm_port_time_ns`(`port/vxworks/port_vxworks.c` 41 行目)
+|関数名 |`bfm_port_time_ns`(`port/vxworks/port_vxworks.c` 42 行目)
 |宣言 |`uint64_t bfm_port_time_ns(void)`
 |目的 a|ライブラリが、FW のコマンドや接続の手順の時間切れを判定し、状態遷移の記録に時刻を残すための関数。VxWorks 版は OS の時計を使わず、CPU の TSC から時刻を作る。
 |処理内容 a|TSC から作った時刻を返す(`bfm_x86_time_ns()`)。
@@ -8799,7 +9281,7 @@ image::call_port_vxworks_port_vxworks-bfm_port_time_ns.drawio.svg[bfm_port_time_
 [cols="1,5",options="autowidth"]
 .bfm_port_delay_us()
 |===
-|関数名 |`bfm_port_delay_us`(`port/vxworks/port_vxworks.c` 46 行目)
+|関数名 |`bfm_port_delay_us`(`port/vxworks/port_vxworks.c` 47 行目)
 |宣言 |`void bfm_port_delay_us(uint32_t us)`
 |目的 a|指定したマイクロ秒だけ待つための関数。移植層の決まりとして用意するが、ライブラリ本体(`src/`)からは呼ばない。VxWorks 版は OS の待ちを使わず、TSC を見ながら空回りで待つ。
 |処理内容 a|TSC を見ながら空回りで `us` マイクロ秒待つ(`bfm_x86_delay_us()`)。
@@ -8827,7 +9309,7 @@ image::call_port_vxworks_port_vxworks-bfm_port_delay_us.drawio.svg[bfm_port_dela
 [cols="1,5",options="autowidth"]
 .bfm_port_cpu_id()
 |===
-|関数名 |`bfm_port_cpu_id`(`port/vxworks/port_vxworks.c` 52 行目)
+|関数名 |`bfm_port_cpu_id`(`port/vxworks/port_vxworks.c` 53 行目)
 |宣言 |`unsigned bfm_port_cpu_id(void)`
 |目的 a|ライブラリが、接続の状態遷移の記録に、どのコアが状態を進めたかを残すための関数(`bfm_run()` は複数のコアから呼ばれる)。VxWorks 版は OS の関数を使わないので、VxWorks の CPU の番号ではなく、CPU から読んだ APIC ID でコアを見分ける。
 |処理内容 a|今動いているコアの番号として、CPU から読んだ APIC ID を返す(`bfm_x86_apic_id()`)。
@@ -8851,7 +9333,7 @@ image::call_port_vxworks_port_vxworks-bfm_port_cpu_id.drawio.svg[bfm_port_cpu_id
 [cols="1,5",options="autowidth"]
 .vx_rdmsr()
 |===
-|関数名 |`vx_rdmsr`(`port/vxworks/port_vxworks.c` 58 行目)
+|関数名 |`vx_rdmsr`(`port/vxworks/port_vxworks.c` 59 行目)
 |宣言 |`static int vx_rdmsr(uint32_t msr, uint64_t *val)`
 |目的 a|`bfm_port_init()` が `bfm_x86_init()` に渡す、CPU の MSR を読む関数。カーネルのタスクとして動くので MSR を読む命令をそのまま使い、TSC の周波数などを CPU から求められるようにする。
 |処理内容 a|`rdmsr` 命令(`bfm_x86_rdmsr()`)で MSR を読む。`bfm_x86_init()` に渡す、MSR を読む関数。
@@ -8880,7 +9362,7 @@ image::call_port_vxworks_port_vxworks-vx_rdmsr.drawio.svg[vx_rdmsr() の関係�
 [cols="1,5",options="autowidth"]
 .bfm_port_init()
 |===
-|関数名 |`bfm_port_init`(`port/vxworks/port_vxworks.c` 64 行目)
+|関数名 |`bfm_port_init`(`port/vxworks/port_vxworks.c` 65 行目)
 |宣言 |`int bfm_port_init(void)`
 |目的 a|ライブラリが、最初の `bfm_run()` で(ポートの立ち上げより前に)1 回だけ呼ぶ、移植層を使えるようにする関数。VxWorks 版で用意するのは、設定空間を読み書きするための ECAM の位置の確かめと、時刻を作るための TSC の周波数だけ。DMA 領域・公開メモリ・BAR0 は BSP が論理 = 物理で張っておく前提なので、ここでは張らない。
 |処理内容 a|移植層を立ち上げる。ECAM の位置 `g_bfm_pcie_ecam_base` が設定されているかを確かめ、`bfm_x86_init()` で TSC の周波数を決める(MSR を読む関数として `vx_rdmsr()` を渡す)。DMA 領域・公開メモリは BSP が論理 = 物理で張ってある前提で、ここでは何もしない。
@@ -8905,7 +9387,7 @@ image::call_port_vxworks_port_vxworks-bfm_port_init.drawio.svg[bfm_port_init() �
 [cols="1,5",options="autowidth"]
 .bfm_port_fini()
 |===
-|関数名 |`bfm_port_fini`(`port/vxworks/port_vxworks.c` 73 行目)
+|関数名 |`bfm_port_fini`(`port/vxworks/port_vxworks.c` 74 行目)
 |宣言 |`void bfm_port_fini(void)`
 |目的 a|ライブラリが、`bfm_shutdown()` で全部のポートを止めた後に、`bfm_port_init()` で取ったものを返すために呼ぶ関数。VxWorks 版の `bfm_port_init()` は何も取らないので、決まりを満たすためだけにある。
 |処理内容 a|移植層が取ったものを返す。この版は何も取らないので何もしない。
@@ -8922,15 +9404,46 @@ image::flow_port_vxworks_port_vxworks-bfm_port_fini.drawio.svg[bfm_port_fini() �
 .bfm_port_fini() の関係図
 image::call_port_vxworks_port_vxworks-bfm_port_fini.drawio.svg[bfm_port_fini() の関係図]
 
+[[port_vxworks_port_vxworks-ecam_at]]
+=== `ecam_at()`
+[cols="1,5",options="autowidth"]
+.ecam_at()
+|===
+|関数名 |`ecam_at`(`port/vxworks/port_vxworks.c` 79 行目)
+|宣言 |`static volatile uint32_t *ecam_at(uint32_t bus, uint32_t dev, uint32_t func, uint32_t off)`
+|目的 a|bus / dev / func で指した PCI の装置の設定空間を、OS を通さずに直接読み書きするために、ECAM の中のアドレスを求める下請け。ポートの装置(`ecam()`)と、上流のポートを探す・読み書きする(`find_up()` など)の両方が使う。
+|処理内容 a|`g_bfm_pcie_ecam_base` + bus << 20 + dev << 15 + func << 12 + (`off` の下位 12 ビットを 4 の倍数に揃えたもの)を返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`uint32_t` !`bus` !バスの番号
+!`uint32_t` !`dev` !装置の番号(0〜31)
+!`uint32_t` !`func` !function の番号(0〜7)
+!`uint32_t` !`off` !設定空間の中の位置
+!===
+|戻り値 a|ECAM の 32bit の位置(論理 = 物理のポインタ)。
+|前提条件 a|`g_bfm_pcie_ecam_base` を設定してあること。ECAM が論理 = 物理で張られていること。
+|注意事項 a|* `off` は `0xffc` で切るので、4KiB を超える位置や 4 の倍数でない位置は丸められる。
+* VxWorks の実機で未検証。
+|使用関数 a|なし
+|===
+
+.ecam_at() のフロー図
+image::flow_port_vxworks_port_vxworks-ecam_at.drawio.svg[ecam_at() のフロー図]
+
+.ecam_at() の関係図
+image::call_port_vxworks_port_vxworks-ecam_at.drawio.svg[ecam_at() の関係図]
+
 [[port_vxworks_port_vxworks-ecam]]
 === `ecam()`
 [cols="1,5",options="autowidth"]
 .ecam()
 |===
-|関数名 |`ecam`(`port/vxworks/port_vxworks.c` 77 行目)
+|関数名 |`ecam`(`port/vxworks/port_vxworks.c` 86 行目)
 |宣言 |`static volatile uint32_t *ecam(unsigned port, uint32_t off)`
 |目的 a|`bfm_port_pci_read32()` と `bfm_port_pci_write32()` が、ポートの装置の設定空間を OS を通さずに直接読み書きするために、読み書きする先のアドレスを求める下請け。
-|処理内容 a|ポート `port` の設定空間の `off` に対応する ECAM のアドレスを計算して返す(`g_bfm_pcie_ecam_base` + bus << 20 + dev << 15 + func << 12 + (`off` の下位 12 ビットを 4 の倍数に揃えたもの)。bus / dev / func は `g_bfm_pci_bus[port]` / `g_bfm_pci_dev[port]` / `g_bfm_pci_func[port]`)。
+|処理内容 a|ポート `port` の bus / dev / func(`g_bfm_pci_bus[port]` / `g_bfm_pci_dev[port]` / `g_bfm_pci_func[port]`)で `ecam_at()` を呼んで返す。
 |引数 a|
 [cols="2,1,4"]
 !===
@@ -8940,9 +9453,8 @@ image::call_port_vxworks_port_vxworks-bfm_port_fini.drawio.svg[bfm_port_fini() �
 !===
 |戻り値 a|ECAM の 32bit の位置(論理 = 物理のポインタ)。
 |前提条件 a|`g_bfm_pcie_ecam_base`・`g_bfm_pci_bus[port]` / `g_bfm_pci_dev[port]` / `g_bfm_pci_func[port]` を設定してあること。ECAM が論理 = 物理で張られていること。
-|注意事項 a|* `off` は `0xffc` で切るので、4KiB を超える位置や 4 の倍数でない位置は丸められる。
-* VxWorks の実機で未検証。
-|使用関数 a|なし
+|注意事項 a|VxWorks の実機で未検証。
+|使用関数 a|* <<port_vxworks_port_vxworks-ecam_at,`ecam_at()`>>
 |===
 
 .ecam() のフロー図
@@ -8956,7 +9468,7 @@ image::call_port_vxworks_port_vxworks-ecam.drawio.svg[ecam() の関係図]
 [cols="1,5",options="autowidth"]
 .bfm_port_pci_read32()
 |===
-|関数名 |`bfm_port_pci_read32`(`port/vxworks/port_vxworks.c` 86 行目)
+|関数名 |`bfm_port_pci_read32`(`port/vxworks/port_vxworks.c` 92 行目)
 |宣言 |`uint32_t bfm_port_pci_read32(unsigned port, uint32_t off)`
 |目的 a|ライブラリが、ポートの立ち上げで装置の PCIe の設定空間を読むための関数(装置の ID・BAR0 の位置と大きさ・機能の一覧・リセットの済み具合などを調べる)。VxWorks 版は OS の PCI の関数を使わず、ECAM を直接読む。
 |処理内容 a|ポート `port` の PCIe の設定空間の `off` から 32bit を ECAM で直接読む。設定空間はリトルエンディアンなので、x86 ではそのまま返す。
@@ -8984,7 +9496,7 @@ image::call_port_vxworks_port_vxworks-bfm_port_pci_read32.drawio.svg[bfm_port_pc
 [cols="1,5",options="autowidth"]
 .bfm_port_pci_write32()
 |===
-|関数名 |`bfm_port_pci_write32`(`port/vxworks/port_vxworks.c` 91 行目)
+|関数名 |`bfm_port_pci_write32`(`port/vxworks/port_vxworks.c` 97 行目)
 |宣言 |`void bfm_port_pci_write32(unsigned port, uint32_t off, uint32_t val)`
 |目的 a|ライブラリが、ポートの立ち上げと停止で装置の PCIe の設定空間へ書くための関数(Bus Master の入り切り・BAR0 の大きさを測る・装置のリセットなど)。VxWorks 版は OS の PCI の関数を使わず、ECAM へ直接書く。
 |処理内容 a|ポート `port` の PCIe の設定空間の `off` へ 32bit を ECAM で直接書き(設定空間はリトルエンディアンなので、x86 ではそのまま書く)、`bfm_mb()` で順序を保つ。
@@ -9009,12 +9521,158 @@ image::flow_port_vxworks_port_vxworks-bfm_port_pci_write32.drawio.svg[bfm_port_p
 .bfm_port_pci_write32() の関係図
 image::call_port_vxworks_port_vxworks-bfm_port_pci_write32.drawio.svg[bfm_port_pci_write32() の関係図]
 
+[[port_vxworks_port_vxworks-bfm_port_pci_hw_read32]]
+=== `bfm_port_pci_hw_read32()`
+[cols="1,5",options="autowidth"]
+.bfm_port_pci_hw_read32()
+|===
+|関数名 |`bfm_port_pci_hw_read32`(`port/vxworks/port_vxworks.c` 104 行目)
+|宣言 |`uint32_t bfm_port_pci_hw_read32(unsigned port, uint32_t off)`
+|目的 a|カードのリセットの前後に、ポートの装置そのものの設定空間を読むための関数(OS が設定空間を仮想化する環境のための区別)。VxWorks 版は ECAM を直接読むので、`bfm_port_pci_read32()` と同じ。
+|処理内容 a|`bfm_port_pci_read32(port, off)` を返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`unsigned` !`port` !ポートの番号
+!`uint32_t` !`off` !設定空間の中の位置(4 の倍数)
+!===
+|戻り値 a|読んだ値。
+|前提条件 a|`bfm_port_pci_read32()` と同じ。
+|注意事項 a|VxWorks の実機で未検証。
+|使用関数 a|* <<port_vxworks_port_vxworks-bfm_port_pci_read32,`bfm_port_pci_read32()`>>
+|===
+
+.bfm_port_pci_hw_read32() のフロー図
+image::flow_port_vxworks_port_vxworks-bfm_port_pci_hw_read32.drawio.svg[bfm_port_pci_hw_read32() のフロー図]
+
+.bfm_port_pci_hw_read32() の関係図
+image::call_port_vxworks_port_vxworks-bfm_port_pci_hw_read32.drawio.svg[bfm_port_pci_hw_read32() の関係図]
+
+[[port_vxworks_port_vxworks-bfm_port_pci_hw_write32]]
+=== `bfm_port_pci_hw_write32()`
+[cols="1,5",options="autowidth"]
+.bfm_port_pci_hw_write32()
+|===
+|関数名 |`bfm_port_pci_hw_write32`(`port/vxworks/port_vxworks.c` 109 行目)
+|宣言 |`void bfm_port_pci_hw_write32(unsigned port, uint32_t off, uint32_t val)`
+|目的 a|カードのリセットで初期値に戻った設定空間を、装置そのものへ書き戻すための関数。VxWorks 版は `bfm_port_pci_write32()` と同じ。
+|処理内容 a|`bfm_port_pci_write32(port, off, val)` を呼ぶ。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`unsigned` !`port` !ポートの番号
+!`uint32_t` !`off` !設定空間の中の位置(4 の倍数)
+!`uint32_t` !`val` !書く値
+!===
+|戻り値 a|なし
+|前提条件 a|`bfm_port_pci_write32()` と同じ。
+|注意事項 a|VxWorks の実機で未検証。
+|使用関数 a|* <<port_vxworks_port_vxworks-bfm_port_pci_write32,`bfm_port_pci_write32()`>>
+|===
+
+.bfm_port_pci_hw_write32() のフロー図
+image::flow_port_vxworks_port_vxworks-bfm_port_pci_hw_write32.drawio.svg[bfm_port_pci_hw_write32() のフロー図]
+
+.bfm_port_pci_hw_write32() の関係図
+image::call_port_vxworks_port_vxworks-bfm_port_pci_hw_write32.drawio.svg[bfm_port_pci_hw_write32() の関係図]
+
+[[port_vxworks_port_vxworks-find_up]]
+=== `find_up()`
+[cols="1,5",options="autowidth"]
+.find_up()
+|===
+|関数名 |`find_up`(`port/vxworks/port_vxworks.c` 120 行目)
+|宣言 |`static uint32_t find_up(unsigned port)`
+|目的 a|カードのリセットでリンクを落とす相手(ポートの装置の上流のポート)を、OS の助けなしに ECAM を見て見つけるための下請け。一度見つけたら覚えておく。
+|処理内容 a|覚えていればそれを返す。なければ、装置のバス(`g_bfm_pci_bus[port]`)より小さい番号のバスの装置を順に見て、header が Type 1(ブリッジ)で secondary bus が装置のバスのものを探し、bus << 16 | dev << 8 | func を覚えて返す。function 0 が無い装置と、多機能でない装置の function 1〜7 は飛ばす。見つからなければ表示して `UP_NONE` を覚えて返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`unsigned` !`port` !ポートの番号
+!===
+|戻り値 a|上流のポートの位置(bus << 16 | dev << 8 | func)。見つからなければ `UP_NONE`。
+|前提条件 a|`g_bfm_pcie_ecam_base` と `g_bfm_pci_bus[port]` を設定してあること。BIOS / BSP がバスの番号を割り当ててあること。
+|注意事項 a|* 結果は `s_up[port]` に覚える(0 = まだ探していない)。
+* VxWorks の実機で未検証。
+|使用関数 a|* <<port_vxworks_port_vxworks-ecam_at,`ecam_at()`>>
+* <<port_vxworks_port_vxworks-bfm_port_log,`bfm_port_log()`>>
+|===
+
+.find_up() のフロー図
+image::flow_port_vxworks_port_vxworks-find_up.drawio.svg[find_up() のフロー図]
+
+.find_up() の関係図
+image::call_port_vxworks_port_vxworks-find_up.drawio.svg[find_up() の関係図]
+
+[[port_vxworks_port_vxworks-bfm_port_up_read32]]
+=== `bfm_port_up_read32()`
+[cols="1,5",options="autowidth"]
+.bfm_port_up_read32()
+|===
+|関数名 |`bfm_port_up_read32`(`port/vxworks/port_vxworks.c` 145 行目)
+|宣言 |`uint32_t bfm_port_up_read32(unsigned port, uint32_t off)`
+|目的 a|カードのリセットで、ポートの装置の上流のポートの設定空間を読むための関数(リンクの制御・状態を見る)。VxWorks 版は ECAM で上流のポートを探して直接読む。
+|処理内容 a|`find_up()` で上流のポートの位置を求め、無ければ 0xffffffff、あれば `ecam_at()` のアドレスから読んで返す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`unsigned` !`port` !ポートの番号
+!`uint32_t` !`off` !上流のポートの設定空間の中の位置(4 の倍数)
+!===
+|戻り値 a|読んだ値。上流のポートが無ければ 0xffffffff。
+|前提条件 a|`find_up()` と同じ。
+|注意事項 a|VxWorks の実機で未検証。
+|使用関数 a|* <<port_vxworks_port_vxworks-find_up,`find_up()`>>
+* <<port_vxworks_port_vxworks-ecam_at,`ecam_at()`>>
+|===
+
+.bfm_port_up_read32() のフロー図
+image::flow_port_vxworks_port_vxworks-bfm_port_up_read32.drawio.svg[bfm_port_up_read32() のフロー図]
+
+.bfm_port_up_read32() の関係図
+image::call_port_vxworks_port_vxworks-bfm_port_up_read32.drawio.svg[bfm_port_up_read32() の関係図]
+
+[[port_vxworks_port_vxworks-bfm_port_up_write32]]
+=== `bfm_port_up_write32()`
+[cols="1,5",options="autowidth"]
+.bfm_port_up_write32()
+|===
+|関数名 |`bfm_port_up_write32`(`port/vxworks/port_vxworks.c` 152 行目)
+|宣言 |`void bfm_port_up_write32(unsigned port, uint32_t off, uint32_t val)`
+|目的 a|カードのリセットで、上流のポートの Link Control(Link Disable)か Bridge Control(Secondary Bus Reset)を書いて PCIe のリンクを落とし・戻すための関数。VxWorks 版は ECAM へ直接書く。
+|処理内容 a|`find_up()` で上流のポートの位置を求め、無ければ何もしない。あれば `ecam_at()` のアドレスへ書き、`bfm_mb()` で書き込みを出す。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`unsigned` !`port` !ポートの番号
+!`uint32_t` !`off` !上流のポートの設定空間の中の位置(4 の倍数)
+!`uint32_t` !`val` !書く値
+!===
+|戻り値 a|なし
+|前提条件 a|`find_up()` と同じ。
+|注意事項 a|VxWorks の実機で未検証。
+|使用関数 a|* <<port_vxworks_port_vxworks-find_up,`find_up()`>>
+* <<port_vxworks_port_vxworks-ecam_at,`ecam_at()`>>
+* `bfm_mb()`(マクロ)
+|===
+
+.bfm_port_up_write32() のフロー図
+image::flow_port_vxworks_port_vxworks-bfm_port_up_write32.drawio.svg[bfm_port_up_write32() のフロー図]
+
+.bfm_port_up_write32() の関係図
+image::call_port_vxworks_port_vxworks-bfm_port_up_write32.drawio.svg[bfm_port_up_write32() の関係図]
+
 [[port_vxworks_port_vxworks-bfm_port_bar0_map]]
 === `bfm_port_bar0_map()`
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_map()
 |===
-|関数名 |`bfm_port_bar0_map`(`port/vxworks/port_vxworks.c` 99 行目)
+|関数名 |`bfm_port_bar0_map`(`port/vxworks/port_vxworks.c` 162 行目)
 |宣言 |`volatile uint8_t *bfm_port_bar0_map(unsigned port, uint64_t bar_phys, uint64_t bar_size)`
 |目的 a|ライブラリが、ポートの立ち上げで PCIe の設定を済ませた後に、装置のレジスタ(BAR0)を CPU から触れるようにするために呼ぶ関数。VxWorks 版は論理 = 物理で、BSP がキャッシュしない属性で張っておく前提なので、設定空間から読んだ BAR0 の物理アドレスをそのまま先頭として返す。
 |処理内容 a|ポート `port` の BAR0 の先頭を返す。論理 = 物理なので、設定空間から読んだ BAR0 の値をそのままポインタにする。`bar_size` は `bfm_port_bar0_wc()` の範囲の検査のために静的変数 `s_bar_size[port]` に覚えておく。
@@ -9043,7 +9701,7 @@ image::call_port_vxworks_port_vxworks-bfm_port_bar0_map.drawio.svg[bfm_port_bar0
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_unmap()
 |===
-|関数名 |`bfm_port_bar0_unmap`(`port/vxworks/port_vxworks.c` 105 行目)
+|関数名 |`bfm_port_bar0_unmap`(`port/vxworks/port_vxworks.c` 168 行目)
 |宣言 |`void bfm_port_bar0_unmap(unsigned port)`
 |目的 a|ライブラリが、ポートを止めるときに Bus Master を落とした後で、`bfm_port_bar0_map()` で得た BAR0 の窓を外すために呼ぶ関数。VxWorks 版は何も張っていないので、`bfm_port_bar0_wc()` の範囲の検査に使う大きさを忘れるだけ。
 |処理内容 a|ポート `port` の BAR0 の窓を外す。この版は張っていないので、覚えておいた BAR0 の大きさ `s_bar_size[port]` を 0 に戻すだけ。
@@ -9071,7 +9729,7 @@ image::call_port_vxworks_port_vxworks-bfm_port_bar0_unmap.drawio.svg[bfm_port_ba
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_wc()
 |===
-|関数名 |`bfm_port_bar0_wc`(`port/vxworks/port_vxworks.c` 110 行目)
+|関数名 |`bfm_port_bar0_wc`(`port/vxworks/port_vxworks.c` 173 行目)
 |宣言 |`volatile uint8_t *bfm_port_bar0_wc(unsigned port, uint64_t off, uint64_t len)`
 |目的 a|ライブラリが、接続ごとの UAR(ドアベルと BlueFlame の窓)のページを write-combining で触れるようにするために、接続の枠を用意するときに呼ぶ関数。返ったアドレスへ BlueFlame で WQE を書き込めるようになり、NULL なら BlueFlame を使わずに動かす。VxWorks 版は張り替えをせず、BSP が BAR0 全体を write-combining で張った別名を用意しておけばその中のアドレスを返す。
 |処理内容 a|ポート `port` の BAR0 の `[off, off+len)` を write-combining で触れるアドレスを返す。範囲が BAR0(`bfm_port_bar0_map()` で覚えた大きさ `s_bar_size[port]`)の中にあることを確かめ、BSP が用意した BAR0 全体の WC の別名 `g_bfm_bar0_wc_va[port]` に `off` を足す。
@@ -9102,7 +9760,7 @@ image::call_port_vxworks_port_vxworks-bfm_port_bar0_wc.drawio.svg[bfm_port_bar0_
 [cols="1,5",options="autowidth"]
 .bfm_port_bar0_wc_release()
 |===
-|関数名 |`bfm_port_bar0_wc_release`(`port/vxworks/port_vxworks.c` 121 行目)
+|関数名 |`bfm_port_bar0_wc_release`(`port/vxworks/port_vxworks.c` 184 行目)
 |宣言 |`void bfm_port_bar0_wc_release(unsigned port, uint64_t off, uint64_t len)`
 |目的 a|ライブラリが、ポートを止めるときに接続を畳んだ後で、`bfm_port_bar0_wc()` で得た write-combining のページを返すために呼ぶ関数。VxWorks 版は BSP が用意した別名を使うだけで張り替えていないので、決まりを満たすためだけにある。
 |処理内容 a|`bfm_port_bar0_wc()` で得た WC の範囲を返す。この版は張り替えていないので何もしない。
@@ -9532,7 +10190,7 @@ image::call_test_bfm_test-usage.drawio.svg[usage() の関係図]
 [cols="1,5",options="autowidth"]
 .idle()
 |===
-|関数名 |`idle`(`test/bfm_test.c` 140 行目)
+|関数名 |`idle`(`test/bfm_test.c` 144 行目)
 |宣言 |`static void idle(void)`
 |目的 a|待ちを返す bfmem の関数(`bfm_run()` など)を呼び直す前の合間に、CPU を回しっぱなしにしないように少し休むための関数。
 |処理内容 a|待ちを返す関数(`BFM_INPROGRESS`)を呼び直すまでの合間。50us 眠る。
@@ -9554,7 +10212,7 @@ image::call_test_bfm_test-idle.drawio.svg[idle() の関係図]
 [cols="1,5",options="autowidth"]
 .do_shutdown()
 |===
-|関数名 |`do_shutdown`(`test/bfm_test.c` 145 行目)
+|関数名 |`do_shutdown`(`test/bfm_test.c` 149 行目)
 |宣言 |`static void do_shutdown(void)`
 |目的 a|試験の最後(と race の立ち上げ直しの段)に、bfmem を止め終わるまで待つための関数。`bfm_shutdown()` は待たずに戻るので、止め終わるまで呼び続ける役を受け持つ。
 |処理内容 a|`bfm_shutdown()` を `BFM_INPROGRESS` でなくなるまで呼び続ける(合間に `idle()`)。
@@ -9577,7 +10235,7 @@ image::call_test_bfm_test-do_shutdown.drawio.svg[do_shutdown() の関係図]
 [cols="1,5",options="autowidth"]
 .up_worker()
 |===
-|関数名 |`up_worker`(`test/bfm_test.c` 162 行目)
+|関数名 |`up_worker`(`test/bfm_test.c` 166 行目)
 |宣言 |`static void *up_worker(void *p)`
 |目的 a|`run_up()` が、複数のスレッドから `bfm_run()` を同時に呼んで接続を張るために作るスレッド 1 本の本体。複数のコアから代表 API を呼んでも正しく立ち上がることを確かめるのに使う。
 |処理内容 a|`run_up()` が作るスレッド 1 本。CPU に固定し、誰かが `BFM_OK` か失敗を見る(`g_up_done`)か、止める合図(`g_stop`)が来るまで `bfm_run()` を呼び続ける(合間に `idle()`。`BFM_E_STATE` なら `reconnect_down()` で切れた接続の張り直しを頼む)。呼んだ回数と最後の戻り値を `a` に残す。
@@ -9613,7 +10271,7 @@ image::call_test_bfm_test-up_worker.drawio.svg[up_worker() の関係図]
 [cols="1,5",options="autowidth"]
 .run_up()
 |===
-|関数名 |`run_up`(`test/bfm_test.c` 184 行目)
+|関数名 |`run_up`(`test/bfm_test.c` 188 行目)
 |宣言 |`static int run_up(uint32_t nthreads)`
 |目的 a|run・serve・bench・race・wpost・perf の始めに、全部の接続を使える状態にするための関数。`-t` で決めた本数のスレッドから `bfm_run()` を同時に呼び、代表 API を複数のコアから呼んでも接続が張れることを確かめ、かかった時間を示す。
 |処理内容 a|全部の接続が使えるようになるまで、`nthreads` 本のスレッド(`up_worker()`)から `bfm_run()` を同時に呼ぶ。終わったら、スレッドごとの呼んだ回数・かかった時間・結果を表示する。
@@ -9649,7 +10307,7 @@ image::call_test_bfm_test-run_up.drawio.svg[run_up() の関係図]
 [cols="1,5",options="autowidth"]
 .conn_total()
 |===
-|関数名 |`conn_total`(`test/bfm_test.c` 211 行目)
+|関数名 |`conn_total`(`test/bfm_test.c` 215 行目)
 |宣言 |`static unsigned conn_total(void)`
 |目的 a|`main()` が、これから使う接続の数を最初に表示するための関数。
 |処理内容 a|使う接続の数(全部のポートの `g_bfm_port_conn[]` の和)を返す。
@@ -9671,7 +10329,7 @@ image::call_test_bfm_test-conn_total.drawio.svg[conn_total() の関係図]
 [cols="1,5",options="autowidth"]
 .reconnect_down()
 |===
-|関数名 |`reconnect_down`(`test/bfm_test.c` 219 行目)
+|関数名 |`reconnect_down`(`test/bfm_test.c` 223 行目)
 |宣言 |`static void reconnect_down(void)`
 |目的 a|試験の待ちの間に、エラーになった接続や相手が切った接続を張り直させるための関数。相手が張り直しを始めたときなどに、こちらの側も追従させるのに使う。
 |処理内容 a|全部のポートの使う接続のうち、状態が `BFM_ST_DOWN`(エラーになった・相手が切った)のものを `bfm_reconnect()` で張り直すよう頼む。
@@ -9694,7 +10352,7 @@ image::call_test_bfm_test-reconnect_down.drawio.svg[reconnect_down() の関係�
 [cols="1,5",options="autowidth"]
 .fill_area()
 |===
-|関数名 |`fill_area`(`test/bfm_test.c` 230 行目)
+|関数名 |`fill_area`(`test/bfm_test.c` 234 行目)
 |宣言 |`static void fill_area(void)`
 |目的 a|相手が検査で読み書きする自分の公開メモリを、取り決めどおりの初期の中身にしておくための関数。相手が手元に持つ模型と比べられるように、`main()` が相手の接続の前に 1 回呼ぶ。
 |処理内容 a|自分の公開メモリ(`g_bfm_mr_base`)のデータ領域 64KiB を `pattern()` の値で埋め、その後ろの atomic 語 512 個(4KiB)と、足並みをそろえる語(`SYNC_OFF` の 8 バイト)を 0 にする。
@@ -9716,7 +10374,7 @@ image::call_test_bfm_test-fill_area.drawio.svg[fill_area() の関係図]
 [cols="1,5",options="autowidth"]
 .dump_area()
 |===
-|関数名 |`dump_area`(`test/bfm_test.c` 238 行目)
+|関数名 |`dump_area`(`test/bfm_test.c` 242 行目)
 |宣言 |`static void dump_area(const char *who, const char *why)`
 |目的 a|run の最後と serve(SIGQUIT の要求と終わり)で、自分の公開メモリの中身を表示し、相手が表示する模型の hash と見比べて、相手の書き込みが正しく届いたかを確かめるための関数。
 |処理内容 a|自分の公開メモリのデータ領域 64KiB の hash と、atomic 語 0〜2 の中身(8 バイトの並びとリトルエンディアンとしての値)を表示する。
@@ -9745,7 +10403,7 @@ image::call_test_bfm_test-dump_area.drawio.svg[dump_area() の関係図]
 [cols="1,5",options="autowidth"]
 .sync_peer()
 |===
-|関数名 |`sync_peer`(`test/bfm_test.c` 254 行目)
+|関数名 |`sync_peer`(`test/bfm_test.c` 258 行目)
 |宣言 |`static int sync_peer(bfm_conn_t *c, uint64_t stage, const char *what)`
 |目的 a|両方のノードが同時に動く試験で、相手が同じ区切りまで来るのを待ち、次の段階を同時に始めるための関数。`sync_at()` が、使える接続を選んでから呼ぶ。
 |処理内容 a|相手と足並みをそろえる。相手の公開メモリの `SYNC_OFF` へ `stage` を書き、自分の公開メモリの `SYNC_OFF` の語が `stage` 以上になる(相手もそこまで来た)まで、`bfm_run()` と `reconnect_down()` を 200us おきに回して待つ。
@@ -9781,7 +10439,7 @@ image::call_test_bfm_test-sync_peer.drawio.svg[sync_peer() の関係図]
 [cols="1,5",options="autowidth"]
 .run_serve()
 |===
-|関数名 |`run_serve`(`test/bfm_test.c` 276 行目)
+|関数名 |`run_serve`(`test/bfm_test.c` 280 行目)
 |宣言 |`static int run_serve(uint32_t nthreads)`
 |目的 a|serve(bench の相手になる側)の本体。接続を張って保ち続け、相手がこちらの公開メモリに対して試験できるようにするための関数。
 |処理内容 a|serve の本体。`run_up()` で接続を張り、その後は止める合図(`g_stop`)が来るまで `bfm_run()` と `reconnect_down()` を呼び続けて接続を保つ(切れた接続は張り直す)。`g_dump`(SIGQUIT)が立てば自分の公開メモリの hash を表示する。終わるときにも hash を表示する。
@@ -9814,7 +10472,7 @@ image::call_test_bfm_test-run_serve.drawio.svg[run_serve() の関係図]
 [cols="1,5",options="autowidth"]
 .check()
 |===
-|関数名 |`check`(`test/bfm_test.c` 296 行目)
+|関数名 |`check`(`test/bfm_test.c` 300 行目)
 |宣言 |`static void check(const char *what, int ok)`
 |目的 a|試験の 1 つの検査の合否を表示し、NG の数を数えるための関数。最後に NG の数で試験全体の結果を決めるのに使う。
 |処理内容 a|検査の名前と結果(OK / NG)を表示し、NG なら `g_ng` を 1 増やす。
@@ -9842,7 +10500,7 @@ image::call_test_bfm_test-check.drawio.svg[check() の関係図]
 [cols="1,5",options="autowidth"]
 .cmp_u32()
 |===
-|関数名 |`cmp_u32`(`test/bfm_test.c` 302 行目)
+|関数名 |`cmp_u32`(`test/bfm_test.c` 306 行目)
 |宣言 |`static int cmp_u32(const void *a, const void *b)`
 |目的 a|`lat()` が、測った遅延を並べ替えて中央値や p99 を求めるときに `qsort()` へ渡す比較関数。
 |処理内容 a|`qsort()` の比較関数。2 つの `uint32_t` を比べる。
@@ -9870,7 +10528,7 @@ image::call_test_bfm_test-cmp_u32.drawio.svg[cmp_u32() の関係図]
 [cols="1,5",options="autowidth"]
 .op_write8()
 |===
-|関数名 |`op_write8`(`test/bfm_test.c` 312 行目)
+|関数名 |`op_write8`(`test/bfm_test.c` 316 行目)
 |宣言 |`static int op_write8(bfm_conn_t *c, uint32_t i)`
 |目的 a|run の一通りの検査の [6] で、`lat()` に渡して 8 バイトの `bfm_write()` の遅延を測るための操作。
 |処理内容 a|相手のデータ領域の `(i & 63) * 64` へ `g_src` の先頭 8 バイトを `bfm_write()` で書く(遅延の測定用)。
@@ -9898,7 +10556,7 @@ image::call_test_bfm_test-op_write8.drawio.svg[op_write8() の関係図]
 [cols="1,5",options="autowidth"]
 .op_write64()
 |===
-|関数名 |`op_write64`(`test/bfm_test.c` 313 行目)
+|関数名 |`op_write64`(`test/bfm_test.c` 317 行目)
 |宣言 |`static int op_write64(bfm_conn_t *c, uint32_t i)`
 |目的 a|run の一通りの検査の [6] で、`lat()` に渡して 64 バイトの `bfm_write()` の遅延を測るための操作。
 |処理内容 a|相手のデータ領域の `(i & 63) * 64` へ `g_src` の先頭 64 バイトを `bfm_write()` で書く(遅延の測定用)。
@@ -9926,7 +10584,7 @@ image::call_test_bfm_test-op_write64.drawio.svg[op_write64() の関係図]
 [cols="1,5",options="autowidth"]
 .op_read8()
 |===
-|関数名 |`op_read8`(`test/bfm_test.c` 314 行目)
+|関数名 |`op_read8`(`test/bfm_test.c` 318 行目)
 |宣言 |`static int op_read8(bfm_conn_t *c, uint32_t i)`
 |目的 a|run の一通りの検査の [6] で、`lat()` に渡して 8 バイトの `bfm_read()` の遅延を測るための操作。
 |処理内容 a|相手のデータ領域の `(i & 63) * 64` から 8 バイトを `bfm_read()` で手元の一時領域へ読む(遅延の測定用)。
@@ -9954,7 +10612,7 @@ image::call_test_bfm_test-op_read8.drawio.svg[op_read8() の関係図]
 [cols="1,5",options="autowidth"]
 .op_read64()
 |===
-|関数名 |`op_read64`(`test/bfm_test.c` 315 行目)
+|関数名 |`op_read64`(`test/bfm_test.c` 319 行目)
 |宣言 |`static int op_read64(bfm_conn_t *c, uint32_t i)`
 |目的 a|run の一通りの検査の [6] で、`lat()` に渡して 64 バイトの `bfm_read()` の遅延を測るための操作。
 |処理内容 a|相手のデータ領域の `(i & 63) * 64` から 64 バイトを `bfm_read()` で手元の一時領域へ読む(遅延の測定用)。
@@ -9982,7 +10640,7 @@ image::call_test_bfm_test-op_read64.drawio.svg[op_read64() の関係図]
 [cols="1,5",options="autowidth"]
 .op_faa()
 |===
-|関数名 |`op_faa`(`test/bfm_test.c` 316 行目)
+|関数名 |`op_faa`(`test/bfm_test.c` 320 行目)
 |宣言 |`static int op_faa(bfm_conn_t *c, uint32_t i)`
 |目的 a|run の一通りの検査の [6] で、`lat()` に渡して 8 バイトの `bfm_faa()` の遅延を測るための操作。
 |処理内容 a|相手の atomic 語 100〜163 のうち `100 + (i & 63)` 番めへ `bfm_faa()` で 1 を足す(遅延の測定用)。
@@ -10010,7 +10668,7 @@ image::call_test_bfm_test-op_faa.drawio.svg[op_faa() の関係図]
 [cols="1,5",options="autowidth"]
 .op_cas()
 |===
-|関数名 |`op_cas`(`test/bfm_test.c` 317 行目)
+|関数名 |`op_cas`(`test/bfm_test.c` 321 行目)
 |宣言 |`static int op_cas(bfm_conn_t *c, uint32_t i)`
 |目的 a|run の一通りの検査の [6] で、`lat()` に渡して 8 バイトの `bfm_cas()` の遅延を測るための操作。
 |処理内容 a|相手の atomic 語 200〜263 のうち `200 + (i & 63)` 番めへ `bfm_cas()` で比較値 1・置き換え値 2 の CAS を出す(遅延の測定用)。
@@ -10038,7 +10696,7 @@ image::call_test_bfm_test-op_cas.drawio.svg[op_cas() の関係図]
 [cols="1,5",options="autowidth"]
 .op_faa32()
 |===
-|関数名 |`op_faa32`(`test/bfm_test.c` 318 行目)
+|関数名 |`op_faa32`(`test/bfm_test.c` 322 行目)
 |宣言 |`static int op_faa32(bfm_conn_t *c, uint32_t i)`
 |目的 a|run の一通りの検査の [6] で、`lat()` に渡して 4 バイトの `bfm_faa32()` の遅延を測るための操作。
 |処理内容 a|相手の公開メモリの `ATOM_OFF + 8 * 300` からの 4 バイトの語 64 個のうち `i & 63` 番めへ `bfm_faa32()` で 1 を足す(遅延の測定用)。
@@ -10066,7 +10724,7 @@ image::call_test_bfm_test-op_faa32.drawio.svg[op_faa32() の関係図]
 [cols="1,5",options="autowidth"]
 .op_cas32()
 |===
-|関数名 |`op_cas32`(`test/bfm_test.c` 319 行目)
+|関数名 |`op_cas32`(`test/bfm_test.c` 323 行目)
 |宣言 |`static int op_cas32(bfm_conn_t *c, uint32_t i)`
 |目的 a|run の一通りの検査の [6] で、`lat()` に渡して 4 バイトの `bfm_cas32()` の遅延を測るための操作。
 |処理内容 a|相手の公開メモリの `ATOM_OFF + 8 * 400` からの 4 バイトの語 64 個のうち `i & 63` 番めへ `bfm_cas32()` で比較値 1・置き換え値 2 の CAS を出す(遅延の測定用)。
@@ -10094,7 +10752,7 @@ image::call_test_bfm_test-op_cas32.drawio.svg[op_cas32() の関係図]
 [cols="1,5",options="autowidth"]
 .lat()
 |===
-|関数名 |`lat`(`test/bfm_test.c` 321 行目)
+|関数名 |`lat`(`test/bfm_test.c` 325 行目)
 |宣言 |`static void lat(bfm_conn_t *c, const char *name, op_fn fn, uint32_t n)`
 |目的 a|run の一通りの検査の [6] で、1 回ずつ完了を待つ転送の関数(write・read・atomic)の遅延の分布を測って表示するための関数。操作は `op_write8()` などの関数で渡す。
 |処理内容 a|操作 fn を 1 個ずつ完了まで待つ形で n 回流し、1 回ごとの遅延の中央値・平均・最小・p99・p99.9 を表示する。先に `n / 10 + 100` 回を暖機として流す。
@@ -10136,7 +10794,7 @@ image::call_test_bfm_test-lat.drawio.svg[lat() の関係図]
 [cols="1,5",options="autowidth"]
 .run_checks()
 |===
-|関数名 |`run_checks`(`test/bfm_test.c` 347 行目)
+|関数名 |`run_checks`(`test/bfm_test.c` 351 行目)
 |宣言 |`static int run_checks(bfm_conn_t *c, uint32_t iters)`
 |目的 a|run で、相手の公開メモリへの write・read・atomic・T10-DIF・多重度つきの転送が正しく動くことを、接続 1 本で一通り確かめるための関数。あわせて遅延と速さも測る。`-P`(速さだけを測る)と `-q`(こちらから転送しない)のときは呼ばれない。
 |処理内容 a|接続 c で相手の公開メモリへ一通りの操作をして、手元に持つ相手のデータ領域の模型と突き合わせ、結果を表示する(相手も同時に、こちらの公開メモリへ同じことをしている)。次の検査を行う。
@@ -10201,7 +10859,7 @@ image::call_test_bfm_test-run_checks.drawio.svg[run_checks() の関係図]
 [cols="1,5",options="autowidth"]
 .run_async()
 |===
-|関数名 |`run_async`(`test/bfm_test.c` 516 行目)
+|関数名 |`run_async`(`test/bfm_test.c` 520 行目)
 |宣言 |`static void run_async(bfm_conn_t *c)`
 |目的 a|run の一通りの検査の [9] で、多重度つきの転送の関数(`bfm_write_async()` などと `bfm_test()`・`bfm_wait()`・`bfm_check()`)が正しい結果と完了を返すことを確かめるための関数。
 |処理内容 a|[9] 多重度つきの write / read / atomic(`bfm_write_async()` / `bfm_read_async()` / `bfm_faa_async()` / `bfm_cas_async()` / `bfm_faa32_async()` / `bfm_cas32_async()` / `bfm_test()` / `bfm_wait()` / `bfm_check()`)を確かめる。相手の公開メモリの `ASYNC_OFF`(2MiB)から `ASYNC_N`(200)x 4KiB を使い、相手の中身を手元の模型 `g_amodel` にも持って突き合わせる。
@@ -10258,7 +10916,7 @@ image::call_test_bfm_test-run_async.drawio.svg[run_async() の関係図]
 [cols="1,5",options="autowidth"]
 .reconnect_wait()
 |===
-|関数名 |`reconnect_wait`(`test/bfm_test.c` 620 行目)
+|関数名 |`reconnect_wait`(`test/bfm_test.c` 624 行目)
 |宣言 |`static bfm_conn_t *reconnect_wait(unsigned port, unsigned i)`
 |目的 a|わざと接続を壊す試験([7] の `run_oob()` と [10] の `run_silent()`)で、壊した接続を張り直し、使えるようになった接続を手に入れて次の確かめに進むための関数。
 |処理内容 a|ポート `port` の接続 `i` を張り直して、使えるまで待つ(相手も張り直す)。接続がまだ `BFM_ST_UP` のまま `bfm_conn()` が NULL を返す間(エラーになった接続が `bfm_run()` で K_DOWN へ移るまで)を 100 回まで回してから `bfm_reconnect()` を呼び、`bfm_conn()` が接続を返すまで 30 秒まで待つ。
@@ -10291,7 +10949,7 @@ image::call_test_bfm_test-reconnect_wait.drawio.svg[reconnect_wait() の関係�
 [cols="1,5",options="autowidth"]
 .run_oob()
 |===
-|関数名 |`run_oob`(`test/bfm_test.c` 638 行目)
+|関数名 |`run_oob`(`test/bfm_test.c` 642 行目)
 |宣言 |`static void run_oob(bfm_conn_t *c, unsigned port, unsigned i)`
 |目的 a|run の `-x` で行う [7] の試験。公開メモリの範囲の外への転送が相手の NIC に断られて接続がエラーになること、エラーや時間切れの後に `bfm_reconnect()` で張り直して再び使えることを確かめるための関数。
 |処理内容 a|[7] 公開メモリの範囲の外を読み、相手の NIC が断る(`BFM_E_REMOTE`。相手の MKey が範囲を持っていること)ことを確かめる。続けて、断られた接続が `BFM_ST_DOWN` になること、`bfm_reconnect()` で張り直した接続で読めることを確かめる。張り直せたら、さらに次を確かめる。
@@ -10341,7 +10999,7 @@ image::call_test_bfm_test-run_oob.drawio.svg[run_oob() の関係図]
 [cols="1,5",options="autowidth"]
 .crc16_bitwise()
 |===
-|関数名 |`crc16_bitwise`(`test/bfm_test.c` 726 行目)
+|関数名 |`crc16_bitwise`(`test/bfm_test.c` 730 行目)
 |宣言 |`static uint16_t crc16_bitwise(const uint8_t *p, uint32_t n)`
 |目的 a|T10-DIF の試験で、ライブラリの CRC16 の計算とは独立に正しい guard の値を作るための関数。[8] の期待値づくり、perf の DIF のデータづくり、crc の照合に使う。
 |処理内容 a|CRC16(T10-DIF、多項式 0x8BB7、初期値 0)をビットごとに計算する。ライブラリの表引き(`crc16()`)とは別の書き方で期待値を作るため。
@@ -10369,7 +11027,7 @@ image::call_test_bfm_test-crc16_bitwise.drawio.svg[crc16_bitwise() の関係図]
 [cols="1,5",options="autowidth"]
 .dif_make()
 |===
-|関数名 |`dif_make`(`test/bfm_test.c` 738 行目)
+|関数名 |`dif_make`(`test/bfm_test.c` 742 行目)
 |宣言 |`static void dif_make(const uint8_t *plain, uint8_t *out, uint16_t app, uint32_t ref)`
 |目的 a|run の [8] T10-DIF の試験で、ライブラリを通さずに PI つきの正しいデータを作り、ライブラリが書いた・読んだ結果と比べる期待値にするための関数。
 |処理内容 a|`plain`(512 バイトおきの `DIF_N` ブロック)から、PI つき(520 バイトおき)の期待値を `out` に作る。guard は `crc16_bitwise()`、app tag は `app`、ref tag は `ref + ブロックの番号`(どれもビッグエンディアン)。
@@ -10400,7 +11058,7 @@ image::call_test_bfm_test-dif_make.drawio.svg[dif_make() の関係図]
 [cols="1,5",options="autowidth"]
 .dif_what()
 |===
-|関数名 |`dif_what`(`test/bfm_test.c` 751 行目)
+|関数名 |`dif_what`(`test/bfm_test.c` 755 行目)
 |宣言 |`static const char *dif_what(uint8_t w)`
 |目的 a|T10-DIF の試験で、検出された誤りの種類を、結果の表示に出せる名前にするための関数。
 |処理内容 a|誤りの種類(`BFM_DIF_CHK_*`)を表示用の名前(guard / app / ref)にする。
@@ -10427,7 +11085,7 @@ image::call_test_bfm_test-dif_what.drawio.svg[dif_what() の関係図]
 [cols="1,5",options="autowidth"]
 .dif_expect_err()
 |===
-|関数名 |`dif_expect_err`(`test/bfm_test.c` 757 行目)
+|関数名 |`dif_expect_err`(`test/bfm_test.c` 761 行目)
 |宣言 |`static void dif_expect_err(const char *name, int rc, const bfm_dif_err_t *e, uint32_t block, uint8_t what)`
 |目的 a|run の [8] T10-DIF の試験で、わざと壊したデータに対して、ライブラリが正しい位置と種類の誤りを報告することを確かめるための関数。
 |処理内容 a|DIF の操作が期待どおりの誤り(`BFM_E_DIF`、ブロック `block`、種類 `what`)を返したかを確かめて、`check()` で表示する。表示には実際の種類・ブロック・あるべき値・実際の値(誤りでなければ戻り値)を添える。
@@ -10461,7 +11119,7 @@ image::call_test_bfm_test-dif_expect_err.drawio.svg[dif_expect_err() の関係�
 [cols="1,5",options="autowidth"]
 .dif_tests()
 |===
-|関数名 |`dif_tests`(`test/bfm_test.c` 769 行目)
+|関数名 |`dif_tests`(`test/bfm_test.c` 773 行目)
 |宣言 |`static void dif_tests(bfm_conn_t *c, uint8_t mode)`
 |目的 a|run の [8] で、T10-DIF の読み書き(PI の付け足し・検査・入れ替え・取り除き)の各組み合わせが正しいデータを作ることと、誤りを検出できることを、SW と HW のそれぞれで確かめるための関数。`run_dif()` が呼ぶ。
 |処理内容 a|[8] の検査を `mode`(SW か HW)で一通り行う。乱数のデータ `DIF_N` ブロックで、write INSERT(相手の R1 に PI つき)→ read CHECK → read CHECK_SWAP → read CHECK_DELETE、次のデータで write CHECK → write CHECK_SWAP → write CHECK_DELETE(相手の R2 に PI なし)→ read INSERT の 8 通りを、相手のメモリを `bfm_read()` で読んだものや手元の結果と、`dif_make()` で独立に作った期待値と比べる。その後、誤りの検出(write のブロック 200 の guard、期待する ref tag のずれ、相手のメモリのブロック 150 の app tag)と、誤りの後に app tag を検査しなければ読めることを確かめる。
@@ -10500,7 +11158,7 @@ image::call_test_bfm_test-dif_tests.drawio.svg[dif_tests() の関係図]
 [cols="1,5",options="autowidth"]
 .dif_async_tests()
 |===
-|関数名 |`dif_async_tests`(`test/bfm_test.c` 879 行目)
+|関数名 |`dif_async_tests`(`test/bfm_test.c` 883 行目)
 |宣言 |`static void dif_async_tests(bfm_conn_t *c, uint8_t mode)`
 |目的 a|run の [8] で、T10-DIF の転送を起動して後から完了を確かめる使い方(`bfm_dif_write_start()`・`bfm_dif_read_start()`・`bfm_dif_poll()`・`bfm_dif_wait()`)が正しく動くことを確かめるための関数。DIF の転送が動いている間も同じ接続で普通の転送が使えることも確かめる。
 |処理内容 a|[8] 起動と完了確認を分けた使い方を確かめる。
@@ -10542,7 +11200,7 @@ image::call_test_bfm_test-dif_async_tests.drawio.svg[dif_async_tests() の関係
 [cols="1,5",options="autowidth"]
 .dif_tput()
 |===
-|関数名 |`dif_tput`(`test/bfm_test.c` 930 行目)
+|関数名 |`dif_tput`(`test/bfm_test.c` 934 行目)
 |宣言 |`static void dif_tput(bfm_conn_t *c, uint8_t mode, uint8_t op, int is_read, uint32_t reps)`
 |目的 a|run の [8] で、T10-DIF の読み書き(`bfm_dif_write()`・`bfm_dif_read()`)のスループットを測って表示するための関数。`run_dif()` が操作ごとに呼ぶ。
 |処理内容 a|DIF のスループットを測る。`DIF_N` ブロックずつの `bfm_dif_write()` / `bfm_dif_read()`(相手は R1)を `reps` 回続け、データ 512 バイト分で数えた MB/s と 1 回の時間を表示する。
@@ -10578,7 +11236,7 @@ image::call_test_bfm_test-dif_tput.drawio.svg[dif_tput() の関係図]
 [cols="1,5",options="autowidth"]
 .dif_lat()
 |===
-|関数名 |`dif_lat`(`test/bfm_test.c` 958 行目)
+|関数名 |`dif_lat`(`test/bfm_test.c` 962 行目)
 |宣言 |`static void dif_lat(bfm_conn_t *c, uint8_t mode, uint8_t op, int is_read, uint32_t n)`
 |目的 a|run の [8] で、4KiB ずつの T10-DIF の読み書きの遅延を測って表示するための関数。`run_dif()` が操作ごとに呼ぶ。
 |処理内容 a|DIF の操作 `op` を 8 ブロック(4KiB)ずつ 1 回ごとに完了を待つ形で `n` 回流し(先に 100 回を暖機)、遅延の中央値と p99 を表示する。相手のメモリは R1(520 バイトおき)を使う。
@@ -10617,7 +11275,7 @@ image::call_test_bfm_test-dif_lat.drawio.svg[dif_lat() の関係図]
 [cols="1,5",options="autowidth"]
 .run_dif()
 |===
-|関数名 |`run_dif`(`test/bfm_test.c` 988 行目)
+|関数名 |`run_dif`(`test/bfm_test.c` 992 行目)
 |宣言 |`static void run_dif(bfm_conn_t *c, uint32_t iters)`
 |目的 a|run の一通りの検査の [8] として、T10-DIF の検査と測定をまとめて行うための関数。SW で確かめ、装置が署名オフロードを持てば HW でも確かめ、持たなければ HW を正しく断ることを確かめる。
 |処理内容 a|[8] T10-DIF の検査をまとめて行う。SW で `dif_tests()` と `dif_async_tests()`(起動と完了確認を分けた使い方)を行い、オフロードを使えれば HW でも行う。使えなければ、`BFM_DIF_HW` が `BFM_E_NOTSUP` を返すことを確かめる。NG が無ければ、DIF の遅延(write INSERT・write CHECK・read CHECK・read CHECK_DELETE、4KiB)と、同じ 4 通りの DIF_N ブロックずつのスループットを SW と(使えれば)HW で測る。
@@ -10655,7 +11313,7 @@ image::call_test_bfm_test-run_dif.drawio.svg[run_dif() の関係図]
 [cols="1,5",options="autowidth"]
 .mt_reps()
 |===
-|関数名 |`mt_reps`(`test/bfm_test.c` 1071 行目)
+|関数名 |`mt_reps`(`test/bfm_test.c` 1075 行目)
 |宣言 |`static uint32_t mt_reps(unsigned ph, uint32_t n)`
 |目的 a|run の mt で、速さの区間ごとに 1 本のスレッドが打つ回数を決めるための関数。大きな転送の区間が長くかかりすぎないようにする。
 |処理内容 a|mt の速さの区間 `ph` で 1 本のスレッドが打つ回数を求める。`n` を区間の表 `g_mt_ph[ph].div` で割った値(0 なら 1)。
@@ -10683,7 +11341,7 @@ image::call_test_bfm_test-mt_reps.drawio.svg[mt_reps() の関係図]
 [cols="1,5",options="autowidth"]
 .mt_async()
 |===
-|関数名 |`mt_async`(`test/bfm_test.c` 1078 行目)
+|関数名 |`mt_async`(`test/bfm_test.c` 1082 行目)
 |宣言 |`static int mt_async(bfm_conn_t *c, unsigned ph, uint64_t own, uint64_t big, uint32_t reps)`
 |目的 a|run の mt の速さの区間のうち、多重度つきの転送の関数(`bfm_write_async()` など)を使う区間を 1 回分打つための関数。かかった時間は `mt_worker()` が測る。
 |処理内容 a|mt の多重度つきの区間(5〜12)を 1 回分打つ。`reps` 回、区間に応じて次を出す(完了は待たない)。
@@ -10732,7 +11390,7 @@ image::call_test_bfm_test-mt_async.drawio.svg[mt_async() の関係図]
 [cols="1,5",options="autowidth"]
 .mt_fail()
 |===
-|関数名 |`mt_fail`(`test/bfm_test.c` 1120 行目)
+|関数名 |`mt_fail`(`test/bfm_test.c` 1124 行目)
 |宣言 |`static void mt_fail(struct mt_arg *a, const char *what, int rc)`
 |目的 a|run の mt(全部の接続で同時に転送する試験)で、スレッドが見つけた NG を数え、後で表示する理由を覚えておくための関数。
 |処理内容 a|スレッドの NG を数え、最初の NG だけ理由(`what` と `rc` の説明)を `a->why` に残す。
@@ -10762,7 +11420,7 @@ image::call_test_bfm_test-mt_fail.drawio.svg[mt_fail() の関係図]
 [cols="1,5",options="autowidth"]
 .mt_poller()
 |===
-|関数名 |`mt_poller`(`test/bfm_test.c` 1125 行目)
+|関数名 |`mt_poller`(`test/bfm_test.c` 1129 行目)
 |宣言 |`static void *mt_poller(void *p)`
 |目的 a|run の mt で、データ経路の転送と同時に `bfm_run()` を呼び続けるスレッドの本体。`bfm_run()` が並んで動いても、ほかの接続の転送を邪魔しないことを確かめるために置く。
 |処理内容 a|mt の間ずっと `bfm_run()` を 200us ごとに呼び続ける(鍵を取る側を、データ経路と同時に動かす)。`g_mt_poll_stop` が立つと終わる。
@@ -10790,7 +11448,7 @@ image::call_test_bfm_test-mt_poller.drawio.svg[mt_poller() の関係図]
 [cols="1,5",options="autowidth"]
 .mt_check()
 |===
-|関数名 |`mt_check`(`test/bfm_test.c` 1135 行目)
+|関数名 |`mt_check`(`test/bfm_test.c` 1139 行目)
 |宣言 |`static void mt_check(struct mt_arg *a)`
 |目的 a|run の mt で、各スレッドが自分の接続で write と read の読み戻しが正しいことを確かめる [1][2] の検査。
 |処理内容 a|[1][2] スレッドの区画(`MT_OFF` + 番号 × `MT_SPAN`)で、4KiB の write と read での読み戻しを 64 回、8 バイトの write と read での読み戻しを 1000 回行い、違えば NG にする。
@@ -10821,7 +11479,7 @@ image::call_test_bfm_test-mt_check.drawio.svg[mt_check() の関係図]
 [cols="1,5",options="autowidth"]
 .mt_dif()
 |===
-|関数名 |`mt_dif`(`test/bfm_test.c` 1160 行目)
+|関数名 |`mt_dif`(`test/bfm_test.c` 1164 行目)
 |宣言 |`static void mt_dif(struct mt_arg *a)`
 |目的 a|run の mt で、各スレッドが自分の接続で T10-DIF の読み書きを同時に行っても正しく動くことを確かめる [4] の検査。
 |処理内容 a|[4] スレッドの区画 + 8KiB に、`MT_DIF_N` ブロックを T10-DIF(SW)で書いて読み戻す。write INSERT を `bfm_dif_write_start()` で起動して `bfm_dif_poll()` を終わるまで回し、read CHECK_DELETE を `bfm_dif_read_start()` で起動して `bfm_dif_wait()` で待つ。元のデータに戻らなければ NG。
@@ -10854,7 +11512,7 @@ image::call_test_bfm_test-mt_dif.drawio.svg[mt_dif() の関係図]
 [cols="1,5",options="autowidth"]
 .mt_worker()
 |===
-|関数名 |`mt_worker`(`test/bfm_test.c` 1189 行目)
+|関数名 |`mt_worker`(`test/bfm_test.c` 1193 行目)
 |宣言 |`static void *mt_worker(void *p)`
 |目的 a|run の mt で、接続 1 本を受け持つスレッドの本体。複数の接続で同時に転送しても正しく動くことを確かめ、続けて同時に打ったときの速さを測る。
 |処理内容 a|mt のスレッド 1 本。CPU に固定し、全スレッドがそろったところで、自分の接続(`a->c`。`run_mt()` が `bfm_conn()` で取ったもの)が使えなければ NG にする。スレッド 0 が相手の共有の語を 0 にした後、[1][2](`mt_check()`)、[3] 共有の語への FAA を `g_mt_n` 回、[4](`mt_dif()`)を行う。スレッド 0 が共有の語を読んだ後、速さの区間(`g_mt_ph` の 13 個。回数は `mt_reps()`。0〜4 は 1 回ずつ完了を待つ 8 バイトの write / read / FAA と 64KiB の write / read、5〜12 は多重度つきの区間(write / read / FAA / CAS)で `mt_async()` が打つ)ごとに、スレッド 0 が相手と足並みをそろえ(`sync_at()`)、全スレッドで同時に打って時間を測る。相手も同じ区間を同時に打つので、両方向の速さになる。
@@ -10898,7 +11556,7 @@ image::call_test_bfm_test-mt_worker.drawio.svg[mt_worker() の関係図]
 [cols="1,5",options="autowidth"]
 .run_mt()
 |===
-|関数名 |`run_mt`(`test/bfm_test.c` 1245 行目)
+|関数名 |`run_mt`(`test/bfm_test.c` 1249 行目)
 |宣言 |`static int run_mt(uint32_t n)`
 |目的 a|run の mt の本体。張ってある全部の接続で同時に転送し、接続をまたいで互いに邪魔しないこと(データ経路が複数のコアから同時に使えること)を確かめ、合計の速さを測るための関数。
 |処理内容 a|mt の本体。張ってある全部の接続(全部のポートの `g_bfm_port_conn[]` 本)に 1 本ずつ `mt_worker()` のスレッドを付け、`bfm_run()` を回すスレッド(`mt_poller()`)と一緒に動かして、終わるのを待つ。全部の接続が使えたか、[1][2][4] で NG のスレッドが無いか、[3] 共有の語への FAA の合計が `n` × スレッドの数かを確かめる。NG のスレッドが無ければ、速さの区間(`g_mt_ph`)ごとに、1 回の長さが 4KiB 以上の区間(64KiB の write / read、多重度つきの 4KiB の write / read)は合計の帯域(MB/s と Gbit/s)を、それ以外(8 バイトの区間)は合計の速さ(全スレッドの回数 ÷ 最も遅いスレッドの時間)・1 本あたりの速さ・1 回の時間を表示する。回数は区間ごとに `mt_reps()` で求める。相手も同時に、こちらの公開メモリへ同じことをする(両方向)。
@@ -10937,7 +11595,7 @@ image::call_test_bfm_test-run_mt.drawio.svg[run_mt() の関係図]
 [cols="1,5",options="autowidth"]
 .rdtsc()
 |===
-|関数名 |`rdtsc`(`test/bfm_test.c` 1320 行目)
+|関数名 |`rdtsc`(`test/bfm_test.c` 1324 行目)
 |宣言 |`static uint64_t rdtsc(void)`
 |目的 a|bench で、操作 1 回ごとの遅延を細かく、軽く測るために CPU のカウンタを読む関数。
 |処理内容 a|`rdtsc` 命令で CPU のタイムスタンプカウンタを読む。
@@ -10959,7 +11617,7 @@ image::call_test_bfm_test-rdtsc.drawio.svg[rdtsc() の関係図]
 [cols="1,5",options="autowidth"]
 .tsc_calibrate()
 |===
-|関数名 |`tsc_calibrate`(`test/bfm_test.c` 1327 行目)
+|関数名 |`tsc_calibrate`(`test/bfm_test.c` 1331 行目)
 |宣言 |`static void tsc_calibrate(void)`
 |目的 a|bench を始める前に、`rdtsc()` で読んだカウンタの値を時間に直す換算の値を求めるための関数。
 |処理内容 a|200ms 眠る前後の `now_ns()` と `rdtsc()` の差から、1 ナノ秒あたりのカウンタの数 `g_tsc_per_ns` を求める。
@@ -10983,7 +11641,7 @@ image::call_test_bfm_test-tsc_calibrate.drawio.svg[tsc_calibrate() の関係図]
 [cols="1,5",options="autowidth"]
 .bench_one()
 |===
-|関数名 |`bench_one`(`test/bfm_test.c` 1339 行目)
+|関数名 |`bench_one`(`test/bfm_test.c` 1343 行目)
 |宣言 |`static int bench_one(bfm_conn_t *c, int is_read, uint32_t size, uint32_t qd, uint32_t n)`
 |目的 a|bench で、大きさと多重度の組 1 つについて、write か read を流して IOPS・MB/s・平均遅延を測るための関数。`run_bench()` が組ごとに呼ぶ。
 |処理内容 a|write(is_read = 0)か read(is_read = 1)を size バイトで n 回、常に qd 個を出しておく形で流し、IOPS・MB/s・平均遅延を 1 行表示する。1 回ごとに完了通知を求め(完了は出した順に来る)、出してから完了を拾うまでを遅延とする。相手のアドレスは size ずつずらし、相手の公開メモリの中の最大 1024 か所を回る。
@@ -11022,7 +11680,7 @@ image::call_test_bfm_test-bench_one.drawio.svg[bench_one() の関係図]
 [cols="1,5",options="autowidth"]
 .run_bench()
 |===
-|関数名 |`run_bench`(`test/bfm_test.c` 1376 行目)
+|関数名 |`run_bench`(`test/bfm_test.c` 1380 行目)
 |宣言 |`static int run_bench(uint32_t nthreads, uint32_t n)`
 |目的 a|bench の本体。接続 1 本で、write と read の速さが転送の大きさと多重度でどう変わるかを一覧にして測るための関数(相手は serve で接続を保つ)。
 |処理内容 a|bench の本体。`run_up()` で接続を張り、接続 (0, 0) で、write と read のそれぞれについて、大きさ 4・8・32・64・128・256・512・8192・65536・262144 バイトと多重度 1・4・8・16 の組を `bench_one()` で n 回ずつ流す。
@@ -11059,7 +11717,7 @@ image::call_test_bfm_test-run_bench.drawio.svg[run_bench() の関係図]
 [cols="1,5",options="autowidth"]
 .first_port()
 |===
-|関数名 |`first_port`(`test/bfm_test.c` 1407 行目)
+|関数名 |`first_port`(`test/bfm_test.c` 1411 行目)
 |宣言 |`static unsigned first_port(void)`
 |目的 a|足並みをそろえる・一通りの検査・無応答の試験に使う接続を、接続を持つ最初のポートから選ぶための関数。ポート 0 を使わない設定でも動くようにする。
 |処理内容 a|接続を使う最初のポート(`g_bfm_port_conn[]` が 0 でない最も小さい番号)を返す。足並みをそろえる語と一通りの検査は、このポートの接続 0 を使う。
@@ -11081,7 +11739,7 @@ image::call_test_bfm_test-first_port.drawio.svg[first_port() の関係図]
 [cols="1,5",options="autowidth"]
 .sync_at()
 |===
-|関数名 |`sync_at`(`test/bfm_test.c` 1415 行目)
+|関数名 |`sync_at`(`test/bfm_test.c` 1419 行目)
 |宣言 |`static int sync_at(uint64_t stage, const char *what)`
 |目的 a|両方のノードが同時に動く試験(run・race・wpost・perf)で、区切りごとに相手と足並みをそろえるための関数。そろえに使う接続が切れていても、張り直しを待ってやり直す。
 |処理内容 a|相手と足並みをそろえる。接続 (p0, 0)(p0 = `first_port()`)が使えれば `sync_peer()` でそろえ、使えないか `sync_peer()` が失敗したら、`bfm_run()` と `reconnect_down()` を回して 1ms 後にやり直す。60 秒たってもそろわなければあきらめる。
@@ -11117,7 +11775,7 @@ image::call_test_bfm_test-sync_at.drawio.svg[sync_at() の関係図]
 [cols="1,5",options="autowidth"]
 .near_timeout()
 |===
-|関数名 |`near_timeout`(`test/bfm_test.c` 1450 行目)
+|関数名 |`near_timeout`(`test/bfm_test.c` 1454 行目)
 |宣言 |`static int near_timeout(uint64_t ns)`
 |目的 a|run の [10] 無応答の試験で、時間切れの報告が、設定した時間切れまで待ってから返ったか(早すぎず遅すぎないか)を確かめるための関数。
 |処理内容 a|待った時間 `ns` が、非同期の操作の時間切れ(`g_bfm_async_timeout_ms`)から、その 5 倍までの間にあるかを返す([10] で、時間切れまで待ったことを確かめる)。
@@ -11144,7 +11802,7 @@ image::call_test_bfm_test-near_timeout.drawio.svg[near_timeout() の関係図]
 [cols="1,5",options="autowidth"]
 .run_silent()
 |===
-|関数名 |`run_silent`(`test/bfm_test.c` 1458 行目)
+|関数名 |`run_silent`(`test/bfm_test.c` 1462 行目)
 |宣言 |`static int run_silent(void)`
 |目的 a|run の `-z` で行う [10] 無応答の試験。相手が黙って接続を消したときに、ACK や応答を待つ転送が時間切れで返り、接続が使えなくなること、その後張り直して使えることを確かめるための関数。
 |処理内容 a|[10] 無応答の試験(`-z`。両方のノードに付ける)。ポート p0(`first_port()`)の最後の 4 本(`SILENT_N`)の接続を使う。IP の大きいほう(黙る側)は、その 4 本の QP を BYE を送らずに消す(状態を「相手が切った」(`BFM_CS_CLOSED`)にしてから張り直しを頼むと、BYE を送らずに QP と CQ を消し、受け側の確立の最初 = REQ 待ちへ戻る)。消された QP 宛てのパケットは相手の NIC が黙って捨てるので、IP の小さいほう(試す側)には ACK も応答も返らない。試す側はその 4 本で次を確かめ、最後に張り直して読めることを確かめる。
@@ -11197,7 +11855,7 @@ image::call_test_bfm_test-run_silent.drawio.svg[run_silent() の関係図]
 [cols="1,5",options="autowidth"]
 .run_all()
 |===
-|関数名 |`run_all`(`test/bfm_test.c` 1571 行目)
+|関数名 |`run_all`(`test/bfm_test.c` 1575 行目)
 |宣言 |`static int run_all(uint32_t nthreads, uint32_t iters, int oob)`
 |目的 a|run の本体。全部の接続を張り、一通りの検査・全部の接続で同時の転送・範囲の外と張り直し・無応答の試験を、相手と足並みをそろえながら行い、結果をまとめるための関数。
 |処理内容 a|run の本体(両方のノードで同時に動かす)。`run_up()` で全部の接続を張り、接続 (p0, 0) で一通りの検査(`run_checks()`)をして相手とそろえ(段 1)、全部の接続で同時に転送して(`run_mt()`。速さの区間ごとに段 `MT_SYNC`(100)+ 区間の番号 = 100〜112 で相手とそろえる)相手とそろえる(段 200)。`-q`(`g_quiet`)なら、こちらからは転送せず(一通りの検査・mt・[7] をしない)、段だけ相手とそろえる(相手の片方向の速さを測るため)。`-P`(`g_perf`)なら一通りの検査を飛ばす(本数を変えて速さを測るため)。`-z`(`g_silent`)なら無応答の試験をする(`run_silent()`。中で段 210 でそろえる)。oob なら、接続のある最後のポートの最後の接続で範囲の外と張り直しを確かめる(`run_oob()`)。相手とそろえた(段 300)後、模型の hash・自分の公開メモリの hash(`dump_area()`)・結果を表示する。
@@ -11242,7 +11900,7 @@ image::call_test_bfm_test-run_all.drawio.svg[run_all() の関係図]
 [cols="1,5",options="autowidth"]
 .race_ng()
 |===
-|関数名 |`race_ng`(`test/bfm_test.c` 1660 行目)
+|関数名 |`race_ng`(`test/bfm_test.c` 1664 行目)
 |宣言 |`static void race_ng(struct race_conn *a, const char *what, int rc)`
 |目的 a|race(競合の試験)で、接続のスレッドが見つけた本当の誤りを数え、後で表示する理由を覚えておくための関数。
 |処理内容 a|race の接続のスレッド `a` の本当の誤りを数える。最初の 1 件だけ、内容 `what` と値 `rc`(`bfm_strerror()` の文字列も)を `a->why` に覚える。
@@ -11272,7 +11930,7 @@ image::call_test_bfm_test-race_ng.drawio.svg[race_ng() の関係図]
 [cols="1,5",options="autowidth"]
 .race_runner_fn()
 |===
-|関数名 |`race_runner_fn`(`test/bfm_test.c` 1665 行目)
+|関数名 |`race_runner_fn`(`test/bfm_test.c` 1669 行目)
 |宣言 |`static void *race_runner_fn(void *p)`
 |目的 a|race で、`bfm_run()` を休まず呼び続けるスレッドの本体。複数のコアから同時に呼んで鍵の取り合いを強くし、それでも代表 API が失敗しないことを確かめるために置く。
 |処理内容 a|race で `bfm_run()` を休まず呼ぶスレッドの本体。止める合図(`g_race_stop_runner` か `g_stop`)まで呼び続け、戻り値ごとの数(`BFM_OK` / `BFM_INPROGRESS` / `BFM_E_STATE` / 失敗)を数える。失敗は最初の値を覚える。`g_race_reconnect` が 1 なら(段 4)、`BFM_E_STATE` のたびに切れた接続の張り直しも頼む(`reconnect_down()`)。
@@ -11301,7 +11959,7 @@ image::call_test_bfm_test-race_runner_fn.drawio.svg[race_runner_fn() の関係�
 [cols="1,5",options="autowidth"]
 .race_data()
 |===
-|関数名 |`race_data`(`test/bfm_test.c` 1682 行目)
+|関数名 |`race_data`(`test/bfm_test.c` 1686 行目)
 |宣言 |`static void race_data(struct race_conn *a)`
 |目的 a|race で、データの接続を受け持つスレッドの本体。ほかの接続の張り直しや `bfm_run()` の取り合いが同時に起きても、この接続の転送が一度も失敗しないことを確かめる。
 |処理内容 a|race のデータの接続のスレッド。止める合図まで、相手の公開メモリの自分の区画(`MT_OFF + a->idx * MT_SPAN`)で次を繰り返し、一度も失敗しないことを確かめる: 4KiB の write と read で読み戻して比べる。8 バイトの多重度つきの write を 16 個出して最後を `bfm_wait()` で待ち、128 バイトを read で読み戻して比べる。
@@ -11338,7 +11996,7 @@ image::call_test_bfm_test-race_data.drawio.svg[race_data() の関係図]
 [cols="1,5",options="autowidth"]
 .race_churn()
 |===
-|関数名 |`race_churn`(`test/bfm_test.c` 1716 行目)
+|関数名 |`race_churn`(`test/bfm_test.c` 1720 行目)
 |宣言 |`static void race_churn(struct race_conn *a)`
 |目的 a|race で、張り直しの接続を受け持つスレッドの本体。接続の張り直しを繰り返し、ほかの接続が転送している最中でも張り直しが回り続けることを確かめる。
 |処理内容 a|race の張り直しの接続のスレッド。止める合図まで、接続の状態を見て次を繰り返す。張り直しを回すのは IP の小さいほう(掛け側。`leader`)だけで、使えれば少し(0〜1ms のばらつき)保ってから、相手の公開メモリの自分の区画へ 8 バイトの write と read をして確かめ、`bfm_reconnect()` を頼む。切れていれば(`BFM_ST_DOWN`)どちらの側も `bfm_reconnect()` を頼む。受け側は使えても転送しない。使えない状態から使える状態になった回数を `a->cycles`(張り直しの周回)として数える。
@@ -11374,7 +12032,7 @@ image::call_test_bfm_test-race_churn.drawio.svg[race_churn() の関係図]
 [cols="1,5",options="autowidth"]
 .race_conn_fn()
 |===
-|関数名 |`race_conn_fn`(`test/bfm_test.c` 1751 行目)
+|関数名 |`race_conn_fn`(`test/bfm_test.c` 1755 行目)
 |宣言 |`static void *race_conn_fn(void *p)`
 |目的 a|race で、接続ごとに作るスレッドの開始点。接続の役目(データか張り直しか)に応じて、`race_data()` か `race_churn()` を行う。
 |処理内容 a|race の接続のスレッドの本体。張り直しの接続(`a->churn`)なら `race_churn()`、データの接続なら `race_data()` を行う。
@@ -11402,7 +12060,7 @@ image::call_test_bfm_test-race_conn_fn.drawio.svg[race_conn_fn() の関係図]
 [cols="1,5",options="autowidth"]
 .race_watch_fn()
 |===
-|関数名 |`race_watch_fn`(`test/bfm_test.c` 1760 行目)
+|関数名 |`race_watch_fn`(`test/bfm_test.c` 1764 行目)
 |宣言 |`static void *race_watch_fn(void *p)`
 |目的 a|race で、接続の状態を読む関数や状態遷移の記録を表示する関数が、`bfm_run()` や張り直しと同時に呼ばれても問題がないことを確かめる見張りのスレッドの本体。
 |処理内容 a|race の見張りのスレッド。止める合図まで、使う全部の接続の `bfm_conn_state()` を読み続け(読んだ数を `g_race_watch_reads` に数える)、2 秒ごとに張り直しの接続の最初の 1 本の状態遷移の記録を表示する(`bfm_conn_steplog()`。行の鍵と `g_bfm_ctl_lock` を回って取る関数も同時に動かす)。
@@ -11431,7 +12089,7 @@ image::call_test_bfm_test-race_watch_fn.drawio.svg[race_watch_fn() の関係図]
 [cols="1,5",options="autowidth"]
 .race_start_runners()
 |===
-|関数名 |`race_start_runners`(`test/bfm_test.c` 1778 行目)
+|関数名 |`race_start_runners`(`test/bfm_test.c` 1782 行目)
 |宣言 |`static void race_start_runners(struct race_runner *r, uint32_t n)`
 |目的 a|race の揺さぶる段と止めて立ち上げ直す段の始めに、`bfm_run()` を休まず呼ぶスレッドを動かし始めるための関数。
 |処理内容 a|`bfm_run()` を休まず呼ぶスレッド(`race_runner_fn()`)を `n` 本作る。止める合図 `g_race_stop_runner` を 0 にし、各スレッドの記録を 0 で埋めてから作る。
@@ -11460,7 +12118,7 @@ image::call_test_bfm_test-race_start_runners.drawio.svg[race_start_runners() の
 [cols="1,5",options="autowidth"]
 .race_stop_runners()
 |===
-|関数名 |`race_stop_runners`(`test/bfm_test.c` 1788 行目)
+|関数名 |`race_stop_runners`(`test/bfm_test.c` 1792 行目)
 |宣言 |`static uint64_t race_stop_runners(struct race_runner *r, uint32_t n, const char *what)`
 |目的 a|race の段の終わりに、`bfm_run()` を呼ぶスレッドを止め、その段で `bfm_run()` が何を返したか(失敗が無かったか)を表示するための関数。
 |処理内容 a|`bfm_run()` を回すスレッドを止め(`g_race_stop_runner = 1`)、`n` 本の終わりを待って、呼んだ回数と戻り値ごとの数を足し、段の名前 `what` と一緒に表示する。失敗があれば最初の失敗の値も表示する。
@@ -11491,7 +12149,7 @@ image::call_test_bfm_test-race_stop_runners.drawio.svg[race_stop_runners() の�
 [cols="1,5",options="autowidth"]
 .race_wait_all_up()
 |===
-|関数名 |`race_wait_all_up`(`test/bfm_test.c` 1806 行目)
+|関数名 |`race_wait_all_up`(`test/bfm_test.c` 1810 行目)
 |宣言 |`static int race_wait_all_up(uint64_t limit_ns)`
 |目的 a|race で、張り直しや立ち上げ直しの後に、全部の接続が使えるようになるのを待つための関数。`bfm_run()` は別のスレッドが呼び続けている間に使う。
 |処理内容 a|使う全部の接続が使える(`BFM_ST_UP`)ようになるまで、`limit_ns` まで待つ。待つ間、切れた接続の張り直しを頼み(`reconnect_down()`)、1ms ずつ休む。`bfm_run()` は呼ばない(別のスレッドが回している前提)。
@@ -11521,7 +12179,7 @@ image::call_test_bfm_test-race_wait_all_up.drawio.svg[race_wait_all_up() の関�
 [cols="1,5",options="autowidth"]
 .race_verify_all()
 |===
-|関数名 |`race_verify_all`(`test/bfm_test.c` 1824 行目)
+|関数名 |`race_verify_all`(`test/bfm_test.c` 1828 行目)
 |宣言 |`static unsigned race_verify_all(uint64_t salt)`
 |目的 a|race の段の区切りで、全部の接続で実際に転送ができることを確かめるための関数。
 |処理内容 a|使う全部の接続で、相手の公開メモリの接続ごとの区画(`MT_OFF + (p * BFM_MAX_PORT_CONN + i) * MT_SPAN + 8192`)へ 8 バイトの write と read をして、読み戻した値が書いた値(`salt` と接続の番号から作る)と同じことを確かめる。通らなかった接続は表示する。
@@ -11551,7 +12209,7 @@ image::call_test_bfm_test-race_verify_all.drawio.svg[race_verify_all() の関係
 [cols="1,5",options="autowidth"]
 .run_race()
 |===
-|関数名 |`run_race`(`test/bfm_test.c` 1841 行目)
+|関数名 |`run_race`(`test/bfm_test.c` 1845 行目)
 |宣言 |`static int run_race(uint32_t nthreads, uint32_t secs)`
 |目的 a|race(競合の試験)の本体。代表 API の `bfm_run()` を複数のコアから休まず呼び、張り直しや停止・立ち上げ直しを同時に起こしても、接続ごとの状態機械と鍵が正しく働くことを確かめるための関数。
 |処理内容 a|race の本体(競合の試験。両方のノードで同時に動かす)。
@@ -11601,7 +12259,7 @@ image::call_test_bfm_test-run_race.drawio.svg[run_race() の関係図]
 [cols="1,5",options="autowidth"]
 .wpost_worker()
 |===
-|関数名 |`wpost_worker`(`test/bfm_test.c` 1961 行目)
+|関数名 |`wpost_worker`(`test/bfm_test.c` 1965 行目)
 |宣言 |`static void *wpost_worker(void *p)`
 |目的 a|wpost で、コア 1 つを受け持つスレッドの本体。そのコアから自分の接続へ `bfm_write_post()` を打ち続けて、回数と時間を測る。
 |処理内容 a|wpost の 1 本のスレッド。自分のコア `a->cpu` に固定し、全部のスレッドとそろえて(`g_wp_bar`)始め、`g_wp_ns` の間、自分の接続で相手の公開メモリの区画(`MT_OFF + (port * BFM_MAX_PORT_CONN + i) * MT_SPAN` の 64 語を順に)へ 8 バイトの `bfm_write_post()` を打ち続ける。時刻は 256 回ごとに見る。終わったら `bfm_flush()` で全部の完了を待ち、打った回数とかかった時間を残し、最後に書いた値を `bfm_read()` で読み戻して確かめる。最後に全部のスレッドとそろえて終わる。
@@ -11639,7 +12297,7 @@ image::call_test_bfm_test-wpost_worker.drawio.svg[wpost_worker() の関係図]
 [cols="1,5",options="autowidth"]
 .wp_sqrt()
 |===
-|関数名 |`wp_sqrt`(`test/bfm_test.c` 1998 行目)
+|関数名 |`wp_sqrt`(`test/bfm_test.c` 2002 行目)
 |宣言 |`static double wp_sqrt(double x)`
 |目的 a|wpost で、コアごとの速さのばらつき(変動係数)を求めるための平方根の関数。
 |処理内容 a|`x` の平方根をニュートン法(60 回)で求める。変動係数を出すのに使う(libm をリンクしないため)。
@@ -11666,7 +12324,7 @@ image::call_test_bfm_test-wp_sqrt.drawio.svg[wp_sqrt() の関係図]
 [cols="1,5",options="autowidth"]
 .run_wpost()
 |===
-|関数名 |`run_wpost`(`test/bfm_test.c` 2006 行目)
+|関数名 |`run_wpost`(`test/bfm_test.c` 2010 行目)
 |宣言 |`static int run_wpost(uint32_t secs)`
 |目的 a|wpost の本体。全部のコアから同時に、それぞれ別の接続で 8 バイトの `bfm_write_post()` を打ち、コアごとの速さとそのばらつきを測るための関数。
 |処理内容 a|wpost の本体(全部のコアで同時に、8 バイトの `bfm_write_post()` の速さを測る。両方のノードで動かす = 両方向)。`run_up(4)` で全部の接続を張り、そのノードの CPU に 1 本ずつスレッドを置く。コア `k` には `j = (k + g_wp_rot) % CPU の数` 番目の接続(使うポートを交互に: ポート `j % ポートの数` の接続 `j / ポートの数`)を割り当てる。`WPOST_ROUNDS`(3)回、相手と足並みをそろえてから(段 500 + 回)全部のスレッド(`wpost_worker()`)を同時に `secs` 秒動かし、コアごとの回数・Mops・1 回の ns と、合計・1 コアあたりの平均 / 最小 / 最大・最大/最小・変動係数を表示し、全部のコアで誤りが無いことを確かめる。最後に相手とそろえ(段 503)、コアごとの 3 回の平均と、その最大/最小を表示する。
@@ -11710,7 +12368,7 @@ image::call_test_bfm_test-run_wpost.drawio.svg[run_wpost() の関係図]
 [cols="1,5",options="autowidth"]
 .perf_dif_make()
 |===
-|関数名 |`perf_dif_make`(`test/bfm_test.c` 2133 行目)
+|関数名 |`perf_dif_make`(`test/bfm_test.c` 2137 行目)
 |宣言 |`static void perf_dif_make(uint8_t *out, uint32_t n, unsigned seed)`
 |目的 a|perf の T10-DIF の項目で、PI を検査する読み書きの元になる、正しい PI つきのデータを作るための関数。
 |処理内容 a|`n` ブロックの 520 バイトおきのデータを、正しい PI つきで `out` に作る。データ 512 バイトは `seed` とブロックの番号から作り、guard はその CRC16(`crc16_bitwise()`)、app tag は 0x1234、ref tag は 0x1000 + ブロックの番号(どれもビッグエンディアン)。
@@ -11739,7 +12397,7 @@ image::call_test_bfm_test-perf_dif_make.drawio.svg[perf_dif_make() の関係図]
 [cols="1,5",options="autowidth"]
 .perf_worker()
 |===
-|関数名 |`perf_worker`(`test/bfm_test.c` 2146 行目)
+|関数名 |`perf_worker`(`test/bfm_test.c` 2150 行目)
 |宣言 |`static void *perf_worker(void *p)`
 |目的 a|perf で、CPU 1 つを受け持つスレッドの本体。決められた操作と長さを一定の時間打ち続けて、回数と時間(と遅延)を測る。
 |処理内容 a|perf の 1 本のスレッド。自分の CPU `a->cpu` に固定し、着地点(read_async 用に 64 × 32KiB、DIF 用に 512 × 520 バイト。CPU ごとに一度だけ取る)を用意する。DIF なら元のデータを作り(`perf_dif_make()`)、DIF の read なら先に相手のメモリへ正しい PI つきのデータを `bfm_dif_write()` で置く。全部のスレッドとそろえて始め、`g_pf_ns` の間、相手の公開メモリの自分の区画(`PERF_OFF + cpu * PERF_SPAN`)へ、操作 `a->kind` を長さ `a->size` で打ち続ける。終わったら回数・かかった時間・(read_async は)遅延の合計を残し、全部のスレッドとそろえて終わる。
@@ -11790,7 +12448,7 @@ image::call_test_bfm_test-perf_worker.drawio.svg[perf_worker() の関係図]
 [cols="1,5",options="autowidth"]
 .run_perf()
 |===
-|関数名 |`run_perf`(`test/bfm_test.c` 2262 行目)
+|関数名 |`run_perf`(`test/bfm_test.c` 2266 行目)
 |宣言 |`static int run_perf(uint32_t secs)`
 |目的 a|perf の本体。操作と長さごとに、使うコアの数を変えて IOPS・MB/s・平均の遅延を測るための関数。表示した行は仕様書の「性能(実機の測定)」の章の表とグラフに取り込む。
 |処理内容 a|perf の本体(物理コアの数 1〜`PERF_CORES` で、操作と長さごとの IOPS・MB/s・平均の遅延を測る。両方のノードで動かす = 両方向)。`run_up(4)` で接続を張り、スレッド k に接続 (ポート k % ポートの数, k / ポートの数) を割り当てる。項目(`bfm_write_post` 4・64 バイト、`bfm_read`・`bfm_read_async` 4・64・256・32768 バイト、`bfm_cas`・`bfm_faa` 4・8 バイト、`bfm_dif_write`・`bfm_dif_read` 16・64・512 ブロック)ごと、コアの数 N ごとに、使う接続が全部使えるまで待ち(切れていれば張り直す。30 秒まで)、相手とそろえ(段 600 から 1 つずつ)、N 本の `perf_worker()` を CPU 0〜N-1 で同時に `secs` 秒動かす。結果を「perf|項目|長さ|コア|IOPS|MB/s|平均の遅延 ns|誤り」の 1 行で表示する。`bfm_write_post()` で `bfm_inline_max()` を超える長さは「対象外」の行を出して飛ばす(項目には入れていない。`bfm_inline_max()` が小さい装置の備え)。
@@ -11842,7 +12500,7 @@ image::call_test_bfm_test-run_perf.drawio.svg[run_perf() の関係図]
 [cols="1,5",options="autowidth"]
 .run_crc()
 |===
-|関数名 |`run_crc`(`test/bfm_test.c` 2389 行目)
+|関数名 |`run_crc`(`test/bfm_test.c` 2393 行目)
 |宣言 |`static int run_crc(uint32_t secs)`
 |目的 a|crc の本体。相手も NIC も使わずに、T10-DIF の CRC16 の計算(`bfm_dif_crc16()` と `bfm_dif_crc16_table()`)が正しい値を返すことを確かめ、その速さを測るための関数。
 |処理内容 a|crc の本体(T10-DIF の CRC16 だけを確かめる。相手も NIC も要らない)。1 MiB を乱数で埋め、使う方法(`bfm_dif_crc16()`。PCLMULQDQ があればそれ)・表だけ(`bfm_dif_crc16_table()`)・1 ビットずつ(`crc16_bitwise()`)の値が、長さ 0〜2100 バイト(位置は 16 バイトの境界からずらす)で一致し、さらに乱数の長さ(70,000 バイト未満)・位置(4096 未満)の 2 万通りで使う方法と表が一致することを確かめる。続けて、1 MiB の中を 512 バイトずつ、表だけ / 使う方法で `secs` 秒ずつ CRC を求め、512 バイトあたりの時間と GB/s を表示する。
@@ -11876,7 +12534,7 @@ image::call_test_bfm_test-run_crc.drawio.svg[run_crc() の関係図]
 [cols="1,5",options="autowidth"]
 .run_info()
 |===
-|関数名 |`run_info`(`test/bfm_test.c` 2436 行目)
+|関数名 |`run_info`(`test/bfm_test.c` 2440 行目)
 |宣言 |`static int run_info(void)`
 |目的 a|info の本体。接続はせずにポートだけを立ち上げ、装置の能力(BlueFlame・atomic・T10-DIF のオフロードなど)を表示して、試験や移植の前に装置を確かめるための関数。
 |処理内容 a|info の本体。使うポートの接続 0 がどれも立ち上げ中(`BFM_ST_INIT`)でなくなるまで(180 秒まで)`bfm_run()` を呼び、使うポートごとに装置の名前・BlueFlame・atomic・QP の能力・FW に渡したページの数・sho を表示し、T10-DIF のオフロードの有無を表示する。接続ができるのは待たない。
@@ -11899,25 +12557,85 @@ image::flow_test_bfm_test-run_info.drawio.svg[run_info() のフロー図]
 .run_info() の関係図
 image::call_test_bfm_test-run_info.drawio.svg[run_info() の関係図]
 
+[[test_bfm_test-fw_wait_ready]]
+=== `fw_wait_ready()`
+[cols="1,5",options="autowidth"]
+.fw_wait_ready()
+|===
+|関数名 |`fw_wait_ready`(`test/bfm_test.c` 2470 行目)
+|宣言 |`static int fw_wait_ready(const char *what)`
+|目的 a|fw と reset で、FW のコマンドを出せるように、使うポートの立ち上げが済むのを待つための下請け(接続ができるかは問わない)。
+|処理内容 a|ポート 0(ポート 1 を使うならポート 1 も)が立ち上がる(`bfm_dev_ready()`)まで `bfm_run()` と `idle()` を呼ぶ。失敗(`BFM_E_STATE` 以外の負)・Ctrl-C・180 秒で諦める。
+|引数 a|
+[cols="2,1,4"]
+!===
+!型 !名称 !意味
+!`const char *` !`what` !表示に付ける動きの名前("fw" / "reset")
+!===
+|戻り値 a|0: 立ち上がった。1: 立ち上がらない(表示する)。
+|前提条件 a|設定の変数を決め、最初の `bfm_run()` を呼んであること(`main()`)。
+|注意事項 a|相手のノードは動いていなくてよい(接続は確立の途中のままでよい)。
+|使用関数 a|* <<test_bfm_test-now_ns,`now_ns()`>>
+* <<src_bfm_core-bfm_dev_ready,`bfm_dev_ready()`>>
+* <<src_bfm_core-bfm_run,`bfm_run()`>>
+* `printf()`(外部)
+* <<test_bfm_test-idle,`idle()`>>
+|===
+
+.fw_wait_ready() のフロー図
+image::flow_test_bfm_test-fw_wait_ready.drawio.svg[fw_wait_ready() のフロー図]
+
+.fw_wait_ready() の関係図
+image::call_test_bfm_test-fw_wait_ready.drawio.svg[fw_wait_ready() の関係図]
+
+[[test_bfm_test-run_reset]]
+=== `run_reset()`
+[cols="1,5",options="autowidth"]
+.run_reset()
+|===
+|関数名 |`run_reset`(`test/bfm_test.c` 2485 行目)
+|宣言 |`static int run_reset(void)`
+|目的 a|reset の本体。ポート 0 のカードを `bfm_fw_reset()` でリセットし、bfmem が立ち上げ直せるかを実機で確かめるための関数(fw の `-X` からも呼ぶ)。新しい FW の版は、立ち上げ直したときの表示に出る。
+|処理内容 a|`fw_wait_ready()` で立ち上がりを待ち、`bfm_fw_reset(0)` を `BFM_INPROGRESS` 以外が返るまで呼んで、結果とかかった時間を表示する。成功したら、もう一度 `fw_wait_ready()` で立ち上げ直しを待ち、かかった時間を表示する。
+|引数 |なし
+|戻り値 a|0: リセットして立ち上げ直した。1: 立ち上がらない・リセットに失敗した。
+|前提条件 a|設定の変数を決めてあること(`main()`。接続はポートごとに 1 本)。カードの全部の function を vfio-pci に結びつけ、OS のドライバが使っていないこと。
+|注意事項 a|* `bfm_fw_reset()` の間は `bfm_run()` を呼ばない(1 つのコアから呼ぶ約束)。
+* ポート 1 を使うと、同じカードの 2 つのポートの設定空間を戻すところまで確かめられる。
+|使用関数 a|* <<test_bfm_test-fw_wait_ready,`fw_wait_ready()`>>
+* <<test_bfm_test-now_ns,`now_ns()`>>
+* <<src_bfm_core-bfm_fw_reset,`bfm_fw_reset()`>>
+* `printf()`(外部)
+* <<src_bfm_ops-bfm_strerror,`bfm_strerror()`>>
+|===
+
+.run_reset() のフロー図
+image::flow_test_bfm_test-run_reset.drawio.svg[run_reset() のフロー図]
+
+.run_reset() の関係図
+image::call_test_bfm_test-run_reset.drawio.svg[run_reset() の関係図]
+
 [[test_bfm_test-run_fw]]
 === `run_fw()`
 [cols="1,5",options="autowidth"]
 .run_fw()
 |===
-|関数名 |`run_fw`(`test/bfm_test.c` 2467 行目)
-|宣言 |`static int run_fw(const char *path, int activate)`
-|目的 a|fw の本体。ファイルの FW の像を読み、ポート 0 の装置のフラッシュへ `bfm_fw_update()` で書かせて、FW の更新が実機で動くかを確かめるための関数。既定は確かめるだけ(次の起動の FW は変えない)で、`-A` のときだけ切り替える。
-|処理内容 a|`path` のファイルを全部読み(64MiB 未満)、ポート 0 が立ち上がるまで `bfm_run()` を呼ぶ(180 秒まで。接続はできなくてよい)。`bfm_fw_update()` を `BFM_INPROGRESS` 以外が返るまで呼び、その間も `bfm_run()` を呼ぶ。Ctrl-C(`g_stop`)が来たら一度だけ `bfm_fw_update_cancel()` を呼ぶ。結果とかかった時間を表示する。
+|関数名 |`run_fw`(`test/bfm_test.c` 2503 行目)
+|宣言 |`static int run_fw(const char *path, int activate, int reset)`
+|目的 a|fw の本体。ファイルの FW の像を読み、ポート 0 の装置のフラッシュへ `bfm_fw_update()` で書かせて、FW の更新が実機で動くかを確かめるための関数。既定は確かめるだけ(次の起動の FW は変えない)で、`-A` のときだけ切り替える。`-X` なら、済んだ後にカードをリセットして新しい FW で立ち上げ直す。
+|処理内容 a|`path` のファイルを全部読み(64MiB 未満)、`fw_wait_ready()` でポート 0 の立ち上がりを待つ。`bfm_fw_update()` を `BFM_INPROGRESS` 以外が返るまで呼び、その間も `bfm_run()` を呼ぶ。Ctrl-C(`g_stop`)が来たら一度だけ `bfm_fw_update_cancel()` を呼ぶ。結果とかかった時間を表示する。成功して `reset` が 1 なら `run_reset()` を呼ぶ。
 |引数 a|
 [cols="2,1,4"]
 !===
 !型 !名称 !意味
 !`const char *` !`path` !FW の像(.bin)のファイル
 !`int` !`activate` !1 = 確かめた後に切り替える(`BFM_FW_ACTIVATE`)、0 = 確かめるだけ(`BFM_FW_VERIFY_ONLY`)
+!`int` !`reset` !1 = 済んだ後に `run_reset()` でカードをリセットして立ち上げ直す
 !===
-|戻り値 a|0: `bfm_fw_update()` が `BFM_OK` を返した。1: ファイルを読めない、ポート 0 が立ち上がらない、または `bfm_fw_update()` が失敗した。
+|戻り値 a|0: `bfm_fw_update()` が `BFM_OK` を返した(`reset` なら、リセットして立ち上げ直した)。1: ファイルを読めない、ポート 0 が立ち上がらない、`bfm_fw_update()` が失敗した、またはリセットに失敗した。
 |前提条件 a|設定の変数を決めてあること(`main()`。ポート 0 の接続 1 本だけ)。
-|注意事項 a|* 切り替えたときは、装置の電源を入れ直すと新しい FW が有効になる(`bfmem_test` はリセットをかけない)。
+|注意事項 a|* 切り替えたときは、装置の電源を入れ直すか、`-X`(または reset)でカードをリセットすると新しい FW が有効になる。
+* fw はポート 0 だけを使うので、`-X` では同じカードのもう一方の PF の設定空間を戻さない。2 つの PF を使うときは、fw の後に reset をポート 1 つきで動かす(TEST_PLAN.md)。
 * 同じカードのもう一方のポートの PF も vfio-pci にしてあれば、そちらから同時に更新しないこと(FW の手順の鍵で断られる)。
 |使用関数 a|* `fopen()`(外部)
 * `printf()`(外部)
@@ -11927,13 +12645,13 @@ image::call_test_bfm_test-run_info.drawio.svg[run_info() の関係図]
 * `fread()`(外部)
 * `free()`(外部)
 * `fclose()`(外部)
+* <<test_bfm_test-fw_wait_ready,`fw_wait_ready()`>>
 * <<test_bfm_test-now_ns,`now_ns()`>>
-* <<src_bfm_core-bfm_dev_ready,`bfm_dev_ready()`>>
-* <<src_bfm_core-bfm_run,`bfm_run()`>>
-* <<test_bfm_test-idle,`idle()`>>
 * <<src_bfm_fw-bfm_fw_update,`bfm_fw_update()`>>
 * <<src_bfm_fw-bfm_fw_update_cancel,`bfm_fw_update_cancel()`>>
+* <<src_bfm_core-bfm_run,`bfm_run()`>>
 * <<src_bfm_ops-bfm_strerror,`bfm_strerror()`>>
+* <<test_bfm_test-run_reset,`run_reset()`>>
 |===
 
 .run_fw() のフロー図
@@ -11947,10 +12665,10 @@ image::call_test_bfm_test-run_fw.drawio.svg[run_fw() の関係図]
 [cols="1,5",options="autowidth"]
 .main()
 |===
-|関数名 |`main`(`test/bfm_test.c` 2517 行目)
+|関数名 |`main`(`test/bfm_test.c` 2547 行目)
 |宣言 |`int main(int argc, char **argv)`
 |目的 a|bfmem_test の開始点。コマンドの引数で選んだ試験(run・serve・bench・race・wpost・perf・crc・info)か FW の更新(fw)を、オプションで決めた設定で行い、最後に bfmem を止めるための関数。
-|処理内容 a|オプションを読んだ後、引数の動きが crc なら、相手も NIC も使わずに `run_crc()` だけを行って戻る。それ以外は、引数を読んで設定の変数を決め、シグナルの受け口を登録し、最初の `bfm_run()` の後で自分の公開メモリを埋めて、引数の動き(run / serve / bench / race / wpost / perf / fw / info)を行い、最後に `do_shutdown()` で止める。`-L` なら、止めた後に全部の接続の状態遷移の記録を表示する(`bfm_conn_steplog()`)。
+|処理内容 a|オプションを読んだ後、引数の動きが crc なら、相手も NIC も使わずに `run_crc()` だけを行って戻る。それ以外は、引数を読んで設定の変数を決め、シグナルの受け口を登録し、最初の `bfm_run()` の後で自分の公開メモリを埋めて、引数の動き(run / serve / bench / race / wpost / perf / fw / reset / info)を行い、最後に `do_shutdown()` で止める。`-L` なら、止めた後に全部の接続の状態遷移の記録を表示する(`bfm_conn_steplog()`)。
 
 * `-d BDF` / `-D BDF`: `g_bfm_linux_pci_bdf[0]` / `[1]`(ポート 0 / 1 の装置)
 * `-i IP` / `-I IP`: `g_bfm_local_ip[0]` / `[1]`(ポート 0 / 1 の自分の IP)
@@ -11970,8 +12688,9 @@ image::call_test_bfm_test-run_fw.drawio.svg[run_fw() の関係図]
 * `-T 項目名[:長さ]`: `g_pf_only`(perf で測る項目を絞る)
 * `-v`: `g_bfm_verbose` を 1 にする
 * `-A`: fw で、確かめた後に次の起動から使うよう切り替える(`fw_activate`)
+* `-X`: fw で、済んだ後にカードをリセットして立ち上げ直す(`fw_reset`)
 
-引数は `<動き> <相手のIP> [ポート1の相手のIP]`(`g_bfm_peer_ip[0]` / `[1]`)。fw は `fw <相手のIP> <FW の像の .bin>` で、ポート 0 の接続 1 本だけを使う。
+引数は `<動き> <相手のIP> [ポート1の相手のIP]`(`g_bfm_peer_ip[0]` / `[1]`)。fw は `fw <相手のIP> <FW の像の .bin>` で、ポート 0 の接続 1 本だけを使う。reset は `reset <相手のIP> [ポート1の相手のIP]` で、ポートごとに接続 1 本を使う。
 |引数 a|
 [cols="2,1,4"]
 !===
@@ -12006,6 +12725,7 @@ image::call_test_bfm_test-run_fw.drawio.svg[run_fw() の関係図]
 * <<test_bfm_test-run_wpost,`run_wpost()`>>
 * <<test_bfm_test-run_perf,`run_perf()`>>
 * <<test_bfm_test-run_fw,`run_fw()`>>
+* <<test_bfm_test-run_reset,`run_reset()`>>
 * <<test_bfm_test-run_all,`run_all()`>>
 * <<src_bfm_cm-bfm_conn_steplog,`bfm_conn_steplog()`>>
 |===

@@ -350,6 +350,104 @@
       ]
     },
     {
+      "func": "cfg_fd",
+      "purpose": "カードのリセットで、VFIO が仮想化していない本当の設定空間(装置そのものと、上流のポート)を読み書きするために、sysfs の config のファイルを開いておく下請け。",
+      "summary": "一度だけ開こうとし、結果(fd か -1)を `s_cfg[port][which]` に覚えて、次からはそれを返す。`/sys/bus/pci/devices/<g_bfm_linux_pci_bdf[port]>` の実際の場所(`realpath`)を求め、`which` が `CFG_UP` なら 1 つ上のディレクトリ(上流のポート)にする。その名前が PCI のアドレス(`dddd:bb:dd.f`)でなければ(ルート複合体の直下)上流のポートは無い。`config` を読み書きで開く。",
+      "args": {"port": "ポートの番号", "which": "`CFG_HW` = 装置そのもの、`CFG_UP` = 上流のポート"},
+      "ret": "config の fd。開けない・上流のポートが無いなら -1。",
+      "pre": "`g_bfm_linux_pci_bdf[port]` を決めてあること。root で動かしていること(設定空間の 64 バイトより先を読み書きするため)。",
+      "notes": "* vfio-pci に結びつけたままで読み書きできる(setpci と同じ道)。\n* 開いた fd は `bfm_port_fini()` が閉じる。",
+      "flow": [
+        {"if": "s_cfg[port][which].tried ?", "then": [{"return": "s_cfg[port][which].fd"}]},
+        {"do": "tried = 1、fd = -1"},
+        {"if": "g_bfm_linux_pci_bdf[port] == NULL ?", "then": [{"return": "-1"}]},
+        {"do": "realpath(\"/sys/bus/pci/devices/<BDF>\") で実際の場所を求める"},
+        {"if": "求められない?", "then": [{"call": "bfm_port_log() で表示"}, {"return": "-1"}]},
+        {"if": "which == CFG_UP ?", "then": [{"do": "1 つ上のディレクトリにする"}, {"if": "その名前が PCI のアドレスでない?", "then": [{"call": "bfm_port_log() で「上流のポートが見つからない」を表示"}, {"return": "-1"}]}]},
+        {"do": "<場所>/config を O_RDWR で開き、fd を覚える"},
+        {"if": "開けない?", "then": [{"call": "bfm_port_log() で表示(root が要る)"}], "else": [{"call": "g_bfm_verbose なら bfm_port_log() で場所を表示"}]},
+        {"return": "s_cfg[port][which].fd"}
+      ]
+    },
+    {
+      "func": "cfg_read",
+      "purpose": "`bfm_port_up_read32()` と `bfm_port_pci_hw_read32()` の共通の下請け。sysfs の config から 32bit を読む。",
+      "summary": "`cfg_fd()` で開いた config の `off` から 4 バイトを `pread` する。開けない・読めないなら 0xffffffff。",
+      "args": {"port": "ポートの番号", "which": "`CFG_HW` / `CFG_UP`", "off": "設定空間の中の位置(4 の倍数)"},
+      "ret": "読んだ値(失敗なら 0xffffffff。無い装置を読んだときと同じ値)。",
+      "pre": "`cfg_fd()` と同じ。",
+      "notes": "失敗は表示しない(リセットの途中で装置がいないときに、何度も読むため)。",
+      "flow": [
+        {"do": "v = 0xffffffff"},
+        {"call": "fd = cfg_fd(port, which) を呼ぶ"},
+        {"if": "fd >= 0 かつ pread(fd, &v, 4, off) != 4 ?", "then": [{"do": "v = 0xffffffff"}]},
+        {"return": "v"}
+      ]
+    },
+    {
+      "func": "cfg_write",
+      "purpose": "`bfm_port_up_write32()` と `bfm_port_pci_hw_write32()` の共通の下請け。sysfs の config へ 32bit を書く。",
+      "summary": "`cfg_fd()` で開いた config の `off` へ 4 バイトを `pwrite` する。書けなければ表示する。",
+      "args": {"port": "ポートの番号", "which": "`CFG_HW` / `CFG_UP`", "off": "設定空間の中の位置(4 の倍数)", "val": "書く値"},
+      "ret": "なし",
+      "pre": "`cfg_fd()` と同じ。",
+      "notes": "開けないときは何もしない(開くときに表示してある)。",
+      "flow": [
+        {"call": "fd = cfg_fd(port, which) を呼ぶ"},
+        {"if": "fd >= 0 かつ pwrite(fd, &val, 4, off) != 4 ?", "then": [{"call": "bfm_port_log() で失敗を表示"}]}
+      ]
+    },
+    {
+      "func": "bfm_port_up_read32",
+      "purpose": "カードのリセット(`bfm_fw_reset()`)で、ポートの装置の上流のポート(ルートポートか PCIe スイッチの下りポート)の設定空間を読むための関数。リンクの制御・状態を見るのに使う。移植する人は、装置のバスを下に持つブリッジの設定空間を読む関数を用意する。Linux 版は sysfs の木で 1 つ上の装置の config を読む。",
+      "summary": "`cfg_read(port, CFG_UP, off)` を返す。",
+      "args": {"port": "ポートの番号", "off": "上流のポートの設定空間の中の位置(4 の倍数)"},
+      "ret": "読んだ値。上流のポートが無い・読めないなら 0xffffffff。",
+      "pre": "root で動かしていること。",
+      "notes": "VFIO を通さない(上流のポートは vfio-pci に結びつけていない)。",
+      "flow": [
+        {"call": "cfg_read(port, CFG_UP, off) を呼ぶ"},
+        {"return": "cfg_read() の値"}
+      ]
+    },
+    {
+      "func": "bfm_port_up_write32",
+      "purpose": "カードのリセットで、上流のポートの Link Control(Link Disable)か Bridge Control(Secondary Bus Reset)を書いて PCIe のリンクを落とし・戻すための関数。移植する人は、上流のポートの設定空間へ書く関数を用意する。",
+      "summary": "`cfg_write(port, CFG_UP, off, val)` を呼ぶ。",
+      "args": {"port": "ポートの番号", "off": "上流のポートの設定空間の中の位置(4 の倍数)", "val": "書く値"},
+      "ret": "なし",
+      "pre": "root で動かしていること。",
+      "notes": "上流のポートが無ければ何もしない。",
+      "flow": [
+        {"call": "cfg_write(port, CFG_UP, off, val) を呼ぶ"}
+      ]
+    },
+    {
+      "func": "bfm_port_pci_hw_read32",
+      "purpose": "カードのリセットの前後に、ポートの装置そのものの設定空間を(OS の仮想化を通さずに)読むための関数。リセットの前の値を覚え、リセットの後に設定空間が読めるようになったかを見る。移植する人は、OS が設定空間を仮想化するなら、それを通さずに装置へ届く読み方を用意する。Linux 版は sysfs の config を読む(VFIO は BAR・Max Payload Size・ベンダ ID を仮想化しているため)。",
+      "summary": "`cfg_read(port, CFG_HW, off)` を返す。",
+      "args": {"port": "ポートの番号", "off": "設定空間の中の位置(4 の倍数)"},
+      "ret": "読んだ値。読めないなら 0xffffffff。",
+      "pre": "root で動かしていること。",
+      "notes": "ふだんの設定空間の読み書き(`bfm_port_pci_read32()`)は VFIO を通したまま。",
+      "flow": [
+        {"call": "cfg_read(port, CFG_HW, off) を呼ぶ"},
+        {"return": "cfg_read() の値"}
+      ]
+    },
+    {
+      "func": "bfm_port_pci_hw_write32",
+      "purpose": "カードのリセットで初期値に戻った設定空間(BAR・Command・Max Payload Size など)を、装置そのものへ書き戻すための関数。移植する人は、OS の仮想化を通さずに装置へ届く書き方を用意する。",
+      "summary": "`cfg_write(port, CFG_HW, off, val)` を呼ぶ。",
+      "args": {"port": "ポートの番号", "off": "設定空間の中の位置(4 の倍数)", "val": "書く値"},
+      "ret": "なし",
+      "pre": "root で動かしていること。",
+      "notes": "VFIO は BAR を仮想化していて、VFIO を通して書いても装置の BAR は戻らないので、ここで装置へ書く(Command の Memory Space を VFIO を通して入れると vfio-pci も BAR を戻すが、Max Payload Size は戻らない)。",
+      "flow": [
+        {"call": "cfg_write(port, CFG_HW, off, val) を呼ぶ"}
+      ]
+    },
+    {
       "func": "bar_map_uc",
       "purpose": "BAR0 の一部または全体を、キャッシュしない属性で CPU から触れるように張る下請け。`bfm_port_bar0_map()` が BAR0 全体を張るのと、`bfm_port_bar0_wc()` / `bfm_port_bar0_wc_release()` が write-combining に張り替えるページの前後やそのページを張り直すのに使う。",
       "summary": "ポート `port` の BAR0 の `[off, off+len)` を UC で `va` に張る。`s_dev[port].bar0_sysfs` が 0 でなければ sysfs の `resource0`(`g_bfm_linux_pci_bdf[port]`)を `O_SYNC` で開いて張り、0 なら VFIO の装置の fd の BAR0 の領域から張る。",

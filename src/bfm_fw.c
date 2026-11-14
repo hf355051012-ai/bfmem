@@ -21,7 +21,8 @@
  *     ボードごとの情報(MAC・GUID・VPD など。ITOC の device_data の欄)は渡さない。
  *   - FW が PSID(ボードの種類)の一致を確かめない装置には、g_bfm_fw_allow_no_psid_check が 0 なら書かない。
  *   - FSM が IDLE でなければ(ほかの道具・ほかのポートが更新している)何もしない。
- *   - 装置のリセット(MFRL)はかけない。新しい FW は電源を入れ直したときに有効になる。
+ *   - 装置のリセットはかけない。新しい FW は、電源を入れ直すか、bfm_fw_reset()(MFRL の level 3 と
+ *     PCIe のリンクの切断。この下の bfm_fw_mfrl_step() と bfm_pci.c)でカードをリセットしたときに有効になる。
  *
  * 呼び出しは待たない: FW のコマンドを出したら BFM_INPROGRESS を返し、次の呼び出しで完了を見る。
  * FSM の状態を待つところは、200ms ごとに MCC を読み、30 秒で時間切れ(Linux の mlxfw と同じ)。
@@ -534,7 +535,7 @@ static int fw_step(bfm_dev_t *d, fw_state_t *f)
         if (rc != BFM_OK) BFM_LOG("bfm: ポート %u: FW の更新の手順を手放せなかった\n", p);
         f->locked = 0;
         if (f->rc == BFM_OK && f->activated) {
-            BFM_LOG("bfm: ポート %u: FW を書き、次の起動から使うよう切り替えた。電源を入れ直すと有効になる\n", p);
+            BFM_LOG("bfm: ポート %u: FW を書き、次の起動から使うよう切り替えた。電源を入れ直すか bfm_fw_reset() で有効になる\n", p);
             f->step = (f->info_mask & (1u << MCQI_INFO_TYPE_VERSION)) ? F_VER_NEW : F_DONE;
         } else {
             if (f->rc == BFM_OK) BFM_LOG("bfm: ポート %u: FW の像の確かめが済んだ (次の起動の像は変えていない)\n", p);
@@ -589,4 +590,64 @@ int bfm_fw_update(unsigned port, const void *img, uint32_t len, int mode)
 void bfm_fw_update_cancel(unsigned port)
 {
     if (port < BFM_MAX_PORT && s_fw[port].step != F_IDLE) s_fw[port].cancel = 1;
+}
+
+/*=================================================================
+ * カードのリセットの準備(bfm_fw_reset() から。g_bfm_ctl_lock の中で)。
+ * MFRL を読み、level 3(PCI のリセット: 次に PCIe のリンクが落ちたときにカード全体をリセットする)に
+ * 対応しているか確かめ、level 3 を書く。同期(pci_sync_for_fw_update_start)は使わない
+ * (Linux の mlx5 の fw_reset.c の、同期を使わない場合と同じ)。*method に、FW が求めるリンクの落とし方
+ * (pci_reset_req_method)を返す。FW の更新の作業域とコマンドの entry を使うので、更新の途中は断る。
+ * 戻り値: BFM_INPROGRESS = 途中。BFM_OK = 書いた。BFM_E_NOTSUP = 対応していない。BFM_E_BUSY = FW の更新の途中。
+ * ===============================================================*/
+#define MFRL_BYTES              8u
+#define MFRL_RESET_LEVEL3       0x08u    /* reset_level の bit 3(Linux の MLX5_MFRL_REG_RESET_LEVEL3)*/
+
+enum { M_READ = 0, M_WRITE };            /* bfm_fw_mfrl_step() の手順 */
+static int s_mfrl[BFM_MAX_PORT];         /* bfm_fw_mfrl_step() の手順(M_*)*/
+
+int bfm_fw_mfrl_step(bfm_dev_t *d, int *method)
+{
+    const unsigned p = d->port;
+    fw_state_t *f = &s_fw[p];
+    int rc;
+    if (f->step != F_IDLE) {
+        BFM_LOG("bfm: ポート %u: FW の更新の途中なので、カードのリセットはしない\n", p);
+        return BFM_E_BUSY;
+    }
+    if (s_mfrl[p] == M_READ) {
+        if (!f->cmd.posted) (void)reg_in(p);
+        if ((rc = access_reg(d, f, MLX5_REG_MFRL, 1, MFRL_BYTES, MFRL_BYTES, "ACCESS_REG(MFRL 読み)")) != BFM_OK) {
+            if (rc == BFM_INPROGRESS) return BFM_INPROGRESS;
+            BFM_LOG("bfm: ポート %u: MFRL が読めない (この FW はリセットのレジスタに対応していない)\n", p);
+            return BFM_E_NOTSUP;
+        }
+        const uint8_t *r = &s_out[p][16];
+        const uint32_t m = (r[5] >> 5) & 7u;                 /* pci_reset_req_method */
+        BFM_LOG("bfm: ポート %u: MFRL: 対応するリセットの範囲 0x%02x、リンクの落とし方 %u (%s)\n", p, r[7], m,
+                m == BFM_RESET_LINK_DISABLE ? "Link Disable" : m == BFM_RESET_HOT_RESET ? "Secondary Bus Reset" : "?");
+        if (!(r[7] & MFRL_RESET_LEVEL3)) {
+            BFM_LOG("bfm: ポート %u: この FW は level 3 (PCI のリセット) に対応していない\n", p);
+            return BFM_E_NOTSUP;
+        }
+        if (m != BFM_RESET_LINK_DISABLE && m != BFM_RESET_HOT_RESET) {
+            BFM_LOG("bfm: ポート %u: 知らないリンクの落とし方 %u\n", p, m);
+            return BFM_E_NOTSUP;
+        }
+        *method = (int)m;
+        s_mfrl[p] = M_WRITE;
+    }
+    if (!f->cmd.posted) {
+        uint8_t *r = reg_in(p);
+        r[7] = MFRL_RESET_LEVEL3;                            /* reset_level。rst_type_sel = 0(チップ全体)*/
+    }
+    rc = access_reg(d, f, MLX5_REG_MFRL, 0, MFRL_BYTES, MFRL_BYTES, "ACCESS_REG(MFRL 書き)");
+    if (rc == BFM_INPROGRESS) return BFM_INPROGRESS;
+    s_mfrl[p] = M_READ;
+    if (rc != BFM_OK) {
+        BFM_LOG("bfm: ポート %u: MFRL に level 3 を書けない\n", p);
+        return BFM_E_HW;
+    }
+    BFM_LOG("bfm: ポート %u: MFRL に level 3 を書いた (次に PCIe のリンクが落ちると、カード全体がリセットされる)\n", p);
+    return BFM_OK;
 }

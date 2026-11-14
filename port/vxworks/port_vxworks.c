@@ -18,6 +18,7 @@
  *     BIOS / BSP で CPU の深い C-state(パッケージの C-state、C1E など)を止めること
  *     (g_bfm_verbose = 1 で立ち上げると、MSR から読んだパッケージ C-state の上限を表示する)。
  *   - PCIe の設定空間は ECAM(g_bfm_pcie_ecam_base)を直接読み書きする(ポートごとの g_bfm_pci_bus / dev / func[])。
+ *     カードのリセット(bfm_fw_reset())で使う上流のポートは、ECAM を見て探す(装置のバスを下に持つブリッジ)。
  *
  * 待ち(bfm_port_delay_us)は TSC を見ながらの空回りで、CPU を他のタスクに譲らない。
  * 本体の立ち上げ・接続・切断・停止は待たない(時刻を見て BFM_INPROGRESS を返す)ので、待ちは使わない
@@ -74,12 +75,17 @@ void bfm_port_fini(void)
 {
 }
 
-static volatile uint32_t *ecam(unsigned port, uint32_t off)
+/* ECAM の bus / dev / func の設定空間の off の位置。 */
+static volatile uint32_t *ecam_at(uint32_t bus, uint32_t dev, uint32_t func, uint32_t off)
 {
-    const uint64_t a = g_bfm_pcie_ecam_base + ((uint64_t)g_bfm_pci_bus[port] << 20) +
-                       ((uint64_t)g_bfm_pci_dev[port] << 15) + ((uint64_t)g_bfm_pci_func[port] << 12) +
+    const uint64_t a = g_bfm_pcie_ecam_base + ((uint64_t)bus << 20) + ((uint64_t)dev << 15) + ((uint64_t)func << 12) +
                        (off & 0xffcu);
     return (volatile uint32_t *)(uintptr_t)a;
+}
+
+static volatile uint32_t *ecam(unsigned port, uint32_t off)
+{
+    return ecam_at(g_bfm_pci_bus[port], g_bfm_pci_dev[port], g_bfm_pci_func[port], off);
 }
 
 /* 設定空間はリトルエンディアンなので、x86 ではそのまま読み書きできる。 */
@@ -91,6 +97,63 @@ uint32_t bfm_port_pci_read32(unsigned port, uint32_t off)
 void bfm_port_pci_write32(unsigned port, uint32_t off, uint32_t val)
 {
     *ecam(port, off) = val;
+    bfm_mb();
+}
+
+/* VxWorks は設定空間を仮想化しないので、装置そのものの読み書きは上と同じ。 */
+uint32_t bfm_port_pci_hw_read32(unsigned port, uint32_t off)
+{
+    return bfm_port_pci_read32(port, off);
+}
+
+void bfm_port_pci_hw_write32(unsigned port, uint32_t off, uint32_t val)
+{
+    bfm_port_pci_write32(port, off, val);
+}
+
+/* 上流のポート(ブリッジ)の位置(bus << 16 | dev << 8 | func)。0 = まだ探していない、UP_NONE = 無い。 */
+#define UP_NONE 0xffffffffu
+static uint32_t s_up[BFM_MAX_PORT];
+
+/* ポート port の装置のバスを下に持つブリッジ(Type 1 の header で、secondary bus が装置のバス)を ECAM で探す。
+ * 上流のポートは、装置のバスより小さい番号のバスにある。 */
+static uint32_t find_up(unsigned port)
+{
+    if (s_up[port] != 0u) return s_up[port];
+    s_up[port] = UP_NONE;
+    const uint32_t sec = g_bfm_pci_bus[port];
+    for (uint32_t b = 0; b < sec; b++) {
+        for (uint32_t dv = 0; dv < 32u; dv++) {
+            for (uint32_t fn = 0; fn < 8u; fn++) {
+                if ((*ecam_at(b, dv, fn, 0x00u) & 0xffffu) == 0xffffu) {
+                    if (fn == 0u) break;                 /* function 0 が無ければ、その装置は無い */
+                    continue;
+                }
+                const uint32_t hdr = (*ecam_at(b, dv, fn, 0x0cu) >> 16) & 0xffu;
+                if ((hdr & 0x7fu) == 1u && ((*ecam_at(b, dv, fn, 0x18u) >> 8) & 0xffu) == sec) {
+                    s_up[port] = (b << 16) | (dv << 8) | fn;
+                    return s_up[port];
+                }
+                if (fn == 0u && !(hdr & 0x80u)) break;   /* 多機能でなければ function 1〜7 は無い */
+            }
+        }
+    }
+    bfm_port_log("port: ポート %u の上流のポート(バス %u を下に持つブリッジ)が見つからない\n", port, sec);
+    return UP_NONE;
+}
+
+uint32_t bfm_port_up_read32(unsigned port, uint32_t off)
+{
+    const uint32_t u = find_up(port);
+    if (u == UP_NONE) return 0xffffffffu;
+    return *ecam_at(u >> 16, (u >> 8) & 0xffu, u & 0xffu, off);
+}
+
+void bfm_port_up_write32(unsigned port, uint32_t off, uint32_t val)
+{
+    const uint32_t u = find_up(port);
+    if (u == UP_NONE) return;
+    *ecam_at(u >> 16, (u >> 8) & 0xffu, u & 0xffu, off) = val;
     bfm_mb();
 }
 

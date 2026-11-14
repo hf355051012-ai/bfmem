@@ -94,7 +94,8 @@ static void usage(void)
            "                   run <相手のIP> [ポート1の相手のIP] | serve <相手のIP> [ポート1の相手のIP] |\n"
            "                   race <相手のIP> [ポート1の相手のIP] | wpost <相手のIP> [ポート1の相手のIP] |\n"
            "                   perf <相手のIP> [ポート1の相手のIP] | crc |\n"
-           "                   bench <相手のIP> | info <相手のIP> | [-A] fw <相手のIP> <FW の像の .bin>\n"
+           "                   bench <相手のIP> | info <相手のIP> | [-A] [-X] fw <相手のIP> <FW の像の .bin> |\n"
+           "                   reset <相手のIP> [ポート1の相手のIP]\n"
            "  両方のノードで同じものを動かす。IP の小さいほうが掛け側になる(自動)。相手の MAC も自動で取る\n"
            "  run: -t 本(既定 4)のスレッドが bfm_run() を同時に呼んで全部の接続(-c 本 x ポート。既定 16)を張り、\n"
            "       両方向に一通りの操作を確かめ、全部の接続で同時に write / read / atomic / T10-DIF を確かめ、\n"
@@ -113,7 +114,10 @@ static void usage(void)
            "       512 バイトあたりの速さ(表 / 使う方法)を -n 秒(既定 1)ずつ\n"
            "  fw: ポート 0 の装置のフラッシュへ FW の像(.bin)を FW 自身に書かせ(bfm_fw_update())、確かめさせる。\n"
            "      既定は確かめるだけ(切り替えずに取り消す。次の起動の FW は変わらない)。-A で次の起動から使うよう\n"
-           "      切り替える(電源を入れ直すと有効になる)。Ctrl-C で取り消す。相手は動いていなくてよい\n"
+           "      切り替える(電源を入れ直すか、カードをリセットすると有効になる)。Ctrl-C で取り消す。相手は動いていなくてよい。\n"
+           "      -X で、済んだ後に reset と同じくカードをリセットして、新しい FW で立ち上げ直す\n"
+           "  reset: ポート 0 のカードを bfm_fw_reset() でリセットし(MFRL level 3 と、上流のポートでのリンクの切断)、\n"
+           "         立ち上げ直す。カードの全部の function を bfmem か vfio-pci に結びつけておくこと(OS のドライバに渡さない)\n"
            "  bench: write / read を 4B〜256KiB、多重度 1・4・8・16 で -n 回(既定 100000)ずつ流し、\n"
            "         IOPS・MB/s・平均遅延を出す(接続 1 本。相手は serve -c 1)\n"
            "  -B  BlueFlame を使わない(8 バイトのドアベルだけ。比べるため)\n"
@@ -2462,9 +2466,41 @@ static int run_info(void)
  * fw: FW の更新(bfm_fw_update())
  * ------------------------------------------------------------------- */
 
+/* 使うポートの立ち上げを待つ(接続はできなくてもよい)。0 = 立ち上がった。 */
+static int fw_wait_ready(const char *what)
+{
+    const uint64_t t0 = now_ns();
+    while (!bfm_dev_ready(&g_bfm_dev[0]) || (g_bfm_dev[1].used && !bfm_dev_ready(&g_bfm_dev[1]))) {
+        const int rc = bfm_run();
+        if ((rc < 0 && rc != BFM_E_STATE) || g_stop || now_ns() - t0 > 180ull * 1000000000ull) {
+            printf("%s: ポートが立ち上がらない\n", what);
+            return 1;
+        }
+        idle();
+    }
+    return 0;
+}
+
+/* ポート 0 のカードを bfm_fw_reset() でリセットし、立ち上げ直す(新しい FW の版は立ち上げの表示に出る)。 */
+static int run_reset(void)
+{
+    if (fw_wait_ready("reset") != 0) return 1;
+    const uint64_t t0 = now_ns();
+    int rc;
+    while ((rc = bfm_fw_reset(0)) == BFM_INPROGRESS) {
+    }
+    printf("reset: 結果 %d (%s)、%.1f 秒\n", rc, bfm_strerror(rc), (double)(now_ns() - t0) / 1e9);
+    if (rc != BFM_OK) return 1;
+    const uint64_t t1 = now_ns();
+    if (fw_wait_ready("reset") != 0) return 1;
+    printf("reset: 立ち上げ直した (%.1f 秒)\n", (double)(now_ns() - t1) / 1e9);
+    return 0;
+}
+
 /* ポート 0 を立ち上げ、path の FW の像を bfm_fw_update() で書く。activate が 0 なら確かめるだけ
- * (FW に書かせて確かめさせ、切り替えずに取り消す)。Ctrl-C で取り消す。 */
-static int run_fw(const char *path, int activate)
+ * (FW に書かせて確かめさせ、切り替えずに取り消す)。Ctrl-C で取り消す。reset が 1 なら、済んだ後に
+ * run_reset() でカードをリセットして立ち上げ直す。 */
+static int run_fw(const char *path, int activate, int reset)
 {
     FILE *fp = fopen(path, "rb");
     if (fp == NULL) {
@@ -2488,16 +2524,9 @@ static int run_fw(const char *path, int activate)
     }
     printf("fw: %s (%ld バイト) を%s\n", path, len, activate ? "書いて切り替える" : "書いて確かめるだけ(切り替えない)");
 
-    /* ポート 0 の立ち上げを待つ(接続はできなくてもよい)*/
-    const uint64_t t0 = now_ns();
-    while (!bfm_dev_ready(&g_bfm_dev[0])) {
-        const int rc = bfm_run();
-        if ((rc < 0 && rc != BFM_E_STATE) || g_stop || now_ns() - t0 > 180ull * 1000000000ull) {
-            printf("fw: ポート 0 が立ち上がらない\n");
-            free(img);
-            return 1;
-        }
-        idle();
+    if (fw_wait_ready("fw") != 0) {
+        free(img);
+        return 1;
     }
     const uint64_t t1 = now_ns();
     int rc, cancelled = 0;
@@ -2511,15 +2540,16 @@ static int run_fw(const char *path, int activate)
     }
     printf("fw: 結果 %d (%s)、%.1f 秒\n", rc, bfm_strerror(rc), (double)(now_ns() - t1) / 1e9);
     free(img);
-    return rc == BFM_OK ? 0 : 1;
+    if (rc != BFM_OK) return 1;
+    return reset ? run_reset() : 0;
 }
 
 int main(int argc, char **argv)
 {
     uint32_t iters = 0, threads = 4, nconn = 0;
-    int oob = 0, fw_activate = 0;
+    int oob = 0, fw_activate = 0, fw_reset = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "d:i:D:I:c:p:m:M:n:t:Q:a:R:T:BSCxqPzLvAh")) != -1) {
+    while ((opt = getopt(argc, argv, "d:i:D:I:c:p:m:M:n:t:Q:a:R:T:BSCxqPzLvAXh")) != -1) {
         switch (opt) {
         case 'd': g_bfm_linux_pci_bdf[0] = optarg; break;
         case 'i': if (parse_ip(optarg, &g_bfm_local_ip[0]) != 0) { usage(); return 2; } break;
@@ -2545,6 +2575,7 @@ int main(int argc, char **argv)
         case 'Q': g_bfm_qdepth = (uint32_t)atoi(optarg); break;
         case 'v': g_bfm_verbose = 1; break;
         case 'A': fw_activate = 1; break;
+        case 'X': fw_reset = 1; break;
         default: usage(); return 2;
         }
     }
@@ -2553,6 +2584,7 @@ int main(int argc, char **argv)
     const char *mode = argv[optind];
     if (parse_ip(argv[optind + 1], &g_bfm_peer_ip[0]) != 0) { usage(); return 2; }
     const int fw = (strcmp(mode, "fw") == 0);
+    const int reset = (strcmp(mode, "reset") == 0);
     const char *fw_path = NULL;
     if (fw) {
         /* fw <相手のIP> <像のファイル>: ポート 0 だけを立ち上げる(接続は 1 本。相手がいなくてもよい)*/
@@ -2569,6 +2601,11 @@ int main(int argc, char **argv)
     /* -c は使う全部のポートの本数。ポート 1 は、その相手の IP を書いたときだけ使う */
     if (nconn != 0 && !fw) g_bfm_port_conn[0] = nconn;
     if (optind + 2 < argc && !fw) g_bfm_port_conn[1] = nconn ? nconn : (g_bfm_port_conn[1] ? g_bfm_port_conn[1] : g_bfm_port_conn[0]);
+    if (reset) {
+        /* reset <相手のIP> [ポート1の相手のIP]: 接続は 1 本ずつ(相手がいなくてもよい)*/
+        g_bfm_port_conn[0] = 1;
+        if (g_bfm_port_conn[1] != 0) g_bfm_port_conn[1] = 1;
+    }
 
     setvbuf(stdout, NULL, _IOLBF, 0);    /* ファイルへ出すときも 1 行ずつ出す(落ちたときに表示を失わない)*/
     signal(SIGINT, on_sig);
@@ -2590,7 +2627,7 @@ int main(int argc, char **argv)
         for (unsigned p = 0; p < BFM_MAX_PORT; p++)        /* 多重度の枠の中継バッファが大きいので、接続は使う分だけ */
             if (g_bfm_port_conn[p] != 0) g_bfm_port_conn[p] = PERF_CORES;
     }
-    if (strcmp(mode, "run") != 0 && !g_serve && !bench && !race && !wpost && !perf && !fw && strcmp(mode, "info") != 0) {
+    if (strcmp(mode, "run") != 0 && !g_serve && !bench && !race && !wpost && !perf && !fw && !reset && strcmp(mode, "info") != 0) {
         usage();
         return 2;
     }
@@ -2618,7 +2655,8 @@ int main(int argc, char **argv)
     else if (race) ret = run_race(threads, iters);
     else if (wpost) ret = run_wpost(iters);
     else if (perf) ret = run_perf(iters);
-    else if (fw) ret = run_fw(fw_path, fw_activate);
+    else if (fw) ret = run_fw(fw_path, fw_activate, fw_reset);
+    else if (reset) ret = run_reset();
     else ret = run_all(threads, iters, oob);
     do_shutdown();
     if (g_steplog) {
