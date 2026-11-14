@@ -379,6 +379,30 @@ def split_elseif(st):
         return (rows, els) if len(rows) >= 2 else None
 
 
+def lone_return(body):
+    """本体が return 1 つだけなら、その手順を返す(ひし形の横に置く)。そうでなければ None。"""
+    if isinstance(body, list) and len(body) == 1 and isinstance(body[0], dict) and step_kind(body[0]) == "return":
+        return body[0]
+    return None
+
+
+def return_text(st):
+    v = st["return"]
+    return "戻る: %s" % v if v not in ("", True) else "戻る"
+
+
+def side_if(st):
+    """if の片方の枝が return 1 つだけなら (横に置く return, その枝の名前, もう片方の枝, その名前) を返す。
+    return をひし形の右に置き、もう片方の枝はひし形の真下へ続ける(縦を詰める)。"""
+    yes, no = st.get("yes", "はい"), st.get("no", "いいえ")
+    t, e = st.get("then", []), st.get("else", [])
+    if lone_return(t):
+        return lone_return(t), yes, e, no
+    if lone_return(e):
+        return lone_return(e), no, t, yes
+    return None
+
+
 def columns_of(st):
     """列に並べて描く switch("layout": "columns")なら [(case のラベル, 本体), ...] を返す(default は最後の列)。"""
     if st.get("layout") is None:
@@ -477,6 +501,8 @@ class Layout:
             _, dh, _ = node_size("if", text)
             Lb, Rb, Hb = self.measure(body) if body else (0, 0, 0)
             Lmax, Rmax = max(Lmax, Lb), max(Rmax, Rb)
+            if lone_return(body):
+                Hb = -1 - Hb    # 横に並べる印(高さは switch_row_h で見る)
             rows.append((text, body, dh, Hb))
         bx_off = DIA_W / 2 + HGAP + max(Lmax, 40)
         lane_off = bx_off + max(Rmax, 40) + HGAP / 2
@@ -484,7 +510,9 @@ class Layout:
 
     @staticmethod
     def switch_row_h(dh, body, Hb):
-        """case 1 つぶんの高さ(本体はひし形の中央より VGAP 下から始める)。"""
+        """case 1 つぶんの高さ(本体はひし形の中央より VGAP 下から始める。return だけの本体はひし形と同じ高さ)。"""
+        if Hb < 0:
+            return max(dh, -1 - Hb)
         return max(dh, dh / 2 + VGAP + Hb) if body else dh
 
     COL_BUS, COL_TOP = 18, 26   # 列に並べる switch: ひし形の下から横の線まで / 横の線から列の先頭まで
@@ -523,6 +551,15 @@ class Layout:
             Lb, Rb, Hb = self.measure(st.get("body", []))
             L = max(Lb + GRP_PAD, tw(st["group"]) * 1.15 + 8 + 16)   # 見出しは太字なので 1 割余計に見る
             return L, Rb + GRP_PAD, GRP_HEAD + Hb + GRP_PAD
+        if k == "if" and side_if(st):
+            ret, _, other, _ = side_if(st)
+            dw, dh, _ = node_size("if", st["if"])
+            rw, rh, _ = node_size("return", return_text(ret))
+            hh = max(dh, rh)
+            Lo, Ro, Ho = self.measure(other)
+            L = max(Lo, dw / 2)
+            R = max(Ro, dw / 2 + HGAP + rw)
+            return L, R, hh + ((VGAP + Ho) if other else 0)
         if k == "if":
             dw, dh, _ = node_size("if", st["if"])
             L1, R1, H1 = self.measure(st.get("then", []))
@@ -601,6 +638,15 @@ class Layout:
             d = self.new_node("if", text, cx, yy)
             self.connect(cur_in, d)
             cy = yy + dh / 2
+            if Hb < 0:
+                # return だけ: ひし形の右に同じ高さで置く
+                rh = -1 - Hb
+                nd = self.new_node("return", return_text(body[0]), bx, cy - rh / 2)
+                self.edges.append({"src": d["id"], "dst": nd["id"], "label": "はい",
+                                   "pts": [(cx + d["w"] / 2, cy), (nd["x"], cy)]})
+                cur_in = [(d["id"], [(cx, yy + dh)], "いいえ")]
+                yy += self.switch_row_h(dh, body, Hb) + VGAP
+                continue
             into = [(d["id"], [(cx + d["w"] / 2, cy), (bx, cy)], "はい")]
             ob, bb = self.place(body, bx, cy + VGAP, into) if body else (into, cy)
             for src, pts, lab in ob:
@@ -676,10 +722,26 @@ class Layout:
             bottom = y + H
             return [(src, pts + [(pts[-1][0], bottom)], lab) for src, pts, lab in ob], bottom
         if k in ("return", "end"):
-            text = st[k] if k == "end" else "戻る: %s" % st[k] if st[k] not in ("", True) else "戻る"
+            text = st[k] if k == "end" else return_text(st)
             nd = self.new_node("return", text, cx, y)
             self.connect(outs, nd)
             return [], y + nd["h"]
+        if k == "if" and side_if(st):
+            # 片方の枝が return だけ: return をひし形の右に同じ高さで置き、もう片方は真下へ続ける
+            ret, rlab, other, olab = side_if(st)
+            _, dh, _ = node_size("if", st["if"])
+            rw, rh, _ = node_size("return", return_text(ret))
+            hh = max(dh, rh)
+            d = self.new_node("if", st["if"], cx, y + (hh - dh) / 2)
+            self.connect(outs, d)
+            cy = d["y"] + dh / 2
+            nd = self.new_node("return", return_text(ret), cx + d["w"] / 2 + HGAP + rw / 2, cy - rh / 2)
+            self.edges.append({"src": d["id"], "dst": nd["id"], "label": rlab,
+                               "pts": [(cx + d["w"] / 2, cy), (nd["x"], cy)]})
+            down = [(d["id"], [(cx, d["y"] + dh)], olab)]
+            if other:
+                return self.place(other, cx, y + hh + VGAP, down)
+            return [(down[0][0], down[0][1] + [(cx, y + hh)], olab)], y + hh
         if k == "if":
             yes, no = st.get("yes", "はい"), st.get("no", "いいえ")
             d = self.new_node("if", st["if"], cx, y)
