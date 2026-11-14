@@ -964,10 +964,6 @@ body.book #toc,body.book #preamble,body.book h1.sect0,body.book .sect1>h2{page-b
 <td class="tableblock halign-left valign-top"><p class="tableblock">アプリケーションが、エラーになった・相手が切った接続(または使える接続)を張り直すための関数。bfmem は切れた接続を自分からは畳まないので、その接続で転送しているコアが無いことを確かめてから、これで張り直しを頼む。実際の張り直しはその後の <code>bfm_run()</code> が進め、相手のノードでも同じ接続についてこれを呼ぶ。</p></td>
 </tr>
 <tr>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><a href="#src_bfm_cm-bfm_conn_steplog"><code>bfm_conn_steplog(port, i)</code></a></p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">アプリケーションや試験が、1 本の接続がどの手順をどの順に通り、それぞれにどれだけ時間がかかり、どのコアが進めたかを調べるための関数。確立が進まない・張り直しが遅いといったときの切り分けに使う。どのコアから呼んでもよい。</p></td>
-</tr>
-<tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><a href="#src_bfm_core-bfm_shutdown"><code>bfm_shutdown()</code></a></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">アプリケーションが bfmem をやめるときに、全部の接続を畳み、NIC を止めるための関数。成功が返るまで呼び続ける。立ち上げの途中でも呼べ、止めた後に <code>bfm_run()</code> を呼ぶと最初から立ち上げ直す。ほかのコアが bfmem を使っていないときに 1 つのコアから呼ぶ。</p></td>
 </tr>
@@ -1106,6 +1102,13 @@ body.book #toc,body.book #preamble,body.book h1.sect0,body.book .sect1>h2{page-b
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock"><a href="#src_bfm_ops-bfm_strerror"><code>bfm_strerror(rc)</code></a></p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">アプリケーションが、ライブラリの関数の戻り値を、表示やログのための説明の文字列にするための関数。</p></td>
+</tr>
+<tr>
+<th class="tableblock halign-left valign-top" colspan="2"><p class="tableblock">ログ表示ツール</p></th>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><a href="#src_bfm_cm-bfm_conn_steplog"><code>bfm_conn_steplog(port, i)</code></a></p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">アプリケーションや試験が、1 本の接続がどの手順をどの順に通り、それぞれにどれだけ時間がかかり、どのコアが進めたかを調べるための関数。確立が進まない・張り直しが遅いといったときの切り分けに使う。どのコアから呼んでもよい。</p></td>
 </tr>
 </tbody>
 </table>
@@ -41555,7 +41558,7 @@ MB/s はデータ 512 バイト × ブロックの数で数える(PI の 8 バ�
 </div>
 <div id="footer">
 <div id="footer-text">
-Last updated 2026-11-14 14:44:34 +0900
+Last updated 2026-11-14 15:03:12 +0900
 </div>
 </div>
 </body>
