@@ -480,21 +480,28 @@ body.book #toc,body.book #preamble,body.book h1.sect0,body.book .sect1>h2{page-b
 <li><a href="#_bfmem_が使うコマンド">3.5.2. bfmem が使うコマンド</a></li>
 </ul>
 </li>
-<li><a href="#cx-eq">3.6. EQ(イベント)</a></li>
-<li><a href="#cx-qp">3.7. キューペア(QP)の持ち方</a>
+<li><a href="#cx-fw">3.6. FW の更新とカードのリセット</a>
 <ul class="sectlevel3">
-<li><a href="#_qp_コンテキストqpcで書く欄">3.7.1. QP コンテキスト(QPC)で書く欄</a></li>
-<li><a href="#_状態の遷移">3.7.2. 状態の遷移</a></li>
+<li><a href="#_使うレジスタ">3.6.1. 使うレジスタ</a></li>
+<li><a href="#_fw_の更新の手順">3.6.2. FW の更新の手順</a></li>
+<li><a href="#_カードのリセットbfm_fw_reset">3.6.3. カードのリセット(<code>bfm_fw_reset()</code>)</a></li>
 </ul>
 </li>
-<li><a href="#cx-wqe">3.8. WQE と CQE</a>
+<li><a href="#cx-eq">3.7. EQ(イベント)</a></li>
+<li><a href="#cx-qp">3.8. キューペア(QP)の持ち方</a>
 <ul class="sectlevel3">
-<li><a href="#_wqe">3.8.1. WQE</a></li>
-<li><a href="#_cqe">3.8.2. CQE</a></li>
-<li><a href="#_mkey_と_pd">3.8.3. MKey と PD</a></li>
+<li><a href="#_qp_コンテキストqpcで書く欄">3.8.1. QP コンテキスト(QPC)で書く欄</a></li>
+<li><a href="#_状態の遷移">3.8.2. 状態の遷移</a></li>
 </ul>
 </li>
-<li><a href="#cx-gen">3.9. ConnectX-4〜7 の違いへの備え</a></li>
+<li><a href="#cx-wqe">3.9. WQE と CQE</a>
+<ul class="sectlevel3">
+<li><a href="#_wqe">3.9.1. WQE</a></li>
+<li><a href="#_cqe">3.9.2. CQE</a></li>
+<li><a href="#_mkey_と_pd">3.9.3. MKey と PD</a></li>
+</ul>
+</li>
+<li><a href="#cx-gen">3.10. ConnectX-4〜7 の違いへの備え</a></li>
 </ul>
 </li>
 <li><a href="#_includebfm_port_h">4. <code>include/bfm_port.h</code></a>
@@ -1403,7 +1410,7 @@ cd bfmem</code></pre>
 <div class="sectionbody">
 <div class="paragraph">
 <p>bfmem が使う範囲の ConnectX の仕様をまとめる。値はソース(<code>src/bfm_internal.h</code>・<code>src/mlx5_*.c</code>・<code>src/bfm_ops.c</code>・<code>src/bfm_pci.c</code>)に
-書いてあるものと同じで、もとは Linux の mlx5 のヘッダ(<code>include/linux/mlx5/mlx5_ifc.h</code>・<code>device.h</code>・<code>qp.h</code>)と、
+書いてあるものと同じで(FW の更新とカードのリセットは <code>src/bfm_fw.c</code>・<code>src/bfm_core.c</code>)、もとは Linux の mlx5 のヘッダ(<code>include/linux/mlx5/mlx5_ifc.h</code>・<code>device.h</code>・<code>qp.h</code>)と、
 Linux の mlx5_core / mlx5_ib の手順。実機で確かめたのは ConnectX-4 Lx だけ(FW 14.29 と 14.32)。
 ConnectX-4〜7 の違いへの備えは、この章の最後に書く。</p>
 </div>
@@ -1455,8 +1462,10 @@ bfmem はどちらも頼まないので、CQE を書いても EQE は来ず、EQ
 <tbody>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock">① 設定空間</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">装置の確認・FLR・BAR0 の割り当て・Memory Space / Bus Master・MRRS</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock"><code>bfm_pci_setup_step()</code>(VxWorks は ECAM を直接、Linux は VFIO の設定空間)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">装置の確認・FLR・BAR0 の割り当て・Memory Space / Bus Master・MRRS。<br>
+カードのリセットでは、上流のポートでリンクを落とし、戻った装置の設定空間を書き戻す</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock"><code>bfm_pci_setup_step()</code>(VxWorks は ECAM を直接、Linux は VFIO の設定空間)。<br>
+リセットは <code>bfm_pci_reset_step()</code>(VxWorks は ECAM、Linux は sysfs の config)</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock">② 初期化セグメント</p></td>
@@ -1507,6 +1516,9 @@ FW に渡したページは、NIC が自分の作業域(ICM)として読み書�
 </li>
 <li>
 <p><strong>止める</strong>: <code>TEARDOWN_HCA</code> の後は FW にコマンドを出さず、Bus Master を落とす。</p>
+</li>
+<li>
+<p><strong>FW を書き換える</strong>(必要なときだけ): <code>ACCESS_REG</code> のレジスタで FW に新しい像を渡して書かせ、カードのリセットで切り替える(<a href="#cx-fw">FW の更新とカードのリセット</a>)。</p>
 </li>
 </ol>
 </div>
@@ -1701,7 +1713,7 @@ CQE で完了を確かめてから同じ手順を繰り返す。</p>
 <div class="sect3">
 <h4 id="_pcie_の設定空間">3.3.1. PCIe の設定空間</h4>
 <div class="paragraph">
-<p><code>bfm_pci_setup()</code>(<code>src/bfm_pci.c</code>)が設定する。PCIe Capability の位置は Capabilities Pointer(0x34)からたどる。</p>
+<p><code>bfm_pci_setup_step()</code>(<code>src/bfm_pci.c</code>)が設定する。PCIe Capability の位置は Capabilities Pointer(0x34)からたどる。</p>
 </div>
 <table class="tableblock frame-all grid-all stretch">
 <colgroup>
@@ -1768,6 +1780,70 @@ CQE で完了を確かめてから同じ手順を繰り返す。</p>
 <p>FLR は Bus Master を落とし、Transactions Pending が消えるのを待ってから Initiate FLR を書き、100ms 待つ(PCIe の決まり)。
 その後、Vendor ID が読めるようになるまで最大 1 秒待つ。</p>
 </div>
+<div class="paragraph">
+<p>カードのリセット(<a href="#cx-fw">FW の更新とカードのリセット</a>)では、さらに次を読み書きする。装置の設定空間は OS の仮想化を通さずに装置そのものを触る
+(<code>bfm_port_pci_hw_read32()</code> など。Linux の VFIO は BAR・Max Payload Size などを仮想化していて、本当の値が見えず・戻らない)。</p>
+</div>
+<table class="tableblock frame-all grid-all stretch">
+<colgroup>
+<col style="width: 12.5%;">
+<col style="width: 12.5%;">
+<col style="width: 25%;">
+<col style="width: 50%;">
+</colgroup>
+<thead>
+<tr>
+<th class="tableblock halign-left valign-top">どこ</th>
+<th class="tableblock halign-left valign-top">位置</th>
+<th class="tableblock halign-left valign-top">名前</th>
+<th class="tableblock halign-left valign-top">bfmem がすること</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">上流のポート</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">0x0e</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Header Type</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">1(ブリッジ)であることを確かめる</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">上流のポート</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">PCIe + 0x02</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">PCIe Capabilities(bit7:4 = Device/Port Type)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">4(ルートポート)か 6(スイッチの下りポート)であることを確かめる</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">上流のポート</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">PCIe + 0x0c</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Link Capabilities(bit20)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Data Link Layer Link Active を報告できるか。できなければ、リンクを戻してから 1 秒待つだけにする</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">上流のポート</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">PCIe + 0x10</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Link Control(bit4 = Link Disable)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">落とし方 0: 500ms 立てて戻す</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">上流のポート</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">0x3e</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Bridge Control(bit6 = Secondary Bus Reset)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">落とし方 1: 2ms 立てて戻す</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">上流のポート</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">PCIe + 0x12</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">Link Status(bit13 = Data Link Layer Link Active)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">リンクが上がるのを最大 2 秒待つ</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">装置(全部のポート)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">0x10〜0x24・0x0c・PCIe + 0x08・+ 0x10・+ 0x28・0x04</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">BAR0〜5・Cache Line / Latency・Device Control・Link Control・Device Control 2・Command</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">リセットの前に覚え、リセットの後に書き戻す(Command は最後)。Device Control の FLR と Link Control の Link Disable・Retrain は戻さない</p></td>
+</tr>
+</tbody>
+</table>
 </div>
 <div class="sect3">
 <h4 id="_bar0_の初期化セグメントinitialization_segment">3.3.2. BAR0 の初期化セグメント(Initialization Segment)</h4>
@@ -1942,59 +2018,23 @@ VxWorks は <code>g_bfm_bar0_wc_va</code>)。書いた後に <code>sfence</code>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock">0x907f</p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">MCAM</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">FW の更新の前に読む(72 バイト)。byte 11 の bit0〜3 = MCQS・MCQI・MCC・MCDA に対応している。HCA の能力の <code>mcam_reg</code>(bit 0x1a9)が 1 のときだけ読む</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">FW の更新の前に読む。対応しているレジスタの印(<a href="#cx-fw">FW の更新とカードのリセット</a>)</p></td>
 </tr>
 <tr>
-<td class="tableblock halign-left valign-top"><p class="tableblock">0x9060</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">MCQS</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">部品の一覧(16 バイト)。[2..3] component_index を入れて読み、[6..7] identifier(1 = FW の像 BOOT_IMG)、byte 0 bit7 last_index_flag(最後の部品)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">0x9060 / 0x9061 / 0x9062 / 0x9063</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">MCQS / MCQI / MCC / MCDA</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">FW の更新(<a href="#cx-fw">FW の更新とカードのリセット</a>)</p></td>
 </tr>
 <tr>
-<td class="tableblock halign-left valign-top"><p class="tableblock">0x9061</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">MCQI</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">部品の情報(頭 24 バイト + 情報)。[2..3] component_index、byte 11 info_type(0 = 能力、1 = 版)、[22..23] data_size、byte 0 bit7 read_pending_component(1 = 次の起動の像)。能力は 24 バイト目から: [8..11] max_component_size、byte 12 の上位 4bit log_mcda_word_size、[14..15] mcda_max_write_size、byte 16 bit4 match_psid</p></td>
-</tr>
-<tr>
-<td class="tableblock halign-left valign-top"><p class="tableblock">0x9062</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">MCC</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">FW の更新の手順(32 バイト)。byte 3 instruction(1 LOCK・2 RELEASE・3 UPDATE_COMPONENT・4 VERIFY_COMPONENT・6 ACTIVATE・8 CANCEL)、[6..7] component_index、[9..11] update_handle、[16..19] component_size。読むと byte 14 error_code、byte 15 の下位 4bit control_state(0 IDLE・1 LOCKED・3 DOWNLOAD・4 VERIFY・5 APPLY・6 ACTIVATE)</p></td>
-</tr>
-<tr>
-<td class="tableblock halign-left valign-top"><p class="tableblock">0x9063</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">MCDA</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">部品のデータ(頭 16 バイト + データ)。[1..3] update_handle、[4..7] offset、[10..11] size、16 バイト目からデータ(4 バイトずつ、ホスト順の値をビッグエンディアンで)</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">0x9028</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">MFRL</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">カードのリセットの前に level 3 を書く(<a href="#cx-fw">FW の更新とカードのリセット</a>)</p></td>
 </tr>
 </tbody>
 </table>
 <div class="paragraph">
-<p>MCC / MCDA などは 16 バイトより長いので、FW の更新(<code>src/bfm_fw.c</code>)は自分の作業域で ACCESS_REG を組む
-(長い分はメールボックスの鎖で渡す)。手順は Linux の mlxfw と同じ: FSM が IDLE か確かめる → LOCK → LOCKED を待つ →
-UPDATE_COMPONENT → DOWNLOAD を待つ → MCDA で全部渡す → VERIFY_COMPONENT → LOCKED を待つ → ACTIVATE → LOCKED を待つ → RELEASE。
-状態を待つところは 200ms ごとに MCC を読み、30 秒で時間切れ。error_code が 0 でなければ失敗(2 ハッシュが合わない・
-3 当てはまらない像・8 形が正しくない など)で、CANCEL・RELEASE を出して終わる。FW は今動いている像とは別の置き場に書くので、
-切り替える(ACTIVATE)までは次の起動の像は変わらない。新しい FW は装置のリセットか電源の入れ直しで有効になる。</p>
-</div>
-<div class="paragraph">
-<p>MCDA で渡す部品は、配布の .bin(フラッシュ全体の像。ConnectX-4 Lx で 16MB)そのものではない。mstflint が MFA2 を作るとき・
-MCC で書くときと同じく(<code>FwExtract4MBImage()</code>)、像の目次(ITOC。先頭から 4KiB ごとに探す。印は "ITOC" と決まった 12 バイト、
-頭と欄は 32 バイトで、最初の 7 語の CRC16(多項式 0x100b)を最後の語に持つ)を読み、相対番地の欄の終わりまでを渡す。
-先頭の 16 バイト(印 "MTFW")と、ボードごとの情報(MAC・GUID・VPD など。フラッシュの終わりに絶対番地で置かれる)を指す
-device_data の欄は 0xFF にして渡す。ConnectX-4 Lx の 14.29.1016 では、部品の上限 7MB・MCDA 1 回 128 バイトで、
-16,744,768 バイトの .bin のうち 4,840,404 バイトを渡す。</p>
-</div>
-<div class="paragraph">
-<p>書いた FW はカードのリセットで動き出す。カードだけのリセットは MFRL(0x9028、8 バイト。<code>bfm_fw_mfrl_step()</code>)で頼む:
-byte 7 reset_level(対応しているものの印。bit0 live-patch・bit3 PCI のリセット・bit6 warm reboot)、byte 6 reset_type、
-byte 5 の上位 3bit pci_reset_req_method(0 = リンクの切断)と下位 4bit reset_state。reset_level に 0x08(level 3)を書いて
-ドライバを外し(TEARDOWN_HCA・Bus Master を落とす)、上流のポートでリンクを落として繋ぎ直すと、FW がカード全体(全部の function)を
-リセットして新しい像で立ち上がる(<code>bfm_fw_reset()</code>)。リンクの落とし方は pci_reset_req_method に従う:
-0 なら上流のポートの Link Control の Link Disable(bit 4)を 500ms 立てて戻し、1 なら Bridge Control の Secondary Bus Reset
-(bit 6)を 2ms 立てて戻す。その後、上流のポートの Link Status の Data Link Layer Link Active(bit 13。Link Capabilities の
-bit 20 が報告できる印)を待ち、100ms 待ち、ベンダ ID が読めるのを待つ(<code>bfm_pci_reset_step()</code>)。リセットで設定空間は初期値に
-戻るので、BAR・Command・Device Control(Max Payload Size。上流のポートより小さいままだと、上流からの大きい TLP を受けられない)・
-Link Control・Device Control 2 を前の値に書き戻す。ConnectX-4 Lx では reset_level 0xc8・落とし方 0 で、リンクは 43ms で上がり、
-立ち上げ直した bfmem に FW が新しい版を返した。
-MCAM の byte 18 bit0 が MFRL への対応の印(ConnectX-4 Lx は 14.29.1016 で 0・14.32.1912 で 1。0 でも MFRL は読み書きできた)。</p>
+<p>FW の更新とカードのリセットのレジスタは 16 バイトより長いものがあるので、<code>src/bfm_fw.c</code> は自分の作業域で <code>ACCESS_REG</code> を組む
+(長い分はメールボックスの鎖で渡す)。</p>
 </div>
 </div>
 <div class="sect3">
@@ -2018,8 +2058,8 @@ MCAM の byte 18 bit0 が MFRL への対応の印(ConnectX-4 Lx は 14.29.1016 �
 <tbody>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock">general(0)</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">page_request_disable([0] bit1)・log_max_ra_req_qp([41])・log_max_ra_res_qp([43])・port_type([54] bit1:0)・roce([67] bit2)・bf([76] bit7)・log_bf_reg_size([77] bit4:0)・umr_fence([65] bit5:4)・sho([66] bit0)・num_vhca_ports([194])</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">port_type が 1(Ethernet)でなければ断る。BlueFlame の窓の大きさ・同時に出せる read / atomic の数・T10-DIF のオフロードの有無を決める。値は変えずにそのまま書き戻す</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">page_request_disable([0] bit1)・log_max_ra_req_qp([41])・log_max_ra_res_qp([43])・port_type([54] bit1:0)・roce([67] bit2)・bf([76] bit7)・log_bf_reg_size([77] bit4:0)・umr_fence([65] bit5:4)・sho([66] bit0)・mcam_reg([53] bit6)・num_vhca_ports([194])</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">port_type が 1(Ethernet)でなければ断る。BlueFlame の窓の大きさ・同時に出せる read / atomic の数・T10-DIF のオフロードの有無、FW の更新で MCAM を読めるかを決める。値は変えずにそのまま書き戻す</p></td>
 </tr>
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock">atomic(3)</p></td>
@@ -2310,14 +2350,185 @@ entry の持ち主になり、ほかの手順はコマンドを出せない(<cod
 <tr>
 <td class="tableblock halign-left valign-top"><p class="tableblock">0x805</p></td>
 <td class="tableblock halign-left valign-top"><p class="tableblock">ACCESS_REG</p></td>
-<td class="tableblock halign-left valign-top"><p class="tableblock">HOST_ENDIANNESS・PMTU・PAOS</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">HOST_ENDIANNESS・PMTU・PAOS、FW の更新(MCAM・MCQS・MCQI・MCC・MCDA)、カードのリセット(MFRL)</p></td>
 </tr>
 </tbody>
 </table>
 </div>
 </div>
 <div class="sect2">
-<h3 id="cx-eq">3.6. EQ(イベント)</h3>
+<h3 id="cx-fw">3.6. FW の更新とカードのリセット</h3>
+<div class="paragraph">
+<p>フラッシュの FW の書き換え(<code>bfm_fw_update()</code>)は、FW 自身に書かせる。方式は Linux の mlx5_core + mlxfw と同じで、
+FW の中の更新の手順(FSM)を <code>ACCESS_REG</code> のレジスタで進める。書いた FW は、電源の入れ直しか、カードのリセット
+(<code>bfm_fw_reset()</code>)で動き出す。どちらも待たずに進める(FW のコマンド・FSM の状態待ち・リンクの待ちで <code>BFM_INPROGRESS</code> を返す)。</p>
+</div>
+<div class="sect3">
+<h4 id="_使うレジスタ">3.6.1. 使うレジスタ</h4>
+<table class="tableblock frame-all grid-all stretch">
+<colgroup>
+<col style="width: 14.2857%;">
+<col style="width: 14.2857%;">
+<col style="width: 71.4286%;">
+</colgroup>
+<thead>
+<tr>
+<th class="tableblock halign-left valign-top">番号</th>
+<th class="tableblock halign-left valign-top">名前</th>
+<th class="tableblock halign-left valign-top">中身(先頭からのバイト)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">0x907f</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">MCAM</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">72 バイト。byte 11 の bit0〜3 = MCQS・MCQI・MCC・MCDA に対応している。byte 18 bit0 = MFRL に対応している。HCA の能力の <code>mcam_reg</code> が 1 のときだけ読む</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">0x9060</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">MCQS</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">部品(component)の一覧。16 バイト。[2..3] component_index を入れて読み、[6..7] identifier(1 = FW の像 BOOT_IMG)、byte 0 bit7 last_index_flag(最後の部品)</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">0x9061</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">MCQI</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">部品の情報。頭 24 バイト + 情報。[2..3] component_index、byte 11 info_type(0 = 能力、1 = 版)、[22..23] data_size、byte 0 bit7 read_pending_component(1 = 次の起動の像)。
+能力は 24 バイト目から: [8..11] max_component_size、byte 12 の上位 4bit log_mcda_word_size、[14..15] mcda_max_write_size、byte 16 bit4 match_psid(PSID を確かめる)</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">0x9062</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">MCC</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">FSM の命令と状態。32 バイト。byte 3 instruction(1 LOCK・2 RELEASE・3 UPDATE_COMPONENT・4 VERIFY_COMPONENT・6 ACTIVATE・8 CANCEL)、[6..7] component_index、[9..11] update_handle、[16..19] component_size。
+読むと byte 14 error_code、byte 15 の下位 4bit control_state(0 IDLE・1 LOCKED・3 DOWNLOAD・4 VERIFY・5 APPLY・6 ACTIVATE)</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">0x9063</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">MCDA</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">部品のデータ。頭 16 バイト + データ。[1..3] update_handle、[4..7] offset、[10..11] size、16 バイト目からデータ(4 バイトずつ、ホスト順の値をビッグエンディアンで)</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">0x9028</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">MFRL</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">8 バイト。byte 7 reset_level(読むと対応しているものの印。bit0 live-patch・bit3 PCI のリセット(level 3)・bit6 warm reboot)、byte 6 reset_type、
+byte 5 の上位 3bit pci_reset_req_method(0 = Link Disable、1 = Secondary Bus Reset)と下位 4bit reset_state</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="sect3">
+<h4 id="_fw_の更新の手順">3.6.2. FW の更新の手順</h4>
+<div class="olist arabic">
+<ol class="arabic">
+<li>
+<p>MCAM で、MCQS・MCQI・MCC・MCDA に対応しているか確かめる(無ければ何もしない)。</p>
+</li>
+<li>
+<p>MCQS で、FW の像の部品(identifier = BOOT_IMG)の番号を探す。</p>
+</li>
+<li>
+<p>MCQI で部品の能力を読み、渡す像の大きさが max_component_size に収まるかを確かめる。PSID を確かめない装置
+(match_psid = 0)には、<code>g_bfm_fw_allow_no_psid_check</code> が 0 なら書かない。MCDA 1 回の長さは mcda_max_write_size と 2KiB の小さいほう。</p>
+</li>
+<li>
+<p>MCC を読み、FSM が IDLE か確かめる(ほかの道具・ほかのポートが更新していれば何もしない)。</p>
+</li>
+<li>
+<p>LOCK → LOCKED を待つ → UPDATE_COMPONENT → DOWNLOAD を待つ → MCDA で全部渡す → VERIFY_COMPONENT → LOCKED を待つ →
+ACTIVATE → LOCKED を待つ → RELEASE。確かめるだけ(<code>BFM_FW_VERIFY_ONLY</code>)なら ACTIVATE の代わりに CANCEL。</p>
+<div class="ulist">
+<ul>
+<li>
+<p>状態を待つところは 200ms ごとに MCC を読み、30 秒で時間切れ(mlxfw と同じ)。</p>
+</li>
+<li>
+<p>error_code が 0 でなければ失敗(2 ハッシュが合わない・3 当てはまらない像・8 形が正しくない など)。部品の更新を始めていれば CANCEL、
+手順を取っていれば RELEASE を出してから終わる。</p>
+</li>
+<li>
+<p>FW は今動いている像とは別の置き場に書くので、ACTIVATE までは次の起動の像は変わらない。ACTIVATE は VERIFY が通った後にしか出さない。</p>
+</li>
+<li>
+<p>前後で MCQI の版(info_type 1)を読み、今動いている版と次の起動の版を表示する。</p>
+</li>
+</ul>
+</div>
+</li>
+</ol>
+</div>
+<div class="paragraph">
+<p>MCDA で渡す部品は、配布の .bin(フラッシュ全体の像。ConnectX-4 Lx で 16MB)そのものではない(そのまま渡すと FW が受けない)。
+mstflint が MFA2 を作るとき・MCC で書くときと同じく(<code>FwExtract4MBImage()</code>)、像の目次(ITOC。先頭から 4KiB ごとに 64KiB まで探す。
+印は "ITOC" と決まった 12 バイト、頭と欄は 32 バイトで、最初の 7 語の CRC16(多項式 0x100b)を最後の語に持つ)を読み、
+相対番地の欄の終わりまでを渡す。先頭の 16 バイト(印 "MTFW")と、ボードごとの情報(MAC・GUID・VPD など。フラッシュの終わりに
+絶対番地で置かれる)を指す device_data の欄は 0xFF にして渡す。印・CRC が合わない(MFA2・zip・壊れたファイル)なら書かない。
+ConnectX-4 Lx の 14.29.1016 では、部品の上限 7MB・MCDA 1 回 128 バイトで、16,744,768 バイトの .bin のうち 4,840,404 バイトを渡す。</p>
+</div>
+</div>
+<div class="sect3">
+<h4 id="_カードのリセットbfm_fw_reset">3.6.3. カードのリセット(<code>bfm_fw_reset()</code>)</h4>
+<div class="paragraph">
+<p>MFRL に level 3 を書いた後に PCIe のリンクが落ちると、FW はカード全体(全部の function)をリセットし、次の起動の像で立ち上がる。
+リンクは上流のポート(ルートポートかスイッチの下りポート)で落とす(Linux の mlx5 の <code>mlx5_pci_link_toggle()</code> / <code>mlx5_pci_reset_bus()</code> と同じ)。</p>
+</div>
+<table class="tableblock frame-all grid-all stretch">
+<colgroup>
+<col style="width: 16.6666%;">
+<col style="width: 83.3334%;">
+</colgroup>
+<thead>
+<tr>
+<th class="tableblock halign-left valign-top">手順</th>
+<th class="tableblock halign-left valign-top">中身</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">確かめる</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">上流のポートの設定空間が読め、ブリッジで、ルートポートかスイッチの下りポートであること(<code>bfm_pci_reset_check()</code>)。ここで断ったときは何も変えない</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">MFRL を書く</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">MFRL を読み、reset_level に level 3(bit3)があることと pci_reset_req_method を確かめ、reset_level に 0x08 を書く(<code>bfm_fw_mfrl_step()</code>)。
+FW の更新の途中なら断る。ここまでは bfmem は動いたまま</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">止める</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">全部のポートを止める(接続を畳み、<code>TEARDOWN_HCA</code>、Bus Master を落とす)。<code>bfm_run()</code> は表を進めなくなる</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">リンクを落とす</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">使っている全部のポートの設定空間を覚え(<a href="#cx-reg">設定するレジスタの一覧</a> の PCIe の設定空間の表)、pci_reset_req_method に従って上流のポートで
+Link Disable を 500ms(0)か Secondary Bus Reset を 2ms(1)立てて戻す(<code>bfm_pci_reset_begin()</code>)</p></td>
+</tr>
+<tr>
+<td class="tableblock halign-left valign-top"><p class="tableblock">戻す</p></td>
+<td class="tableblock halign-left valign-top"><p class="tableblock">リンクが上がる(Data Link Layer Link Active)のを最大 2 秒待ち、100ms 待ち、全部のポートで Vendor ID が読めるのを最大 2 秒待ち、
+覚えた設定空間を書き戻す(<code>bfm_pci_reset_step()</code>)。最後に移植層を閉じる(立ち上げ直すのは呼び出し側)</p></td>
+</tr>
+</tbody>
+</table>
+<div class="ulist">
+<ul>
+<li>
+<p>リセットで設定空間は初期値に戻る(BAR が 0、Max Payload Size が 128)。Max Payload Size を戻さないと、上流のポートより小さいままで、
+上流からの大きい TLP を受けられない。</p>
+</li>
+<li>
+<p>カードの全部の function がリセットされるので、OS がもう片方の function を使っていないこと(Linux なら 2 つの PF を両方 vfio-pci にする)。</p>
+</li>
+<li>
+<p>ConnectX-4 Lx では reset_level 0xc8・落とし方 0 で、リンクは 43ms で上がり、立ち上げ直した bfmem に FW が新しい版を返した。</p>
+</li>
+<li>
+<p>MCAM の MFRL の印は ConnectX-4 Lx の 14.29.1016 で 0・14.32.1912 で 1 だった(0 でも MFRL は読み書きできた)。bfmem は MCAM の印を見ずに
+MFRL を読んでみて、読めなければ断る。Linux の <code>devlink … fw_activate</code> は MCAM の印を見るので、14.29.1016 では断られる。</p>
+</li>
+</ul>
+</div>
+</div>
+</div>
+<div class="sect2">
+<h3 id="cx-eq">3.7. EQ(イベント)</h3>
 <div class="paragraph">
 <p>EQ はポートごとに 1 本(64 バイトの EQE x 128 = 8KiB)。全部の CQ の通知先(c_eqn)で、非同期のイベントも来る。arm しないので割り込みは来ず、
 <code>bfm_run()</code>(と立ち上げ・接続の確立の途中)が <code>mlx5_eq_poll()</code> で読む。</p>
@@ -2378,7 +2589,7 @@ entry の持ち主になり、ほかの手順はコマンドを出せない(<cod
 </table>
 </div>
 <div class="sect2">
-<h3 id="cx-qp">3.7. キューペア(QP)の持ち方</h3>
+<h3 id="cx-qp">3.8. キューペア(QP)の持ち方</h3>
 <div class="paragraph">
 <p>bfmem の QP は 2 種類。どちらも CQ を 1 本持ち、送受信で共有する。</p>
 </div>
@@ -2449,7 +2660,7 @@ entry の持ち主になり、ほかの手順はコマンドを出せない(<cod
 </ul>
 </div>
 <div class="sect3">
-<h4 id="_qp_コンテキストqpcで書く欄">3.7.1. QP コンテキスト(QPC)で書く欄</h4>
+<h4 id="_qp_コンテキストqpcで書く欄">3.8.1. QP コンテキスト(QPC)で書く欄</h4>
 <div class="paragraph">
 <p>位置は QPC の先頭からのバイト(<code>struct mlx5_ifc_qpc_bits</code> のビット位置 / 8)。コマンドの入力では QPC は [24〜] にある。</p>
 </div>
@@ -2571,7 +2782,7 @@ entry の持ち主になり、ほかの手順はコマンドを出せない(<cod
 </table>
 </div>
 <div class="sect3">
-<h4 id="_状態の遷移">3.7.2. 状態の遷移</h4>
+<h4 id="_状態の遷移">3.8.2. 状態の遷移</h4>
 <table class="tableblock frame-all grid-all stretch">
 <colgroup>
 <col style="width: 14.2857%;">
@@ -2619,9 +2830,9 @@ entry の持ち主になり、ほかの手順はコマンドを出せない(<cod
 </div>
 </div>
 <div class="sect2">
-<h3 id="cx-wqe">3.8. WQE と CQE</h3>
+<h3 id="cx-wqe">3.9. WQE と CQE</h3>
 <div class="sect3">
-<h4 id="_wqe">3.8.1. WQE</h4>
+<h4 id="_wqe">3.9.1. WQE</h4>
 <div class="paragraph">
 <p>WQE は 64 バイトの WQEBB の並び。最初の 16 バイトが制御のセグメントで、その後に種類ごとのセグメントが続く(16 バイト単位。数を ds に書く)。
 bfmem の WQE は 256 バイト(4 WQEBB = BlueFlame の窓 1 面)まで。</p>
@@ -2731,7 +2942,7 @@ bfmem の WQE は 256 バイト(4 WQEBB = BlueFlame の窓 1 面)まで。</p>
 </div>
 </div>
 <div class="sect3">
-<h4 id="_cqe">3.8.2. CQE</h4>
+<h4 id="_cqe">3.9.2. CQE</h4>
 <div class="paragraph">
 <p>CQE は 64 バイト。</p>
 </div>
@@ -2790,7 +3001,7 @@ CQ を作るとき、全部の CQE をオペコード 0xf・owner 0 にしてお
 </div>
 </div>
 <div class="sect3">
-<h4 id="_mkey_と_pd">3.8.3. MKey と PD</h4>
+<h4 id="_mkey_と_pd">3.9.3. MKey と PD</h4>
 <div class="ulist">
 <ul>
 <li>
@@ -2819,7 +3030,7 @@ CQ を作るとき、全部の CQE をオペコード 0xf・owner 0 にしてお
 </div>
 </div>
 <div class="sect2">
-<h3 id="cx-gen">3.9. ConnectX-4〜7 の違いへの備え</h3>
+<h3 id="cx-gen">3.10. ConnectX-4〜7 の違いへの備え</h3>
 <div class="ulist">
 <ul>
 <li>
@@ -2842,6 +3053,9 @@ CQ を作るとき、全部の CQE をオペコード 0xf・owner 0 にしてお
 </li>
 <li>
 <p>T10-DIF のオフロード(能力の sho)は ConnectX-4 Lx に無い。ConnectX-5 以降での動きは確かめていない。</p>
+</li>
+<li>
+<p>FW の像の切り出し(ITOC を読む)は FS3 の形(ConnectX-4 / 4 Lx)に合わせてある。ほかの形の像は印・CRC が合わず、書かずに断る。</p>
 </li>
 </ul>
 </div>
@@ -46089,7 +46303,7 @@ MB/s はデータ 512 バイト × ブロックの数で数える(PI の 8 バ�
 </div>
 <div id="footer">
 <div id="footer-text">
-Last updated 2026-11-17 00:04:19 +0900
+Last updated 2026-11-17 08:23:03 +0900
 </div>
 </div>
 </body>

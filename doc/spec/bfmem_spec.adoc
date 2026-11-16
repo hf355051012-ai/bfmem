@@ -152,7 +152,7 @@ bfmem の関数のうち、外から使うもの。関数名を押すと、そ�
 == ConnectX(mlx5)の仕様の要点
 
 bfmem が使う範囲の ConnectX の仕様をまとめる。値はソース(`src/bfm_internal.h`・`src/mlx5_*.c`・`src/bfm_ops.c`・`src/bfm_pci.c`)に
-書いてあるものと同じで、もとは Linux の mlx5 のヘッダ(`include/linux/mlx5/mlx5_ifc.h`・`device.h`・`qp.h`)と、
+書いてあるものと同じで(FW の更新とカードのリセットは `src/bfm_fw.c`・`src/bfm_core.c`)、もとは Linux の mlx5 のヘッダ(`include/linux/mlx5/mlx5_ifc.h`・`device.h`・`qp.h`)と、
 Linux の mlx5_core / mlx5_ib の手順。実機で確かめたのは ConnectX-4 Lx だけ(FW 14.29 と 14.32)。
 ConnectX-4〜7 の違いへの備えは、この章の最後に書く。
 
@@ -177,7 +177,9 @@ image::hw_block.drawio.svg[ConnectX とホストのブロック図]
 [cols="1,3,3",options="header"]
 |===
 |経路 |中身 |bfmem の場所
-|① 設定空間 |装置の確認・FLR・BAR0 の割り当て・Memory Space / Bus Master・MRRS |`bfm_pci_setup_step()`(VxWorks は ECAM を直接、Linux は VFIO の設定空間)
+|① 設定空間 |装置の確認・FLR・BAR0 の割り当て・Memory Space / Bus Master・MRRS。 +
+カードのリセットでは、上流のポートでリンクを落とし、戻った装置の設定空間を書き戻す |`bfm_pci_setup_step()`(VxWorks は ECAM を直接、Linux は VFIO の設定空間)。 +
+リセットは `bfm_pci_reset_step()`(VxWorks は ECAM、Linux は sysfs の config)
 |② 初期化セグメント |FW の版の確認、FW の初期化の完了待ち、コマンドキューの登録、コマンドのドアベル |`mlx5_hca_init_step()`・`mlx5_cmd_init()`・`mlx5_cmd_run()`
 |③ UAR ページ |WQE のドアベル・BlueFlame(WQE そのものを MMIO で書く)、EQ のドアベル |`post()`・`gsi_send()`・`mlx5_eq_update_ci()`
 |④ DMA(DMA 領域) |CPU が書いて NIC が読むもの: コマンドの入力・メールボックス、WQE(SQ・RQ)、送るデータ、doorbell record。 +
@@ -199,6 +201,7 @@ ConnectX は「FW が管理する資源(QP・CQ・EQ・MKey・PD・UAR)」と「
   完了は NIC が CQ のリングに CQE を書いて知らせる(<<cx-qp>>・<<cx-wqe>>)。
 . *イベントを受ける*: エラー・リンクの変化・FW のページ要求は EQ に EQE が来る(<<cx-eq>>)。
 . *止める*: `TEARDOWN_HCA` の後は FW にコマンドを出さず、Bus Master を落とす。
+. *FW を書き換える*(必要なときだけ): `ACCESS_REG` のレジスタで FW に新しい像を渡して書かせ、カードのリセットで切り替える(<<cx-fw>>)。
 
 リングは、書く側(作る側)が 1 つずつ積み、読む側が 1 つずつ刈り取る(読み終えたことを書く側に返す)。
 表の「書く側」「読む側」は、その中身を書くのはどちらで、読んで処理するのはどちらか。
@@ -267,7 +270,7 @@ image::hw_ladder_data_peer.drawio.svg[ラダーチャート(データの転送�
 
 ==== PCIe の設定空間
 
-`bfm_pci_setup()`(`src/bfm_pci.c`)が設定する。PCIe Capability の位置は Capabilities Pointer(0x34)からたどる。
+`bfm_pci_setup_step()`(`src/bfm_pci.c`)が設定する。PCIe Capability の位置は Capabilities Pointer(0x34)からたどる。
 
 [cols="1,2,4",options="header"]
 |===
@@ -285,6 +288,21 @@ image::hw_ladder_data_peer.drawio.svg[ラダーチャート(データの転送�
 
 FLR は Bus Master を落とし、Transactions Pending が消えるのを待ってから Initiate FLR を書き、100ms 待つ(PCIe の決まり)。
 その後、Vendor ID が読めるようになるまで最大 1 秒待つ。
+
+カードのリセット(<<cx-fw>>)では、さらに次を読み書きする。装置の設定空間は OS の仮想化を通さずに装置そのものを触る
+(`bfm_port_pci_hw_read32()` など。Linux の VFIO は BAR・Max Payload Size などを仮想化していて、本当の値が見えず・戻らない)。
+
+[cols="1,1,2,4",options="header"]
+|===
+|どこ |位置 |名前 |bfmem がすること
+|上流のポート |0x0e |Header Type |1(ブリッジ)であることを確かめる
+|上流のポート |PCIe + 0x02 |PCIe Capabilities(bit7:4 = Device/Port Type) |4(ルートポート)か 6(スイッチの下りポート)であることを確かめる
+|上流のポート |PCIe + 0x0c |Link Capabilities(bit20) |Data Link Layer Link Active を報告できるか。できなければ、リンクを戻してから 1 秒待つだけにする
+|上流のポート |PCIe + 0x10 |Link Control(bit4 = Link Disable) |落とし方 0: 500ms 立てて戻す
+|上流のポート |0x3e |Bridge Control(bit6 = Secondary Bus Reset) |落とし方 1: 2ms 立てて戻す
+|上流のポート |PCIe + 0x12 |Link Status(bit13 = Data Link Layer Link Active) |リンクが上がるのを最大 2 秒待つ
+|装置(全部のポート) |0x10〜0x24・0x0c・PCIe + 0x08・+ 0x10・+ 0x28・0x04 |BAR0〜5・Cache Line / Latency・Device Control・Link Control・Device Control 2・Command |リセットの前に覚え、リセットの後に書き戻す(Command は最後)。Device Control の FLR と Link Control の Link Disable・Retrain は戻さない
+|===
 
 ==== BAR0 の初期化セグメント(Initialization Segment)
 
@@ -340,39 +358,13 @@ NIC が DMA で読む、ホストのメモリの 64 バイト(QP・CQ ごと)。
 |0x7004 |HOST_ENDIANNESS |中身 0 を書く(Linux の mlx5_core と同じ)。HCA の能力を読む前
 |0x5003 |PMTU |ポート 1 の MTU。[4..5] 上限、[8..9] admin_mtu(書く)、[12..13] oper_mtu(今の値)。値はフレーム長(IP の MTU + 22)。`g_bfm_port_mtu` が 0 でなければ書く
 |0x5006 |PAOS |ポート 1 の状態。admin_status = UP(byte 2 = 1)と ase(byte 4 bit7)を書いて上げ、oper_status(byte 3 の下位 4bit)が 1 になるのを待つ(`g_bfm_link_wait_ms`)
-|0x907f |MCAM |FW の更新の前に読む(72 バイト)。byte 11 の bit0〜3 = MCQS・MCQI・MCC・MCDA に対応している。HCA の能力の `mcam_reg`(bit 0x1a9)が 1 のときだけ読む
-|0x9060 |MCQS |部品の一覧(16 バイト)。[2..3] component_index を入れて読み、[6..7] identifier(1 = FW の像 BOOT_IMG)、byte 0 bit7 last_index_flag(最後の部品)
-|0x9061 |MCQI |部品の情報(頭 24 バイト + 情報)。[2..3] component_index、byte 11 info_type(0 = 能力、1 = 版)、[22..23] data_size、byte 0 bit7 read_pending_component(1 = 次の起動の像)。能力は 24 バイト目から: [8..11] max_component_size、byte 12 の上位 4bit log_mcda_word_size、[14..15] mcda_max_write_size、byte 16 bit4 match_psid
-|0x9062 |MCC |FW の更新の手順(32 バイト)。byte 3 instruction(1 LOCK・2 RELEASE・3 UPDATE_COMPONENT・4 VERIFY_COMPONENT・6 ACTIVATE・8 CANCEL)、[6..7] component_index、[9..11] update_handle、[16..19] component_size。読むと byte 14 error_code、byte 15 の下位 4bit control_state(0 IDLE・1 LOCKED・3 DOWNLOAD・4 VERIFY・5 APPLY・6 ACTIVATE)
-|0x9063 |MCDA |部品のデータ(頭 16 バイト + データ)。[1..3] update_handle、[4..7] offset、[10..11] size、16 バイト目からデータ(4 バイトずつ、ホスト順の値をビッグエンディアンで)
+|0x907f |MCAM |FW の更新の前に読む。対応しているレジスタの印(<<cx-fw>>)
+|0x9060 / 0x9061 / 0x9062 / 0x9063 |MCQS / MCQI / MCC / MCDA |FW の更新(<<cx-fw>>)
+|0x9028 |MFRL |カードのリセットの前に level 3 を書く(<<cx-fw>>)
 |===
 
-MCC / MCDA などは 16 バイトより長いので、FW の更新(`src/bfm_fw.c`)は自分の作業域で ACCESS_REG を組む
-(長い分はメールボックスの鎖で渡す)。手順は Linux の mlxfw と同じ: FSM が IDLE か確かめる → LOCK → LOCKED を待つ →
-UPDATE_COMPONENT → DOWNLOAD を待つ → MCDA で全部渡す → VERIFY_COMPONENT → LOCKED を待つ → ACTIVATE → LOCKED を待つ → RELEASE。
-状態を待つところは 200ms ごとに MCC を読み、30 秒で時間切れ。error_code が 0 でなければ失敗(2 ハッシュが合わない・
-3 当てはまらない像・8 形が正しくない など)で、CANCEL・RELEASE を出して終わる。FW は今動いている像とは別の置き場に書くので、
-切り替える(ACTIVATE)までは次の起動の像は変わらない。新しい FW は装置のリセットか電源の入れ直しで有効になる。
-
-MCDA で渡す部品は、配布の .bin(フラッシュ全体の像。ConnectX-4 Lx で 16MB)そのものではない。mstflint が MFA2 を作るとき・
-MCC で書くときと同じく(`FwExtract4MBImage()`)、像の目次(ITOC。先頭から 4KiB ごとに探す。印は "ITOC" と決まった 12 バイト、
-頭と欄は 32 バイトで、最初の 7 語の CRC16(多項式 0x100b)を最後の語に持つ)を読み、相対番地の欄の終わりまでを渡す。
-先頭の 16 バイト(印 "MTFW")と、ボードごとの情報(MAC・GUID・VPD など。フラッシュの終わりに絶対番地で置かれる)を指す
-device_data の欄は 0xFF にして渡す。ConnectX-4 Lx の 14.29.1016 では、部品の上限 7MB・MCDA 1 回 128 バイトで、
-16,744,768 バイトの .bin のうち 4,840,404 バイトを渡す。
-
-書いた FW はカードのリセットで動き出す。カードだけのリセットは MFRL(0x9028、8 バイト。`bfm_fw_mfrl_step()`)で頼む:
-byte 7 reset_level(対応しているものの印。bit0 live-patch・bit3 PCI のリセット・bit6 warm reboot)、byte 6 reset_type、
-byte 5 の上位 3bit pci_reset_req_method(0 = リンクの切断)と下位 4bit reset_state。reset_level に 0x08(level 3)を書いて
-ドライバを外し(TEARDOWN_HCA・Bus Master を落とす)、上流のポートでリンクを落として繋ぎ直すと、FW がカード全体(全部の function)を
-リセットして新しい像で立ち上がる(`bfm_fw_reset()`)。リンクの落とし方は pci_reset_req_method に従う:
-0 なら上流のポートの Link Control の Link Disable(bit 4)を 500ms 立てて戻し、1 なら Bridge Control の Secondary Bus Reset
-(bit 6)を 2ms 立てて戻す。その後、上流のポートの Link Status の Data Link Layer Link Active(bit 13。Link Capabilities の
-bit 20 が報告できる印)を待ち、100ms 待ち、ベンダ ID が読めるのを待つ(`bfm_pci_reset_step()`)。リセットで設定空間は初期値に
-戻るので、BAR・Command・Device Control(Max Payload Size。上流のポートより小さいままだと、上流からの大きい TLP を受けられない)・
-Link Control・Device Control 2 を前の値に書き戻す。ConnectX-4 Lx では reset_level 0xc8・落とし方 0 で、リンクは 43ms で上がり、
-立ち上げ直した bfmem に FW が新しい版を返した。
-MCAM の byte 18 bit0 が MFRL への対応の印(ConnectX-4 Lx は 14.29.1016 で 0・14.32.1912 で 1。0 でも MFRL は読み書きできた)。
+FW の更新とカードのリセットのレジスタは 16 バイトより長いものがあるので、`src/bfm_fw.c` は自分の作業域で `ACCESS_REG` を組む
+(長い分はメールボックスの鎖で渡す)。
 
 ==== HCA の能力(QUERY_HCA_CAP / SET_HCA_CAP)
 
@@ -381,7 +373,7 @@ MCAM の byte 18 bit0 が MFRL への対応の印(ConnectX-4 Lx は 14.29.1016 �
 [cols="1,2,4",options="header"]
 |===
 |種類 |読む欄(能力の先頭からのバイト) |bfmem の使い方
-|general(0) |page_request_disable([0] bit1)・log_max_ra_req_qp([41])・log_max_ra_res_qp([43])・port_type([54] bit1:0)・roce([67] bit2)・bf([76] bit7)・log_bf_reg_size([77] bit4:0)・umr_fence([65] bit5:4)・sho([66] bit0)・num_vhca_ports([194]) |port_type が 1(Ethernet)でなければ断る。BlueFlame の窓の大きさ・同時に出せる read / atomic の数・T10-DIF のオフロードの有無を決める。値は変えずにそのまま書き戻す
+|general(0) |page_request_disable([0] bit1)・log_max_ra_req_qp([41])・log_max_ra_res_qp([43])・port_type([54] bit1:0)・roce([67] bit2)・bf([76] bit7)・log_bf_reg_size([77] bit4:0)・umr_fence([65] bit5:4)・sho([66] bit0)・mcam_reg([53] bit6)・num_vhca_ports([194]) |port_type が 1(Ethernet)でなければ断る。BlueFlame の窓の大きさ・同時に出せる read / atomic の数・T10-DIF のオフロードの有無、FW の更新で MCAM を読めるかを決める。値は変えずにそのまま書き戻す
 |atomic(3) |atomic_req_8B_endianness_mode([8] bit7:6)と、それに対応しているか([8] bit1)・atomic_operations([18..19])・atomic_size_qp([22..23]) |endianness_mode を 1(ホスト順)にして書く。できない装置は断る。QP の atomic_mode を決める
 |roce(4) |qp_ts_format([3] bit1:0) |0 でなければ QP の ts_format を 1 にする(ConnectX-7 への備え)
 |===
@@ -486,8 +478,79 @@ image::hw_mailbox.drawio.svg[コマンドとメールボックス]
 |0x761 |SET_ROCE_ADDRESS |GID の表の 0 番に GID と MAC
 |0x800 |ALLOC_PD |保護ドメイン
 |0x802 |ALLOC_UAR |UAR ページ
-|0x805 |ACCESS_REG |HOST_ENDIANNESS・PMTU・PAOS
+|0x805 |ACCESS_REG |HOST_ENDIANNESS・PMTU・PAOS、FW の更新(MCAM・MCQS・MCQI・MCC・MCDA)、カードのリセット(MFRL)
 |===
+
+[[cx-fw]]
+=== FW の更新とカードのリセット
+
+フラッシュの FW の書き換え(`bfm_fw_update()`)は、FW 自身に書かせる。方式は Linux の mlx5_core + mlxfw と同じで、
+FW の中の更新の手順(FSM)を `ACCESS_REG` のレジスタで進める。書いた FW は、電源の入れ直しか、カードのリセット
+(`bfm_fw_reset()`)で動き出す。どちらも待たずに進める(FW のコマンド・FSM の状態待ち・リンクの待ちで `BFM_INPROGRESS` を返す)。
+
+==== 使うレジスタ
+
+[cols="1,1,5",options="header"]
+|===
+|番号 |名前 |中身(先頭からのバイト)
+|0x907f |MCAM |72 バイト。byte 11 の bit0〜3 = MCQS・MCQI・MCC・MCDA に対応している。byte 18 bit0 = MFRL に対応している。HCA の能力の `mcam_reg` が 1 のときだけ読む
+|0x9060 |MCQS |部品(component)の一覧。16 バイト。[2..3] component_index を入れて読み、[6..7] identifier(1 = FW の像 BOOT_IMG)、byte 0 bit7 last_index_flag(最後の部品)
+|0x9061 |MCQI |部品の情報。頭 24 バイト + 情報。[2..3] component_index、byte 11 info_type(0 = 能力、1 = 版)、[22..23] data_size、byte 0 bit7 read_pending_component(1 = 次の起動の像)。
+能力は 24 バイト目から: [8..11] max_component_size、byte 12 の上位 4bit log_mcda_word_size、[14..15] mcda_max_write_size、byte 16 bit4 match_psid(PSID を確かめる)
+|0x9062 |MCC |FSM の命令と状態。32 バイト。byte 3 instruction(1 LOCK・2 RELEASE・3 UPDATE_COMPONENT・4 VERIFY_COMPONENT・6 ACTIVATE・8 CANCEL)、[6..7] component_index、[9..11] update_handle、[16..19] component_size。
+読むと byte 14 error_code、byte 15 の下位 4bit control_state(0 IDLE・1 LOCKED・3 DOWNLOAD・4 VERIFY・5 APPLY・6 ACTIVATE)
+|0x9063 |MCDA |部品のデータ。頭 16 バイト + データ。[1..3] update_handle、[4..7] offset、[10..11] size、16 バイト目からデータ(4 バイトずつ、ホスト順の値をビッグエンディアンで)
+|0x9028 |MFRL |8 バイト。byte 7 reset_level(読むと対応しているものの印。bit0 live-patch・bit3 PCI のリセット(level 3)・bit6 warm reboot)、byte 6 reset_type、
+byte 5 の上位 3bit pci_reset_req_method(0 = Link Disable、1 = Secondary Bus Reset)と下位 4bit reset_state
+|===
+
+==== FW の更新の手順
+
+. MCAM で、MCQS・MCQI・MCC・MCDA に対応しているか確かめる(無ければ何もしない)。
+. MCQS で、FW の像の部品(identifier = BOOT_IMG)の番号を探す。
+. MCQI で部品の能力を読み、渡す像の大きさが max_component_size に収まるかを確かめる。PSID を確かめない装置
+  (match_psid = 0)には、`g_bfm_fw_allow_no_psid_check` が 0 なら書かない。MCDA 1 回の長さは mcda_max_write_size と 2KiB の小さいほう。
+. MCC を読み、FSM が IDLE か確かめる(ほかの道具・ほかのポートが更新していれば何もしない)。
+. LOCK → LOCKED を待つ → UPDATE_COMPONENT → DOWNLOAD を待つ → MCDA で全部渡す → VERIFY_COMPONENT → LOCKED を待つ →
+  ACTIVATE → LOCKED を待つ → RELEASE。確かめるだけ(`BFM_FW_VERIFY_ONLY`)なら ACTIVATE の代わりに CANCEL。
+
+* 状態を待つところは 200ms ごとに MCC を読み、30 秒で時間切れ(mlxfw と同じ)。
+* error_code が 0 でなければ失敗(2 ハッシュが合わない・3 当てはまらない像・8 形が正しくない など)。部品の更新を始めていれば CANCEL、
+  手順を取っていれば RELEASE を出してから終わる。
+* FW は今動いている像とは別の置き場に書くので、ACTIVATE までは次の起動の像は変わらない。ACTIVATE は VERIFY が通った後にしか出さない。
+* 前後で MCQI の版(info_type 1)を読み、今動いている版と次の起動の版を表示する。
+
+MCDA で渡す部品は、配布の .bin(フラッシュ全体の像。ConnectX-4 Lx で 16MB)そのものではない(そのまま渡すと FW が受けない)。
+mstflint が MFA2 を作るとき・MCC で書くときと同じく(`FwExtract4MBImage()`)、像の目次(ITOC。先頭から 4KiB ごとに 64KiB まで探す。
+印は "ITOC" と決まった 12 バイト、頭と欄は 32 バイトで、最初の 7 語の CRC16(多項式 0x100b)を最後の語に持つ)を読み、
+相対番地の欄の終わりまでを渡す。先頭の 16 バイト(印 "MTFW")と、ボードごとの情報(MAC・GUID・VPD など。フラッシュの終わりに
+絶対番地で置かれる)を指す device_data の欄は 0xFF にして渡す。印・CRC が合わない(MFA2・zip・壊れたファイル)なら書かない。
+ConnectX-4 Lx の 14.29.1016 では、部品の上限 7MB・MCDA 1 回 128 バイトで、16,744,768 バイトの .bin のうち 4,840,404 バイトを渡す。
+
+==== カードのリセット(`bfm_fw_reset()`)
+
+MFRL に level 3 を書いた後に PCIe のリンクが落ちると、FW はカード全体(全部の function)をリセットし、次の起動の像で立ち上がる。
+リンクは上流のポート(ルートポートかスイッチの下りポート)で落とす(Linux の mlx5 の `mlx5_pci_link_toggle()` / `mlx5_pci_reset_bus()` と同じ)。
+
+[cols="1,5",options="header"]
+|===
+|手順 |中身
+|確かめる |上流のポートの設定空間が読め、ブリッジで、ルートポートかスイッチの下りポートであること(`bfm_pci_reset_check()`)。ここで断ったときは何も変えない
+|MFRL を書く |MFRL を読み、reset_level に level 3(bit3)があることと pci_reset_req_method を確かめ、reset_level に 0x08 を書く(`bfm_fw_mfrl_step()`)。
+FW の更新の途中なら断る。ここまでは bfmem は動いたまま
+|止める |全部のポートを止める(接続を畳み、`TEARDOWN_HCA`、Bus Master を落とす)。`bfm_run()` は表を進めなくなる
+|リンクを落とす |使っている全部のポートの設定空間を覚え(<<cx-reg>> の PCIe の設定空間の表)、pci_reset_req_method に従って上流のポートで
+Link Disable を 500ms(0)か Secondary Bus Reset を 2ms(1)立てて戻す(`bfm_pci_reset_begin()`)
+|戻す |リンクが上がる(Data Link Layer Link Active)のを最大 2 秒待ち、100ms 待ち、全部のポートで Vendor ID が読めるのを最大 2 秒待ち、
+覚えた設定空間を書き戻す(`bfm_pci_reset_step()`)。最後に移植層を閉じる(立ち上げ直すのは呼び出し側)
+|===
+
+* リセットで設定空間は初期値に戻る(BAR が 0、Max Payload Size が 128)。Max Payload Size を戻さないと、上流のポートより小さいままで、
+  上流からの大きい TLP を受けられない。
+* カードの全部の function がリセットされるので、OS がもう片方の function を使っていないこと(Linux なら 2 つの PF を両方 vfio-pci にする)。
+* ConnectX-4 Lx では reset_level 0xc8・落とし方 0 で、リンクは 43ms で上がり、立ち上げ直した bfmem に FW が新しい版を返した。
+* MCAM の MFRL の印は ConnectX-4 Lx の 14.29.1016 で 0・14.32.1912 で 1 だった(0 でも MFRL は読み書きできた)。bfmem は MCAM の印を見ずに
+  MFRL を読んでみて、読めなければ断る。Linux の `devlink … fw_activate` は MCAM の印を見るので、14.29.1016 では断られる。
 
 [[cx-eq]]
 === EQ(イベント)
@@ -652,6 +715,7 @@ CQE は 64 バイト。
 * FW のページの要求量は装置で大きく違うので、上限は `g_bfm_fw_pages_max`(足りなければ立ち上げ(`mlx5_hca_init_step()`)が要る数を表示する)。
 * FW の起動待ちの上限は 120 秒(ConnectX-7 は長くかかることがある)。
 * T10-DIF のオフロード(能力の sho)は ConnectX-4 Lx に無い。ConnectX-5 以降での動きは確かめていない。
+* FW の像の切り出し(ITOC を読む)は FS3 の形(ConnectX-4 / 4 Lx)に合わせてある。ほかの形の像は印・CRC が合わず、書かずに断る。
 
 == `include/bfm_port.h`
 
