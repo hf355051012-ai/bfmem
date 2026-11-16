@@ -1512,6 +1512,28 @@ def write_adoc(allf, descs):
 bfmem(ConnectX の BlueFlame でノード間のメモリへ write / read / atomic を出すライブラリ)の、
 すべてのソースファイルの全関数の仕様。最初の章が API の一覧で、その後はソースファイルごとに章を、
 関数ごとに節を分ける。
+
+[discrete]
+=== ソースの入手
+
+ソースは GitHub の公開リポジトリ https://github.com/hf355051012-ai/bfmem に置いてある(ブランチは `master`。認証は要らない)。
+初めて取るときは clone する。
+
+[source,bash]
+----
+git clone https://github.com/hf355051012-ai/bfmem.git
+cd bfmem
+----
+
+2 回目からは、そのフォルダの中で pull して最新にする。
+
+[source,bash]
+----
+git pull
+----
+
+git を使えない機械では、https://github.com/hf355051012-ai/bfmem/archive/refs/heads/master.zip から ZIP でも取れる。
+ビルドは `make`(手順は `README.md`)。この仕様書は `doc/spec/gen.py` が作る(公開の版は https://hf355051012-ai.github.io/bfmem/spec.html)。
 """)
     out.append(api_section(allf, descs))
     out.append("""

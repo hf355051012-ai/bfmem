@@ -961,6 +961,29 @@ body.book #toc,body.book #preamble,body.book h1.sect0,body.book .sect1>h2{page-b
 すべてのソースファイルの全関数の仕様。最初の章が API の一覧で、その後はソースファイルごとに章を、
 関数ごとに節を分ける。</p>
 </div>
+<h3 id="_ソースの入手" class="discrete">ソースの入手</h3>
+<div class="paragraph">
+<p>ソースは GitHub の公開リポジトリ <a href="https://github.com/hf355051012-ai/bfmem" class="bare">https://github.com/hf355051012-ai/bfmem</a> に置いてある(ブランチは <code>master</code>。認証は要らない)。
+初めて取るときは clone する。</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="highlight"><code class="language-bash" data-lang="bash">git clone https://github.com/hf355051012-ai/bfmem.git
+cd bfmem</code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p>2 回目からは、そのフォルダの中で pull して最新にする。</p>
+</div>
+<div class="listingblock">
+<div class="content">
+<pre class="highlight"><code class="language-bash" data-lang="bash">git pull</code></pre>
+</div>
+</div>
+<div class="paragraph">
+<p>git を使えない機械では、https://github.com/hf355051012-ai/bfmem/archive/refs/heads/master.zip から ZIP でも取れる。
+ビルドは <code>make</code>(手順は <code>README.md</code>)。この仕様書は <code>doc/spec/gen.py</code> が作る(公開の版は <a href="https://hf355051012-ai.github.io/bfmem/spec.html)。" class="bare">https://hf355051012-ai.github.io/bfmem/spec.html)。</a></p>
+</div>
 </div>
 </div>
 <div class="sect1">
@@ -46066,7 +46089,7 @@ MB/s はデータ 512 バイト × ブロックの数で数える(PI の 8 バ�
 </div>
 <div id="footer">
 <div id="footer-text">
-Last updated 2026-11-14 20:36:45 +0900
+Last updated 2026-11-17 00:04:19 +0900
 </div>
 </div>
 </body>
